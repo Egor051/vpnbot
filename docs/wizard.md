@@ -304,7 +304,7 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 |---|---|
 | removing a protocol from the server | «Модули протоколов → Удалить с сервера» (the final button) |
 | disabling a protocol (deletes all its keys and accesses) | «Модули протоколов → Отключить» (the final button) |
-| every change of a relay — on/off, «в подписках», host, rename, source IPs, note, the source IP offer | the button on the relay's page (a typed step checks the elevation again) |
+| every change of a relay — on/off, «➕ Добавить в подписки» / «➖ Убрать из подписок», «👁 в базовых» (of a relay and of the main server), host, rename, source IPs, note, the source IP offer | the button on the relay's page or the relay list; «✅ Выполнить» under the subscriptions plan (a typed step checks the elevation again) |
 | deleting a relay (record only included) / together with its keys | «Relay → Удалить» (the final button) |
 | wizard: diagnostic dump | start, and the dump file from the history |
 | wizard: update the bot | start and «✅ Применить» |

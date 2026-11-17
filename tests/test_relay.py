@@ -243,6 +243,9 @@ async def _world(tmp_path: Path, *, relay_enabled: bool | None = True, **overrid
             host=RELAY_HOST,
             source_ips=(ipaddress.IPv4Network("198.51.100.7/32"),),
             enabled=relay_enabled,
+            # The premise of this module: ru1 is «в подписках» (a new relay starts
+            # out of them; tests/test_relay_subscriptions.py covers that).
+            in_subscriptions=True,
             now="2026-01-01T00:00:00+00:00",
         )
     catalog = RelayCatalog(RelaySnapshot.of(await RelayRepository(db).list_all()))

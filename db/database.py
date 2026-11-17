@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 44
+CURRENT_SCHEMA_VERSION = 45
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -423,6 +423,10 @@ class Database:
             await self._migrate_v44()
             await self._set_schema_version(44)
             version = 44
+        if version < 45:
+            await self._migrate_v45()
+            await self._set_schema_version(45)
+            version = 45
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -2021,6 +2025,32 @@ class Database:
             )
         if "relay_host" not in pairing_cols:
             await self.conn.execute("ALTER TABLE relay_pairings ADD COLUMN relay_host TEXT")
+
+    async def _migrate_v45(self) -> None:
+        # Server visibility in BASIC subscriptions (docs/subscription.md). One
+        # idempotent ADD COLUMN, mirrored in schema.sql:
+        #
+        #   relays.basic_visible — 0: the subscription endpoint does not serve this
+        #   relay's children in a BASIC bundle (EXTENDED bundles are unaffected).
+        #   NOT NULL DEFAULT 1, so every existing relay keeps being served exactly
+        #   as before. A render-time filter only: no key, no Xray client and no
+        #   bundle row changes when it flips, so the switch is instant and
+        #   reversible. The main server's twin of this flag is the schema_meta key
+        #   repositories.relays.MAIN_BASIC_VISIBLE_META_KEY (absent = visible), so
+        #   it needs no column here.
+        #
+        # Deliberately NOT part of this migration: relays.in_subscriptions keeps
+        # DEFAULT 1. A new relay is created with 0, but that value is written by
+        # the code (RelayRepository.create / RelayService), not by the column
+        # default: SQLite cannot change a column default without rebuilding the
+        # table, and rebuilding relays inside bootstrap's transaction (where
+        # PRAGMA foreign_keys cannot be switched off) would fire the ON DELETE
+        # SET NULL of relay_pairings.relay_id on the DROP and orphan pending
+        # attach codes. Every insert names the column explicitly, so the default
+        # is never used.
+        cols = await self._table_columns("relays")
+        if "basic_visible" not in cols:
+            await self.conn.execute("ALTER TABLE relays ADD COLUMN basic_visible INTEGER NOT NULL DEFAULT 1")
 
     async def _table_exists(self, table_name: str) -> bool:
         row = await self.conn.execute_fetchone(

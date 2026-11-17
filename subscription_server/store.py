@@ -129,6 +129,11 @@ class BundleView:
     # to "no relays" (every relay child skipped) for callers that build a view by
     # hand.
     relays: RelaySnapshot = EMPTY_RELAYS
+    # Whether a BASIC bundle serves the main server's (direct) children — the
+    # schema_meta flag read in the same pass (repositories.relays). The relays'
+    # own flag rides in ``relays`` (Relay.basic_visible). True for a view built
+    # by hand, which is exactly the behaviour before this setting existed.
+    main_basic_visible: bool = True
 
     @property
     def expires_at(self) -> str | None:
@@ -194,6 +199,7 @@ class ReadOnlyBundleStore:
                 active = tuple(key for key in children if key.status is VpnKeyStatus.ACTIVE)
                 totals = await self._vpn_keys.sum_traffic_for_owner(bundle.user_id, ALL_TIME)
                 relays = RelaySnapshot.of(await self._relays.list_all())
+                main_basic_visible = await self._relays.main_basic_visible()
             except (aiosqlite.Error, OSError, ValueError) as exc:
                 self._infra_failures += 1
                 logger.error(
@@ -206,7 +212,11 @@ class ReadOnlyBundleStore:
         # no traffic rows at all still yields no counter rather than a fabricated
         # zero, which is the property the header had before and keeps.
         return BundleView(
-            bundle=bundle, keys=active, traffic=totals if totals.measured else None, relays=relays
+            bundle=bundle,
+            keys=active,
+            traffic=totals if totals.measured else None,
+            relays=relays,
+            main_basic_visible=main_basic_visible,
         )
 
     async def load_relays(self) -> RelaySnapshot:

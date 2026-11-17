@@ -817,6 +817,7 @@ def make_relay(
     enabled: bool = True,
     in_subscriptions: bool = True,
     note: str | None = None,
+    basic_visible: bool = True,
 ) -> Any:
     """A :class:`models.dto.Relay` as the relays table would hold it."""
     from config.validators import parse_ipv4_networks
@@ -835,6 +836,7 @@ def make_relay(
         updated_at="2026-01-01T00:00:00+00:00",
         created_by=None,
         updated_by=None,
+        basic_visible=basic_visible,
     )
 
 

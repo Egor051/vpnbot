@@ -9,10 +9,10 @@ from datetime import datetime, timezone
 from bot.formatters import hysteria2_key_link
 from config.settings import Settings
 from models.dto import VpnKey
-from models.enums import VpnKeyType
+from models.enums import KeyBundleKind, VpnKeyType
 from services.key_bundles import subscription_sort_key
 from services.key_naming import NameStyle, bundle_name_style, key_display_name, key_member_name
-from services.relay import RelayCatalog, RelaySnapshot, relay_available
+from services.relay import RelayCatalog, RelaySnapshot, basic_visible_child, relay_available
 from services.xray import XrayService
 from subscription_server.store import BundleView
 
@@ -140,6 +140,11 @@ def render_links(
     the proxies are excluded from ``bundle_composition``), so anything else is a
     corrupt row and fails the whole render rather than being skipped.
 
+    A BASIC bundle additionally hides the children of every server switched out
+    of «👁 в базовых» (the main server's flag for direct children, a relay's
+    ``basic_visible`` for its own) — see :func:`_basic_visible_children`. EXTENDED
+    bundles serve every child as before.
+
     *clock* is read ONCE per response: every child is rendered at the same instant,
     which only matters to the rotating spiderX (XRAY_SPIDER_X_ROTATION_HOURS).
     """
@@ -147,7 +152,7 @@ def render_links(
     renderer = _VlessLinkRenderer(settings, clock, relays)
     now_unix = renderer.link_instant()
     style = bundle_name_style(view.bundle.kind)
-    links: list[str] = []
+    servable: list[VpnKey] = []
     for key in _ordered_children(view.keys, relays):
         if key.relay is not None and not relay_available(relays, key.relay):
             logger.warning(
@@ -157,6 +162,11 @@ def render_links(
                 key.relay,
             )
             continue
+        servable.append(key)
+    if view.bundle.kind is KeyBundleKind.BASIC:
+        servable = _basic_visible_children(view, servable)
+    links: list[str] = []
+    for key in servable:
         if key.key_type is VpnKeyType.XRAY:
             links.append(renderer.vless_link(key, now_unix=now_unix, style=style))
         elif key.key_type is VpnKeyType.HYSTERIA2:
@@ -166,6 +176,32 @@ def render_links(
                 f"key {key.id} of type {key.key_type.value} cannot ride a subscription"
             )
     return tuple(links)
+
+
+def _basic_visible_children(view: BundleView, servable: list[VpnKey]) -> list[VpnKey]:
+    """The children of a BASIC bundle on servers shown «👁 в базовых».
+
+    A pure render-time filter: the hidden children stay provisioned, in Xray and
+    in the database, so the switch is instant and reversible. Fail-open: when the
+    filter would leave nothing to serve — every server with a child here hidden,
+    which the admin panel refuses but a relay switched off or deleted can still
+    cause — the bundle is served unfiltered with a WARNING. An empty subscription
+    would 404 and leave the client with nothing; showing a server the admin meant
+    to hide is the lesser harm.
+    """
+    visible = [
+        key
+        for key in servable
+        if basic_visible_child(view.relays, key.relay, main_visible=view.main_basic_visible)
+    ]
+    if visible or not servable:
+        return visible
+    logger.warning(
+        "subscription: bundle_id=%s — every server of this basic subscription is hidden «в базовых»; "
+        "serving it unfiltered (fail-open)",
+        view.bundle.id,
+    )
+    return servable
 
 
 def _ordered_children(keys: tuple[VpnKey, ...] | list[VpnKey], relays: RelaySnapshot) -> list[VpnKey]:

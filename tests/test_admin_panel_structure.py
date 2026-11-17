@@ -17,6 +17,7 @@ screens hard-coded in Russian — each of which one of these tests now catches.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import asyncio
 import re
 from collections.abc import Callable, Iterator
@@ -248,6 +249,23 @@ CASES: list[tuple[str, Callable[[], InlineKeyboardMarkup], str | None]] = [
     ("relays", lambda: kb_rel.relays_list_keyboard(
         [RelayOverview(_relay(), 3), RelayOverview(_relay(agent=True), 0)], {}, [_pairing(), _pairing("attach")]
     ), None),
+    *[
+        (f"relays_main_basic:{visible}", lambda visible=visible: kb_rel.relays_list_keyboard(
+            [RelayOverview(_relay(), 3)], {}, (), main_basic_visible=visible
+        ), None)
+        for visible in (True, False)
+    ],
+    ("relay_card_out_of_subs", lambda: kb_rel.relay_card_keyboard(
+        dataclasses.replace(_relay(), in_subscriptions=False, basic_visible=False)
+    ), None),
+    *[
+        (f"relay_subs_confirm:{action}", lambda action=action: kb_rel.relay_subs_confirm_keyboard(7, action), None)
+        for action in kb_rel.SUBS_ACTIONS
+    ],
+    *[
+        (f"relay_subs_report:{action}", lambda action=action: kb_rel.relay_subs_report_keyboard(7, action, retry=True), None)
+        for action in kb_rel.SUBS_ACTIONS
+    ],
     ("relay_card", lambda: kb_rel.relay_card_keyboard(_relay(), suggest_source_ip="203.0.113.5"), None),
     ("relay_card_agent", lambda: kb_rel.relay_card_keyboard(_relay(agent=True)), None),
     ("relay_card_attach_pending", lambda: kb_rel.relay_card_keyboard(_relay(), pending_attach=_pairing("attach")), None),
@@ -344,6 +362,8 @@ PARENTS: list[tuple[str, Callable[[], InlineKeyboardMarkup], str]] = [
     ("modules", lambda: kb_mod.modules_panel_keyboard([]), "admin:grp:infra"),
     ("relays", lambda: kb_rel.relays_list_keyboard([]), "admin:grp:infra"),
     ("relay_card", lambda: kb_rel.relay_card_keyboard(_relay()), "admin:relays"),
+    ("relays_main_basic", lambda: kb_rel.relays_list_keyboard([], main_basic_visible=False), "admin:grp:infra"),
+    ("relay_subs_report", lambda: kb_rel.relay_subs_report_keyboard(7, "add", retry=True), "admin:relays"),
     ("aio_panel", kb_aio.admin_bundles_panel_keyboard, "admin:grp:infra"),
     ("warp", lambda: kb_warp.warp_main_keyboard(WarpState(routes_count=2), _split("on")), "admin:grp:infra"),
     ("warp_settings", lambda: kb_warp.warp_settings_keyboard(WarpState(routes_count=2)), "admin:warp"),

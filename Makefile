@@ -46,7 +46,7 @@ typecheck:
 # steps of .github/workflows/ci.yml. Raise them there and here together.
 FLOOR_REPOSITORIES = 88
 FLOOR_WARP         = 89
-FLOOR_SERVICES     = 82
+FLOOR_SERVICES     = 83
 FLOOR_ADAPTERS     = 76
 
 test:

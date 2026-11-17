@@ -79,16 +79,33 @@ change it is the superadmin's bulk reconcile, see
   **twin's mark**: `xray_http_multi_ab12c_🇷🇺➜🟠` (relay label `🇷🇺➜`).
 - Relay members are provisioned for every relay that is **enabled and «в подписках»** in the
   admin panel when the bundle is created, in groups ordered by the relay's `id`: all direct
-  members, then those through relay #1, then relay #2, … A bundle created with no such relay has
-  none, and adding or switching on a relay later does not top an existing bundle up by itself —
-  the superadmin's bulk reconcile does
-  ([Bringing existing bundles in line](#bringing-existing-bundles-in-line)).
+  members, then those through relay #1, then relay #2, … A new relay is created **out of**
+  «в подписках». **«➕ Добавить в подписки»** on the relay's page marks it «в подписках» and at
+  once adds its members to **every** active subscription; **«➖ Убрать из подписок»** deletes them
+  everywhere; nothing else in the subscriptions is touched
+  ([docs/relay.md](relay.md#in-subscriptions-an-action-on-every-subscription)).
 - The endpoint reads the `relays` table on every request, so a relay's host or label changed in
   the panel is served on the next fetch with no restart.
 - A relay member whose relay is switched off or deleted is **skipped** with a `WARNING` in the
   log and the rest of the subscription is served (`200`). This is the one deliberate exception to
   "a child that cannot render fails the whole response": switching a relay off is an operator
   decision, not a corrupt row. A bundle left with nothing to serve is still the usual `404`.
+
+#### Server visibility in basic subscriptions
+
+A **basic** subscription does not serve the children of a server hidden «в базовых»: for the main
+server its direct children (the «👁 Основной сервер в базовых» switch in «🛰 Relay», the
+`basic_visible_main` key in `schema_meta`), for a relay its own children (`relays.basic_visible`,
+«👁 В базовых» on the relay's page). Every server is shown by default.
+
+- It is **only a render filter** in the endpoint: keys, Xray clients, bundle rows and accounts do
+  not change, so the switch is instant and reversible — a client gets the new list on its next
+  subscription update. **Extended** subscriptions are never filtered.
+- The bot refuses to hide a server so that basic subscriptions have no visible one left (the main
+  server, or a relay that is enabled, «в подписках» and «👁 в базовых»). If it happens anyway (a
+  relay was switched off or deleted — never refused), the endpoint serves the basic subscription
+  **unfiltered** and logs `WARNING … serving it unfiltered (fail-open)`: showing a hidden server
+  beats serving an empty subscription (`404`).
 
 A standalone key's link is named `<label>_[<relay label>]<SERVER_FLAG_EMOJI>` everywhere the
 bot shows it (config screen, QR, create wizard) — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay🇫🇮`
@@ -98,8 +115,9 @@ e.g. `🇷🇺➜` → `hy2_x7k2p_🇷🇺➜🇫🇮`). The relay label is foll
 
 ### Bringing existing bundles in line
 
-A bundle keeps the composition it was created with: adding or switching on a relay, or turning
-a protocol on or off, does not change existing bundles by itself. The superadmin brings them in
+A bundle keeps the composition it was created with: turning a protocol on or off does not change
+existing bundles by itself (one relay's members are added and removed by the «в подписках»
+buttons on its page, [above](#two-kinds-of-all-in-one)). The superadmin brings them in
 line from the admin panel → «🧩 Протоколы и маршрутизация» → **«🔗 All-in-One»** (shown only while `SUBSCRIPTION_ENABLED=true`):
 
 - **«Перевести все подписки в базовый вид»** — every active bundle gets the composition a
@@ -108,7 +126,7 @@ line from the admin panel → «🧩 Протоколы и маршрутиза�
   traffic archived to the deleted-key totals, audit — the same path as deleting a key), the
   missing members are created, and the kind becomes `basic`.
 - **«Дополнить все подписки по текущим настройкам»** — the same without changing the kind:
-  e.g. adds the members through a relay after it was added or put «в подписки».
+  e.g. adds the keys of a protocol switched on after the subscriptions were issued.
 
 Both start with a **dry run** over every active bundle — «bundles N, keys to create X, to
 delete Y», plus the bundles that will be skipped and why — and change nothing until confirmed.

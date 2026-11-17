@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **«В подписках» is an action on every issued subscription (docs/relay.md#in-subscriptions-an-action-on-every-subscription).**
+  A new relay is now created **out of** subscriptions (`in_subscriptions=0`, through the pairing
+  and `RelayService.create`; existing relays keep their value). The relay card's toggle is
+  replaced by **«➕ Добавить в подписки»** / **«➖ Убрать из подписок»**: a dry run over every
+  active bundle and a plan screen (subscriptions and keys affected, skipped ones with the reason),
+  then — after «✅ Выполнить» (TOTP-gated like every relay change) — the flag flips and a
+  background run with progress and a final report adds or deletes **only this relay's members**
+  (basic: 2, extended: 5) in every active bundle. Kind, direct keys, VLESS (HTTP) and other
+  relays' members are never touched; the guarantees of the All-in-One reconcile hold (rollback
+  of a failed create, shared `expires_at` and VLESS fingerprint, the token unchanged, an anomalous
+  bundle skipped with its reason, a re-run finishes a partial one). A disabled relay cannot be
+  added. The runs share the All-in-One runner: one bulk run per process. New
+  `KeyBundleService.reconcile_relay_members`; audit `key_bundle_relay_members_added` /
+  `key_bundle_relay_members_removed`. The hint pointing to «All-in-One → Дополнить» after the
+  toggle is gone; the old toggle button in the chat history opens the plan and changes nothing.
+  `relays.in_subscriptions` keeps its `DEFAULT 1` (a default change needs a table rebuild, which
+  inside bootstrap's transaction would null pending pairing codes' `relay_id`): the code writes
+  the column explicitly on every insert.
+
+### Added
+
+- **Server visibility in basic subscriptions (docs/subscription.md#server-visibility-in-basic-subscriptions).**
+  «👁 В базовых: да/нет» on a relay's card (new column `relays.basic_visible`, default 1, schema
+  v45) and «👁 Основной сервер в базовых: да/нет» on the relay list (the `basic_visible_main` key
+  of `schema_meta`, no `.env`) hide that server's children from **basic** subscriptions at render
+  time only: keys and Xray are untouched, the switch is instant and reversible, extended
+  subscriptions are unaffected. A switch that would leave basic subscriptions with no visible
+  server (counting enabled relays «в подписках») is refused with an explanation; if it happens
+  anyway (a relay switched off or deleted — never refused), the endpoint serves the basic
+  subscription unfiltered with a WARNING (fail-open) and the relay list says so. Audit
+  `relay_main_basic_visibility_changed`.
+
 ## [3.1.1](https://github.com/Egor051/vpnbot/releases/tag/v3.1.1) — 2026-11-17
 
 ### Changed

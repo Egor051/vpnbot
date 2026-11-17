@@ -1,11 +1,19 @@
 """Admin panel → «🛰 Relay» — the ONE relay screen (the wizard's «🛰 Relay» opens it too).
 
 Every relay is listed here, whoever set it up; its page has the common actions
-(on/off, «в подписках», rename = the label, the links' host, source IPs, note,
-check, delete) and a block about how it is managed: its agent (status, update,
-ports/target, disconnect) or — for a relay set up by hand — «🔗 Подключить агент
-(ключи не меняются)». «Добавить relay» is the only way to create one: a name, the
-public host for links and a pairing code (services/relays.py).
+(on/off, «Добавить в подписки» / «Убрать из подписок», «👁 в базовых»,
+rename = the label, the links' host, source IPs, note, check, delete) and a block
+about how it is managed: its agent (status, update, ports/target, disconnect) or —
+for a relay set up by hand — «🔗 Подключить агент (ключи не меняются)». «Добавить
+relay» is the only way to create one: a name, the public host for links and a
+pairing code (services/relays.py). A new relay starts OUT of subscriptions.
+
+«в подписках» acts on every issued subscription at once: adding a relay creates
+its members in every active bundle, removing it deletes them — a dry run and a
+plan screen first, then a background run with progress on the shared All-in-One
+runner (bot/handlers/admin_bundles.py: one bulk run per process). «👁 в базовых»
+(per relay, and for the main server on the list) only filters what BASIC
+subscriptions serve; nothing about keys changes.
 
 SUPERADMIN only — every handler checks it and the service checks it again. Every
 change is a dangerous action: the TOTP gate (bot/totp_gate.py) asks first when the
@@ -20,17 +28,23 @@ screen, never to an error.
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from typing import Any, cast
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from bot.container import Services
 from bot.fsm.states import AdminRelayStates
 from bot.guards import require_superadmin
+from bot.handlers.admin_bundles import ProgressReporter, reconcile_issue_blocks, reconcile_report_text
+from bot.handlers.admin_bundles import runner as bundle_runner
 from bot.handlers.common import answer_callback_error, answer_message_error, service_error_text
 from bot.keyboards.admin_relays import (
+    SUBS_ADD,
+    SUBS_REMOVE,
     add_ipv4_keyboard,
     add_name_keyboard,
     pairing_keyboard,
@@ -40,6 +54,8 @@ from bot.keyboards.admin_relays import (
     relay_card_keyboard,
     relay_delete_keyboard,
     relay_detach_keyboard,
+    relay_subs_confirm_keyboard,
+    relay_subs_report_keyboard,
     relay_toggle_confirm_keyboard,
     relay_unreachable_keyboard,
     relays_list_keyboard,
@@ -53,6 +69,7 @@ from config.validators import format_ipv4_networks, ipv4_address
 from i18n import t
 from models.dto import Relay, RelayPairing
 from services.errors import AccessDenied, InvalidOperation, NotFound, ServiceError
+from services.key_bundles import ReconcileOutcome, ReconcileSummary, RelayMembersAction
 from services.relay_health import LEVEL_ICONS
 from services.relay_pairing import format_ports
 from services.relays import (
@@ -76,6 +93,11 @@ _EDIT_STATES = {
     "note": AdminRelayStates.edit_note,
 }
 _RELAY_ACTION = r"^admin:relay:\d+"
+# The card's «в подписках» actions → what the bundle service does with the relay.
+_SUBS_ACTIONS: dict[str, RelayMembersAction] = {
+    SUBS_ADD: RelayMembersAction.ADD,
+    SUBS_REMOVE: RelayMembersAction.REMOVE,
+}
 
 
 def _message(callback: CallbackQuery) -> Message:
@@ -138,11 +160,20 @@ def _reason(services: Services) -> Any:
 async def _list_screen(services: Services, actor_user_id: int, notice: str | None = None) -> tuple[str, Any]:
     overviews = await services.relays.list_overview(actor_user_id)
     pending = await services.relays.pending(actor_user_id)
+    main_visible = await services.relays.main_basic_visible(actor_user_id)
+    has_server = await services.relays.basic_has_visible_server(actor_user_id)
     probes = {overview.relay.id: services.relay_health.last_probe(overview.relay.id) for overview in overviews}
-    text = relays_list_text(overviews, probes, pending=pending, reason=_reason(services))
+    text = relays_list_text(
+        overviews,
+        probes,
+        pending=pending,
+        reason=_reason(services),
+        main_basic_visible=main_visible,
+        basic_has_server=has_server,
+    )
     if notice:
         text = f"{notice}\n\n{text}"
-    return text, relays_list_keyboard(overviews, probes, pending)
+    return text, relays_list_keyboard(overviews, probes, pending, main_basic_visible=main_visible)
 
 
 async def _pending_attach(services: Services, actor_user_id: int, relay: Relay) -> RelayPairing | None:
@@ -312,52 +343,305 @@ async def relay_card(callback: CallbackQuery, state: FSMContext, services: Servi
 # ── toggles, check, source IP offer ───────────────────────────────────────────
 
 
-@router.callback_query(F.data.regexp(_RELAY_ACTION + r":toggle:(enabled|subs)(:ok)?$"))
+@router.callback_query(F.data.regexp(_RELAY_ACTION + r":toggle:enabled(:ok)?$"))
 async def relay_toggle(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """Switch a relay on/off, or in/out of subscriptions.
+    """Switch a relay on/off.
 
-    Switching it OFF (or OUT) while keys ride it takes their links away, so that
-    direction asks first (``…:ok`` runs it).
+    Switching it OFF while keys ride it takes their links away, so that direction
+    asks first (``…:ok`` runs it). Never refused for the BASIC-visibility
+    invariant — it is an emergency action; the subscription endpoint fails open
+    instead, and the list says so.
     """
     try:
         if not await _guard(callback, services):
             return
         assert callback.from_user is not None and callback.data is not None
         relay_id = _relay_id(callback.data)
-        parts = callback.data.split(":")
-        field = parts[4]
-        confirmed = len(parts) == 6
+        confirmed = callback.data.endswith(":ok")
         try:
             relay, usage = await services.relays.usage(callback.from_user.id, relay_id)
-            turning_off = relay.enabled if field == "enabled" else relay.in_subscriptions
-            if turning_off and usage.active_keys > 0 and not confirmed:
+            if relay.enabled and usage.active_keys > 0 and not confirmed:
                 await safe_callback_answer(callback)
                 await _edit(
                     callback,
-                    t(f"relay_toggle_{field}_confirm", label=h(relay.label), count=usage.active_keys),
-                    relay_toggle_confirm_keyboard(relay_id, field),
+                    t("relay_toggle_enabled_confirm", label=h(relay.label), count=usage.active_keys),
+                    relay_toggle_confirm_keyboard(relay_id, "enabled"),
                 )
                 return
             if not await require_totp(callback, state, services, action="relay_edit"):
                 return
-            if field == "enabled":
-                result = await services.relays.update(callback.from_user.id, relay_id, enabled=not relay.enabled)
-            else:
-                result = await services.relays.update(
-                    callback.from_user.id, relay_id, in_subscriptions=not relay.in_subscriptions
-                )
+            result = await services.relays.update(callback.from_user.id, relay_id, enabled=not relay.enabled)
         except NotFound:
             await _relay_gone(callback, services)
             return
         await safe_callback_answer(callback, t("relay_saved_short"))
-        notice = _update_notice(result)
-        # A relay added to subscriptions reaches the subscriptions already issued
-        # only through «All-in-One → Дополнить»: say so, it is in another section.
-        if field == "subs" and result.relay.in_subscriptions and getattr(
-            getattr(services, "settings", None), "subscription_enabled", False
-        ):
-            notice = f"{notice}\n\n{t('relay_subs_topup_hint')}"
-        await _show_card(callback, services, relay_id, notice)
+        await _show_card(callback, services, relay_id, _update_notice(result))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+# ── «в подписках»: every issued subscription at once ──────────────────────────
+
+
+def _subscriptions_on(services: Services) -> bool:
+    return bool(getattr(getattr(services, "settings", None), "subscription_enabled", False))
+
+
+def _subs_title(relay: Relay, action: str) -> str:
+    return t(f"relay_subs_title_{action}", label=h(relay.label))
+
+
+def relay_subs_plan_text(relay: Relay, action: str, summary: ReconcileSummary) -> str:
+    """The plan of «Добавить в подписки» / «Убрать из подписок» (from a dry run)."""
+    planned = summary.with_outcome(ReconcileOutcome.PLANNED)
+    parts = [
+        t(
+            f"relay_subs_plan_header_{action}",
+            title=_subs_title(relay, action),
+            total=len(summary.results),
+            planned=len(planned),
+            create=summary.keys_to_create,
+            delete=summary.keys_to_delete,
+            noop=len(summary.with_outcome(ReconcileOutcome.NOOP)),
+            skipped=len(summary.with_outcome(ReconcileOutcome.SKIPPED)),
+        )
+    ]
+    if action == SUBS_ADD and summary.keys_to_delete:
+        parts.append(t("relay_subs_plan_cleanup", count=summary.keys_to_delete))
+    parts.extend(reconcile_issue_blocks(summary))
+    parts.append(t(f"relay_subs_plan_note_{action}", label=h(relay.label)))
+    return "\n\n".join(parts)
+
+
+async def _refuse_on_card(callback: CallbackQuery, services: Services, relay_id: int, text: str) -> None:
+    """A refused «в подписках» / «в базовых» action: the reason as an alert, the fresh card."""
+    await safe_callback_answer(callback, text, show_alert=True)
+    await _show_card(callback, services, relay_id)
+
+
+async def _subs_preconditions(callback: CallbackQuery, services: Services, relay: Relay, action: str) -> bool:
+    """What refuses the action before anything is planned or written. True: go on."""
+    assert callback.from_user is not None
+    if action == SUBS_ADD and not relay.enabled:
+        # An alert is plain text: the label goes in unescaped.
+        await _refuse_on_card(callback, services, relay.id, t("err_relay_subs_add_disabled", relay=relay.label))
+        return False
+    if action == SUBS_REMOVE:
+        try:
+            await services.relays.check_basic_keeps_a_server(callback.from_user.id, relay.id, in_subscriptions=False)
+        except InvalidOperation as exc:
+            await _refuse_on_card(callback, services, relay.id, service_error_text(exc))
+            return False
+    if _subscriptions_on(services) and bundle_runner.running:
+        await safe_callback_answer(callback, t("aio_already_running"), show_alert=True)
+        return False
+    return True
+
+
+async def _show_subs_plan(callback: CallbackQuery, services: Services, relay: Relay, action: str) -> None:
+    """Dry-run the action over every active subscription and show the plan."""
+    assert callback.from_user is not None
+    if not await _subs_preconditions(callback, services, relay, action):
+        return
+    if not _subscriptions_on(services):
+        # No issued subscription to touch: the action is the flag alone.
+        await safe_callback_answer(callback)
+        await _edit(
+            callback,
+            t(f"relay_subs_plan_flag_only_{action}", label=h(relay.label)),
+            relay_subs_confirm_keyboard(relay.id, action),
+        )
+        return
+    await safe_callback_answer(callback, t("aio_planning"))
+    try:
+        summary = await services.key_bundles.reconcile_relay_members(
+            relay.name, _SUBS_ACTIONS[action], actor_user_id=callback.from_user.id, dry_run=True
+        )
+    except Exception as exc:
+        logger.warning("Relay subscription plan failed: relay=%s action=%s", relay.name, action, exc_info=True)
+        await _edit(
+            callback,
+            t("aio_failed", title=_subs_title(relay, action), error=h(service_error_text(exc))),
+            relay_subs_report_keyboard(relay.id, action, retry=False),
+        )
+        return
+    await _edit(callback, relay_subs_plan_text(relay, action, summary), relay_subs_confirm_keyboard(relay.id, action))
+
+
+@router.callback_query(F.data.regexp(_RELAY_ACTION + r":subs:(add|rm)$"))
+async def relay_subs_plan(callback: CallbackQuery, services: Services) -> None:
+    """«Добавить в подписки» / «Убрать из подписок»: the plan, nothing written."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        try:
+            relay = await services.relays.get(callback.from_user.id, _relay_id(callback.data))
+        except NotFound:
+            await _relay_gone(callback, services)
+            return
+        await _show_subs_plan(callback, services, relay, callback.data.split(":")[4])
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(_RELAY_ACTION + r":toggle:subs(:ok)?$"))
+async def relay_subs_legacy_toggle(callback: CallbackQuery, services: Services) -> None:
+    """The former «в подписках» toggle still in the chat history: the plan of what it
+    means now (add or remove, by the relay's current state) — nothing is written."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        try:
+            relay = await services.relays.get(callback.from_user.id, _relay_id(callback.data))
+        except NotFound:
+            await _relay_gone(callback, services)
+            return
+        await _show_subs_plan(callback, services, relay, SUBS_REMOVE if relay.in_subscriptions else SUBS_ADD)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(_RELAY_ACTION + r":subs:(add|rm):run$"))
+async def relay_subs_run(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Confirmed: switch the flag, then add / remove the relay's members in every
+    active subscription in the background (progress, then the report)."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        relay_id = _relay_id(callback.data)
+        action = callback.data.split(":")[4]
+        actor = callback.from_user.id
+        try:
+            relay = await services.relays.get(actor, relay_id)
+            if not await _subs_preconditions(callback, services, relay, action):
+                return
+            if not await require_totp(callback, state, services, action="relay_edit"):
+                return
+            try:
+                result = await services.relays.update(actor, relay_id, in_subscriptions=action == SUBS_ADD)
+            except InvalidOperation as exc:
+                await _refuse_on_card(callback, services, relay_id, service_error_text(exc))
+                return
+        except NotFound:
+            await _relay_gone(callback, services)
+            return
+        flag_notice = t(f"relay_subs_flag_{action}", label=h(result.relay.label))
+        if not _subscriptions_on(services):
+            await safe_callback_answer(callback, t("relay_saved_short"))
+            await _show_card(callback, services, relay_id, flag_notice)
+            return
+        # The check and the start have no await between them, so a double tap
+        # cannot start two runs.
+        if bundle_runner.running:
+            await safe_callback_answer(callback, t("aio_already_running"), show_alert=True)
+            await _show_card(callback, services, relay_id, f"{flag_notice}\n\n{t('relay_subs_run_later')}")
+            return
+        bundle_runner.start(
+            run_relay_members(
+                services, _message(callback), actor, result.relay, action, should_stop=bundle_runner.stop_requested
+            )
+        )
+        await safe_callback_answer(callback, t("aio_started"))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+async def run_relay_members(
+    services: Services,
+    message: Message | InaccessibleMessage,
+    actor_user_id: int,
+    relay: Relay,
+    action: str,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
+    """The background run: progress while it goes, the report when it is done.
+
+    Never raises — a background task's exception would only surface as an
+    «exception was never retrieved» log line; the admin gets the error instead.
+    """
+    title = _subs_title(relay, action)
+    try:
+        progress = ProgressReporter(message, title, clock=clock)
+        await progress.start()
+        summary = await services.key_bundles.reconcile_relay_members(
+            relay.name,
+            _SUBS_ACTIONS[action],
+            actor_user_id=actor_user_id,
+            on_progress=progress,
+            should_stop=should_stop,
+        )
+        retry = bool(summary.with_outcome(ReconcileOutcome.FAILED, ReconcileOutcome.PARTIAL) or summary.remaining)
+        await safe_edit_message_text(
+            message,
+            reconcile_report_text(title, summary),
+            reply_markup=relay_subs_report_keyboard(relay.id, action, retry=retry),
+        )
+    except Exception as exc:
+        logger.exception("Relay subscription run failed: relay=%s action=%s", relay.name, action)
+        await safe_edit_message_text(
+            message,
+            t("aio_failed", title=title, error=h(service_error_text(exc))),
+            reply_markup=relay_subs_report_keyboard(relay.id, action, retry=True),
+        )
+
+
+# ── «👁 в базовых»: what BASIC subscriptions serve (render-time only) ──────────
+
+
+@router.callback_query(F.data.regexp(_RELAY_ACTION + r":basic$"))
+async def relay_basic_toggle(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Show / hide this relay's children in BASIC subscriptions. Instant and
+    reversible; refused when BASIC subscriptions would be left with no server."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        relay_id = _relay_id(callback.data)
+        try:
+            relay = await services.relays.get(callback.from_user.id, relay_id)
+            if not await require_totp(callback, state, services, action="relay_edit"):
+                return
+            try:
+                result = await services.relays.update(
+                    callback.from_user.id, relay_id, basic_visible=not relay.basic_visible
+                )
+            except InvalidOperation as exc:
+                await _refuse_on_card(callback, services, relay_id, service_error_text(exc))
+                return
+        except NotFound:
+            await _relay_gone(callback, services)
+            return
+        await safe_callback_answer(callback, t("relay_saved_short"))
+        key = "relay_basic_saved_on" if result.relay.basic_visible else "relay_basic_saved_off"
+        await _show_card(callback, services, relay_id, t(key, label=h(result.relay.label)))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:relays:mainbasic")
+async def relays_main_basic_toggle(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """The main server's «👁 в базовых» (it has no card: the switch is on the list)."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None
+        actor = callback.from_user.id
+        current = await services.relays.main_basic_visible(actor)
+        if not await require_totp(callback, state, services, action="relay_edit"):
+            return
+        try:
+            visible = await services.relays.set_main_basic_visible(actor, not current)
+        except InvalidOperation as exc:
+            await safe_callback_answer(callback, service_error_text(exc), show_alert=True)
+            await _show_list(callback, services)
+            return
+        await safe_callback_answer(callback, t("relay_saved_short"))
+        await _show_list(callback, services, t("relays_main_basic_saved_on" if visible else "relays_main_basic_saved_off"))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
