@@ -194,7 +194,7 @@ def test_a_branch_that_moved_after_the_listing_is_refused_by_update_ref(repo: Re
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert repo.git(repo.live, "rev-parse", "feat/race") == repo.unmerged
     assert repo.git(repo.live, "config", "branch.feat/race.remote") == "origin", "kept branch keeps its config"
-    assert f"merged branch feat/race kept — git update-ref -d refs/heads/feat/race {repo.sha['C']} refused:" \
+    assert f"merged branch feat/race kept — git update-ref --no-deref -d refs/heads/feat/race {repo.sha['C']} refused:" \
         in proc.stderr, proc.stderr
     assert "Deleted branch feat/race" not in proc.stdout
     assert "feat/a" not in repo.branches() and "feat/b" not in repo.branches()
@@ -210,6 +210,51 @@ def test_a_sha_no_longer_in_origin_main_is_kept(repo: Repo) -> None:
     assert repo.git(repo.live, "rev-parse", "feat/b") == repo.sha["B"]
     assert f"merged branch feat/b kept — {repo.sha['B']} is not an ancestor of origin/main" in proc.stderr
     assert _deleted(proc, "feat/a", repo.sha["A"]), proc.stdout
+
+
+def test_a_symbolic_branch_ref_is_never_followed(repo: Repo) -> None:
+    """refs/heads/alias -> refs/heads/main is listed (it resolves to C), but `update-ref -d`
+    follows a symref: it would delete main and leave the live tree on an unborn branch.
+    It is kept with a WARN; main and HEAD are untouched."""
+    repo.git(repo.live, "symbolic-ref", "refs/heads/alias", "refs/heads/main")
+    proc = repo.run()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert repo.git(repo.live, "rev-parse", "--verify", "refs/heads/main") == repo.sha["C"]
+    assert repo.git(repo.live, "symbolic-ref", "refs/heads/alias") == "refs/heads/main"
+    assert repo.git(repo.live, "symbolic-ref", "HEAD") == "refs/heads/main"
+    assert "merged branch alias kept — a symbolic ref to refs/heads/main" in proc.stderr, proc.stderr
+    assert "Deleted branch alias" not in proc.stdout
+    assert re.search(SUMMARY_RE.format(d=2, k=2), proc.stdout), proc.stdout
+
+
+def test_a_branch_being_rebased_in_another_worktree_is_kept(repo: Repo) -> None:
+    """A rebase stopped in the other worktree: it shows as detached in
+    `git worktree list --porcelain`, yet feat/wt is in use (branch -d refused it). Deleting
+    it would break `git rebase --continue`; it is kept with a WARN."""
+    other = repo.tmp / "other"
+    stopped = subprocess.run(["git", "rebase", "--no-ff", "-x", "false", repo.sha["A"]], cwd=str(other),
+                             env=repo.env, capture_output=True, text=True)
+    assert stopped.returncode != 0, stopped.stdout + stopped.stderr
+    assert "detached" in repo.git(repo.live, "worktree", "list", "--porcelain")
+    proc = repo.run()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert repo.git(repo.live, "rev-parse", "feat/wt") == repo.sha["B"]
+    assert "merged branch feat/wt kept — being rebased (" in proc.stderr, proc.stderr
+    assert "feat/a" not in repo.branches() and "feat/b" not in repo.branches()
+
+
+def test_a_branch_being_bisected_here_is_kept(repo: Repo) -> None:
+    """A bisect started on feat/a in the live tree itself: HEAD is detached (no `current`),
+    BISECT_START names feat/a — kept; feat/b still goes."""
+    repo.git(repo.live, "checkout", "-q", "feat/a")
+    repo.git(repo.live, "bisect", "start", repo.sha["C"], repo.sha["A"])
+    assert (repo.live / ".git" / "BISECT_START").read_text(encoding="utf-8").strip() == "feat/a"
+    assert repo.git(repo.live, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD", "detached while bisecting"
+    proc = repo.run()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert repo.git(repo.live, "rev-parse", "feat/a") == repo.sha["A"]
+    assert "merged branch feat/a kept — being bisected (" in proc.stderr, proc.stderr
+    assert _deleted(proc, "feat/b", repo.sha["B"]), proc.stdout
 
 
 def test_the_current_branch_and_main_are_never_deleted(repo: Repo) -> None:
@@ -256,10 +301,10 @@ def test_never_branch_d_and_never_an_unchecked_update_ref() -> None:
     assert "git branch --merged" not in code and "branch --format" not in code, "the detached-HEAD pseudo-line"
     body = code[code.index("\ndelete_merged_branches() {"):]
     body = body[: body.index("\n}\n")]
-    assert "git for-each-ref --format='%(refname) %(objectname)' --merged origin/main refs/heads/" in body
+    assert "git for-each-ref --format='%(refname) %(objectname) %(symref)' --merged origin/main refs/heads/" in body
     assert 'git merge-base --is-ancestor "$sha" origin/main' in body
-    calls = re.findall(r'git update-ref -d "\$ref"( "\$sha")?', body)
-    assert calls == [' "$sha"'], "update-ref -d always with the old value"
+    calls = re.findall(r'git update-ref( --no-deref)? -d "\$ref"( "\$sha")?', body)
+    assert calls == [(" --no-deref", ' "$sha"')], "update-ref -d: never through a symref, always with the old value"
     assert 'git config --remove-section "branch.${b}"' in body
 
 

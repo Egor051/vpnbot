@@ -79,8 +79,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   before each deletion `git merge-base --is-ancestor <sha> origin/main`, then
   `git update-ref -d refs/heads/<b> <sha>` (refused when the branch moved since the listing) and
   `git config --remove-section branch.<b>`. A branch with a commit `origin/main` lacks is never
-  touched; one another worktree has checked out is kept (update-ref, unlike `branch -d`, would not
-  refuse it); every refusal is a `WARN`, never a failure. The log line keeps its shape,
+  touched. update-ref has none of `branch -d`'s "in use" checks, so the deploy makes them: a
+  branch checked out in another worktree, or under a rebase or bisect in any worktree (which
+  shows as detached), is kept, and so is a symbolic branch ref (update-ref would follow it and
+  delete its target — `refs/heads/alias -> main` would take `main`; `--no-deref` as well). Every
+  refusal is a `WARN`, never a failure. The log line keeps its shape,
   `merged branch: Deleted branch <b> (was <sha>)`, now with the full sha.
 - **The provider image's two files no longer show up as "host files nothing accounts for"
   (docs/host-state.md#files-nothing-accounts-for).** `/etc/ssh/sshd_config.d/60-cloudimg-settings.conf`

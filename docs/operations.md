@@ -52,7 +52,9 @@ is certain (after DEPLOY OK can no longer roll back), every local branch
 before (`git merge-base --is-ancestor <sha> origin/main`), then
 `git update-ref -d refs/heads/<name> <sha>`, which refuses when the branch moved since it was
 listed, then `git config --remove-section branch.<name>`. A branch with a commit `origin/main`
-lacks is never touched (**never `-D`**), and one another worktree has checked out is kept. Not
+lacks is never touched (**never `-D`**). Kept as well: a branch in use — checked out in another
+worktree, or under a rebase or bisect in any worktree — and a symbolic branch ref (update-ref
+would delete its target). Not
 `git branch -d`: it judges a branch by its upstream, and the deploy fetches only `main`, so
 `origin/<name>` is a stale remote-tracking ref the local branch is "ahead" of — on 2026-11-16 that
 kept 10 of 13 merged branches on the main server. Not `git branch --merged` either: on a detached

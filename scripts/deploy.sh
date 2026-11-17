@@ -5083,31 +5083,38 @@ noop_pin_branch() {
 # branches on the main server: "not deleting branch '<b>' that is not yet merged to
 # 'refs/remotes/origin/<b>', even though it is merged to HEAD".
 #
-# A branch another worktree has checked out is kept: update-ref, unlike branch -d,
-# would not refuse it and would leave that worktree on a missing branch. Every
-# refusal is a warning, never a failure. Every deletion is logged with the commit it
-# pointed at ("Deleted branch X (was <sha>)"), so a branch comes back with
-# `git branch X <sha>`. DEPLOY OK carries one counter line.
+# update-ref, unlike branch -d, has none of git's "branch in use" checks, so they are
+# done here (merged_branches_held): a branch another worktree has checked out, or
+# one a rebase or bisect in any worktree is working on (the worktree then shows as
+# detached), is kept — deleting it would leave that worktree on a missing branch or
+# break `git rebase --continue`. A SYMBOLIC branch ref is kept too: update-ref
+# follows it and would delete its target (refs/heads/alias -> main would take main);
+# --no-deref covers one that turns symbolic after the listing. Every refusal is a
+# warning, never a failure. Every deletion is logged with the commit it pointed at
+# ("Deleted branch X (was <sha>)"), so a branch comes back with `git branch X <sha>`.
+# DEPLOY OK carries one counter line.
 MERGED_DELETED=0
 MERGED_KEPT=0
 delete_merged_branches() {
-  local current line wt="" ref sha b out rc
-  local -A elsewhere=()
+  local current line ref sha symref b out rc
+  local -A held=()
   MERGED_DELETED=0; MERGED_KEPT=0
   current="$(current_branch)"
   while IFS= read -r line; do
-    case "$line" in
-      "worktree "*) wt="${line#worktree }" ;;
-      "branch refs/heads/"*) elsewhere["${line#branch }"]="$wt" ;;
-    esac
-  done < <(git worktree list --porcelain 2>/dev/null || true)
-  while IFS=' ' read -r ref sha; do
+    held["${line%%$'\t'*}"]="${line#*$'\t'}"
+  done < <(merged_branches_held)
+  while IFS=' ' read -r ref sha symref; do
     [[ "$ref" == refs/heads/?* && -n "$sha" ]] || continue
     b="${ref#refs/heads/}"
     [[ "$b" != "$current" && "$b" != "$DEPLOY_BRANCH" ]] || continue
-    if [[ -n "${elsewhere[$ref]+x}" ]]; then
+    if [[ -n "$symref" ]]; then
       MERGED_KEPT=$(( MERGED_KEPT + 1 ))
-      warn "merged branch ${b} kept — checked out in another worktree (${elsewhere[$ref]})"
+      warn "merged branch ${b} kept — a symbolic ref to ${symref}, never deleted (update-ref would take ${symref})"
+      continue
+    fi
+    if [[ -n "${held[$ref]+x}" ]]; then
+      MERGED_KEPT=$(( MERGED_KEPT + 1 ))
+      warn "merged branch ${b} kept — ${held[$ref]}"
       continue
     fi
     rc=0; git merge-base --is-ancestor "$sha" origin/main >/dev/null 2>&1 || rc=$?
@@ -5116,9 +5123,9 @@ delete_merged_branches() {
       warn "merged branch ${b} kept — ${sha} is not an ancestor of origin/main (git merge-base --is-ancestor: rc=${rc})"
       continue
     fi
-    if ! out="$(git update-ref -d "$ref" "$sha" 2>&1)"; then
+    if ! out="$(git update-ref --no-deref -d "$ref" "$sha" 2>&1)"; then
       MERGED_KEPT=$(( MERGED_KEPT + 1 ))
-      warn "merged branch ${b} kept — git update-ref -d ${ref} ${sha} refused: ${out//$'\n'/; }"
+      warn "merged branch ${b} kept — git update-ref --no-deref -d ${ref} ${sha} refused: ${out//$'\n'/; }"
       continue
     fi
     if ! git config --remove-section "branch.${b}" >/dev/null 2>&1 && branch_config_left "$b"; then
@@ -5126,7 +5133,46 @@ delete_merged_branches() {
     fi
     MERGED_DELETED=$(( MERGED_DELETED + 1 ))
     log "merged branch: Deleted branch ${b} (was ${sha})."
-  done < <(git for-each-ref --format='%(refname) %(objectname)' --merged origin/main refs/heads/ 2>/dev/null || true)
+  done < <(git for-each-ref --format='%(refname) %(objectname) %(symref)' --merged origin/main refs/heads/ 2>/dev/null || true)
+  return 0
+}
+
+# The branches git itself treats as in use, one "<refs/heads/X><TAB><why>" per line (a
+# tab never occurs in a refname, "|" may): the branch each OTHER worktree has checked
+# out (this one's is `current`, excluded anyway), and the branch a rebase
+# (rebase-merge/ or rebase-apply/head-name) or a bisect (BISECT_START) is working on
+# in any worktree, this one included. Those worktrees are detached while it runs, so
+# the porcelain listing alone misses them.
+merged_branches_held() {
+  local line wt="" here common gd f name
+  here="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  here="$(realpath -m "${here:-$PWD}" 2>/dev/null || printf '%s' "${here:-$PWD}")"
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) wt="${line#worktree }" ;;
+      "branch refs/heads/"*)
+        if [[ "$(realpath -m "$wt" 2>/dev/null || printf '%s' "$wt")" != "$here" ]]; then
+          printf '%s\tchecked out in another worktree (%s)\n' "${line#branch }" "$wt"
+        fi ;;
+    esac
+  done < <(git worktree list --porcelain 2>/dev/null || true)
+  common="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+  [[ -n "$common" ]] || return 0
+  for gd in "$common" "$common"/worktrees/*; do
+    [[ -d "$gd" ]] || continue
+    for f in rebase-merge/head-name rebase-apply/head-name; do
+      name=""
+      [[ -r "${gd}/${f}" ]] && { IFS= read -r name < "${gd}/${f}" || true; }
+      if [[ "$name" == refs/heads/?* ]]; then
+        printf '%s\tbeing rebased (%s)\n' "$name" "${gd}/${f%%/*}"
+      fi
+    done
+    name=""
+    [[ -r "${gd}/BISECT_START" ]] && { IFS= read -r name < "${gd}/BISECT_START" || true; }
+    if [[ -n "$name" ]]; then
+      printf 'refs/heads/%s\tbeing bisected (%s)\n' "${name#refs/heads/}" "${gd}/BISECT_START"
+    fi
+  done
   return 0
 }
 

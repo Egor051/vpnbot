@@ -47,7 +47,9 @@ detached HEAD; настоящий деплой останавливается д
 удалением (`git merge-base --is-ancestor <sha> origin/main`), затем
 `git update-ref -d refs/heads/<имя> <sha>` — git откажет, если ветка сдвинулась после листинга, —
 и `git config --remove-section branch.<имя>`. Ветку с коммитом, которого нет в `origin/main`,
-деплой не трогает никогда (**никогда не `-D`**); ветку, checked out в другом worktree, оставляет.
+деплой не трогает никогда (**никогда не `-D`**). Остаются и ветки «в работе» — checked out в
+другом worktree или под rebase/bisect в любом worktree, — и символическая ссылка-ветка
+(update-ref удалил бы её цель).
 Не `git branch -d`: он сверяет ветку с её upstream, а деплой фетчит только `main`, так что
 `origin/<имя>` — устаревший remote-tracking ref, и локальная ветка «впереди» него; 2026-11-16 это
 оставило 10 из 13 слитых веток на main-сервере. И не `git branch --merged`: на detached HEAD (relay
