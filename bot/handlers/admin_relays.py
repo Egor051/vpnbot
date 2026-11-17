@@ -63,6 +63,7 @@ from bot.keyboards.admin_relays import (
 )
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
+from bot.fallback import fallback_state_line
 from bot.relays import outcome_text, pairing_text, relay_card_text, relay_delete_text, relays_list_text
 from bot.totp_gate import require_totp
 from config.validators import format_ipv4_networks, ipv4_address
@@ -163,6 +164,8 @@ async def _list_screen(services: Services, actor_user_id: int, notice: str | Non
     main_visible = await services.relays.main_basic_visible(actor_user_id)
     has_server = await services.relays.basic_has_visible_server(actor_user_id)
     probes = {overview.relay.id: services.relay_health.last_probe(overview.relay.id) for overview in overviews}
+    fallback = getattr(services, "fallback", None)
+    fallback_line = fallback_state_line(await fallback.overview(actor_user_id)) if fallback is not None else None
     text = relays_list_text(
         overviews,
         probes,
@@ -170,10 +173,13 @@ async def _list_screen(services: Services, actor_user_id: int, notice: str | Non
         reason=_reason(services),
         main_basic_visible=main_visible,
         basic_has_server=has_server,
+        fallback_line=fallback_line,
     )
     if notice:
         text = f"{notice}\n\n{text}"
-    return text, relays_list_keyboard(overviews, probes, pending, main_basic_visible=main_visible)
+    return text, relays_list_keyboard(
+        overviews, probes, pending, main_basic_visible=main_visible, fallback=fallback is not None
+    )
 
 
 async def _pending_attach(services: Services, actor_user_id: int, relay: Relay) -> RelayPairing | None:
@@ -204,7 +210,12 @@ async def _card_screen(
     )
     if notice:
         text = f"{notice}\n\n{text}"
-    return text, relay_card_keyboard(relay, suggest_source_ip=suggest_source_ip, pending_attach=pending)
+    return text, relay_card_keyboard(
+        relay,
+        suggest_source_ip=suggest_source_ip,
+        pending_attach=pending,
+        fallback=getattr(services, "fallback", None) is not None,
+    )
 
 
 async def _edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:

@@ -26,6 +26,7 @@ from services.protocol_modules import ProtocolModulesService
 from services.protocol_uninstall import ProtocolUninstallService
 from services.proxy import ProxyService
 from services.relay_health import RelayHealthSupervisor
+from services.fallback import FallbackService
 from services.relays import RelayService
 from services.server_status import ServerStatusService
 from services.ssh_port import SshPortMonitor
@@ -122,3 +123,7 @@ class Services:
     # The setup wizard (services/wizard.py, «🧙 Мастер настройки»): runs of fixed root
     # helper modes in their own systemd units. None only in lightweight test doubles.
     wizard: WizardService | None = None
+    # The fallback mode (services/fallback.py, admin panel → «🛰 Relay» → «🛟 Режим
+    # фолбэка»): the hub role, the DNS failover set, the switch. None in test
+    # doubles: the relay screens then show nothing about it.
+    fallback: FallbackService | None = None

@@ -498,7 +498,7 @@ async def test_every_preflight_blocker(fb: Fallback, breakage: str) -> None:
     expected = {
         "loop_live": "fb_pf_loop", "origin_public": "fb_pf_loop", "origin_in_set": "fb_pf_loop",
         "token": "fb_pf_token", "foreign": "fb_pf_record_foreign", "count": "fb_pf_record_count",
-        "agent": "fb_pf_agent", "forward": "fb_pf_forward", "no_hub": "fb_pf_hub",
+        "agent": "fb_pf_agent_failed", "forward": "fb_pf_forward", "no_hub": "fb_pf_hub",
     }[breakage]
     if breakage == "loop_live":
         fb.client.replies["status"] = fb.status_reply(live=HUB)

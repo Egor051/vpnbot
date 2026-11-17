@@ -43,6 +43,12 @@ DANGEROUS_ACTIONS: dict[str, str] = {
     "relay_apply": "dangerous_relay_apply",
     "relay_detach": "dangerous_relay_detach",
     "relay_uninstall": "dangerous_relay_uninstall",
+    # The fallback mode (bot/handlers/admin_fallback.py): the switch itself, the hub
+    # role, the DNS API token and the settings the switch writes.
+    "fallback_switch": "dangerous_fallback_switch",
+    "fallback_hub": "dangerous_fallback_hub",
+    "fallback_token": "dangerous_fallback_token",
+    "fallback_settings": "dangerous_fallback_settings",
 }
 
 RESUME_KEY = "totp_resume"

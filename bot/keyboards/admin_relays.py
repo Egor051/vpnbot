@@ -30,9 +30,11 @@ def relays_list_keyboard(
     pending: Sequence[RelayPairing] = (),
     *,
     main_basic_visible: bool | None = None,
+    fallback: bool = False,
 ) -> InlineKeyboardMarkup:
     """The relay list. *main_basic_visible* (when known) adds the main server's
-    «👁 в базовых» switch — the main server has no card of its own."""
+    «👁 в базовых» switch — the main server has no card of its own; *fallback* adds
+    «🛟 Режим фолбэка» (bot/handlers/admin_fallback.py)."""
     from bot.relays import relay_icon
 
     probes = probes or {}
@@ -52,13 +54,19 @@ def relays_list_keyboard(
                 "admin:relays:mainbasic",
             )
         )
+    if fallback:
+        rows.append(_row(t("btn_fb_open"), "admin:fb"))
     rows.append(_row(t("btn_relay_add"), "admin:relay:add"))
     rows.append(_row(t("btn_back"), "admin:grp:infra"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def relay_card_keyboard(
-    relay: Relay, *, suggest_source_ip: str | None = None, pending_attach: RelayPairing | None = None
+    relay: Relay,
+    *,
+    suggest_source_ip: str | None = None,
+    pending_attach: RelayPairing | None = None,
+    fallback: bool = False,
 ) -> InlineKeyboardMarkup:
     base = f"admin:relay:{relay.id}"
     rows: list[list[InlineKeyboardButton]] = []
@@ -102,6 +110,12 @@ def relay_card_keyboard(
             ]
         )
         rows.append(_row(t("btn_relay_detach"), f"{base}:ag:detach"))
+        if fallback:
+            # The hub role of the fallback mode (bot/handlers/admin_fallback.py).
+            if relay.is_hub:
+                rows.append(_row(t("btn_fb_unhub"), f"admin:fb:unhub:{relay.id}"))
+            else:
+                rows.append(_row(t("btn_fb_make_hub"), f"admin:fb:hub:{relay.id}"))
     else:
         rows.append(_row(t("btn_relay_detach"), f"{base}:ag:detach"))
     rows.append(_row(t("btn_relay_delete"), f"{base}:del"))

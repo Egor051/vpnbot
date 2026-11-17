@@ -741,7 +741,7 @@ class FallbackService:
         if hub is not None and hub.agent is not None and not agent_uninstalled(hub.agent) and main and actor_user_id:
             items.extend(await self._preflight_hub(actor_user_id, hub, main, names_set))
         elif hub is not None:
-            items.append(PreflightItem("fb_pf_agent", False, {"name": hub.name, "error": "—"}))
+            items.append(PreflightItem("fb_pf_agent_failed", False, {"name": hub.name, "error": "—"}))
         if token_ok and main and hub_ip:
             for name in names:
                 items.extend(await self._preflight_name(name.name, {main, hub_ip}))
@@ -763,9 +763,9 @@ class FallbackService:
         try:
             reply = await self.relays.agent_status(actor_user_id, hub.id)
             payload: Mapping[str, Any] = reply.payload
-            items.append(PreflightItem("fb_pf_agent", True, {"name": hub.name, "error": ""}))
+            items.append(PreflightItem("fb_pf_agent", True, {"name": hub.name}))
         except ServiceError as exc:
-            items.append(PreflightItem("fb_pf_agent", False, {"name": hub.name, "error": str(exc)[:200]}))
+            items.append(PreflightItem("fb_pf_agent_failed", False, {"name": hub.name, "error": str(exc)[:200]}))
             payload = {}
         if payload:
             reached, missing = check_reaches(payload, main, tcp)

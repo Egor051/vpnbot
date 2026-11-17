@@ -38,6 +38,7 @@ from bot.fsm.states import (
     WarpSplitStates,
 )
 from bot.handlers import (
+    admin_fallback,
     admin,
     admin_bundles,
     admin_dashboard,
@@ -86,7 +87,7 @@ REPO = Path(__file__).resolve().parent.parent
 # Same order as bot/app.py (pinned by test_router_order_matches_app below).
 ROUTERS = [
     start, security, common, settings_handler, admin, admin_dashboard, admin_warp, admin_warp_split, admin_warp_split_ui,
-    admin_warp_split_sources, admin_modules, admin_relays, admin_maintenance, ssh_port, ufw,
+    admin_warp_split_sources, admin_modules, admin_fallback, admin_relays, admin_maintenance, ssh_port, ufw,
     admin_wizard, admin_bundles, keys, key_bundles, proxy, callbacks,
 ]
 
@@ -388,7 +389,7 @@ def test_back_leads_to_the_parent(name: str, factory: Callable[[], InlineKeyboar
 # ── every admin handler checks the role ────────────────────────────────────────
 
 ADMIN_MODULES = [admin, admin_dashboard, admin_warp, admin_warp_split, admin_warp_split_ui,
-                 admin_warp_split_sources, admin_modules, admin_relays, admin_maintenance, admin_bundles]
+                 admin_warp_split_sources, admin_modules, admin_relays, admin_fallback, admin_maintenance, admin_bundles]
 GUARDS = {"require_superadmin", "require_moderator_or_admin"}
 # Handlers that need no role: they only delete the alert message they sit under.
 NO_ROLE_NEEDED = {"anomaly_alert_dismiss", "warp_alert_dismiss"}

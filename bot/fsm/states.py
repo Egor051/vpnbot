@@ -113,3 +113,19 @@ class TotpStates(StatesGroup):
     disable_code = State()
     # «Перевыпустить резервные коды»: a TOTP code (a backup code is not enough).
     reissue_code = State()
+
+
+class AdminFallbackStates(StatesGroup):
+    """«🛟 Режим фолбэка» typed steps (bot/handlers/admin_fallback.py)."""
+
+    # A name for the failover set.
+    name = State()
+    # The DNS API token: the message is deleted as soon as it is read.
+    token = State()
+    # The main server's / the hub's IPv4 override ("-" — derived again).
+    main_ipv4 = State()
+    hub_ipv4 = State()
+    # The direct links' host ("-" — .env again).
+    direct_host = State()
+    # «🛟 Сделать hub»: the origin name.
+    origin = State()
