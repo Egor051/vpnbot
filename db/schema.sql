@@ -234,6 +234,12 @@ CREATE TABLE IF NOT EXISTS key_bundles (
 --             relay forwards (the main server's DNS name, comma-separated ports);
 --             agent_version, agent_paired_at; agent_status_json / agent_status_at
 --             — the last `status` answer and when it came.
+--   role    — 'edge': an ordinary relay (every pre-v46 row); 'hub': the relay
+--             outside the blocked region that, in the fallback mode, is the ONLY
+--             thing that reaches the main server — every failover name points at
+--             it and it forwards to the origin name (docs/relay.md, «Режим
+--             фолбэка»). Only a relay with an agent becomes a hub
+--             (services.fallback). Mirrors _migrate_v46.
 CREATE TABLE IF NOT EXISTS relays (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
@@ -257,7 +263,27 @@ CREATE TABLE IF NOT EXISTS relays (
   agent_paired_at TEXT,
   agent_status_json TEXT,
   agent_status_at TEXT,
-  basic_visible INTEGER NOT NULL DEFAULT 1
+  basic_visible INTEGER NOT NULL DEFAULT 1,
+  role TEXT NOT NULL DEFAULT 'edge' CHECK (role IN ('edge', 'hub'))
+);
+
+-- The DNS failover set of the fallback mode (services/fallback.py, docs/relay.md
+-- «Режим фолбэка»): the names whose A record the bot switches between the main
+-- server's IPv4 ('normal') and the hub's IPv4 ('failover') through the DNS API.
+-- Mirrors _migrate_v46. The hub's own upstream (the origin name) is NEVER here.
+--   applied      — what the last successful write put in the record; NULL: the bot
+--                  never wrote it. applied_ipv4 / applied_at — that address, when.
+--   last_error   — the last write's failure (cleared by the next success): a
+--                  partial switch is visible per name and a repeat finishes it.
+CREATE TABLE IF NOT EXISTS failover_names (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  applied TEXT CHECK (applied IS NULL OR applied IN ('normal', 'failover')),
+  applied_ipv4 TEXT,
+  applied_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
 );
 
 -- Issued pairing codes (services/relays.py, docs/relay.md). Temporary rows:

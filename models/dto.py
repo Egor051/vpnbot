@@ -243,11 +243,24 @@ class Relay:
     # Off: BASIC subscriptions do not serve this relay's children (a render-time
     # filter; EXTENDED subscriptions, the keys and Xray are unaffected).
     basic_visible: bool = True
+    # 'edge' (an ordinary relay) or 'hub': the relay outside the blocked region
+    # that, in the fallback mode, alone reaches the main server and receives every
+    # failover name (services/fallback.py, docs/relay.md «Режим фолбэка»).
+    role: str = "edge"
 
     @property
     def managed(self) -> bool:
         """The bot manages this relay through its agent."""
         return self.agent is not None
+
+    @property
+    def is_hub(self) -> bool:
+        return self.role == RELAY_ROLE_HUB
+
+
+RELAY_ROLE_EDGE = "edge"
+RELAY_ROLE_HUB = "hub"
+RELAY_ROLES = frozenset({RELAY_ROLE_EDGE, RELAY_ROLE_HUB})
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +314,26 @@ class RelayPairing:
     # The public host a NEW relay's links will point at; None for 'attach' (and on
     # a pre-v44 'new' row, which falls back to the SSH address as it used to).
     relay_host: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FailoverName:
+    """One name of the fallback mode's DNS failover set (table ``failover_names``).
+
+    Its A record is switched between the main server's IPv4 ('normal') and the
+    hub's ('failover'). ``applied`` is what the bot's last successful write put
+    there (None: never written); ``last_error`` the last write's failure, cleared
+    by the next success.
+    """
+
+    id: int
+    name: str
+    applied: str | None
+    applied_ipv4: str | None
+    applied_at: str | None
+    last_error: str | None
+    created_at: str
+    created_by: int | None
 
 
 @dataclass(frozen=True, slots=True)
