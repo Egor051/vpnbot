@@ -88,6 +88,8 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/usr/local/bin/wgcf`, `/usr/local/bin/qr` | backup-only (`installer`) | their own installers | — (reinstalled) | |
 | `/etc/nginx/conf.d/*.conf` | backup-only | the operator | `/etc/nginx/conf.d` | decoy / self-steal vhost with the host's domain; a repo template is separate work |
 | `/etc/netplan/*` | backup-only (`provider`) | the VPS image | `/etc/netplan` | not in the scanned set; listed for completeness |
+| `/etc/ssh/sshd_config.d/60-cloudimg-settings.conf` | backup-only (`provider`) | the VPS image (no package owns it) | `/etc/ssh` | one line, `PasswordAuthentication no` — the repo's own policy; our `00-*` are read first (first match wins) |
+| `/etc/sysctl.d/99-cloudimg-ipv6.conf` | backup-only (`provider`) | the VPS image (no package owns it) | `/etc/sysctl.d` | `use_tempaddr = 0` for `all`/`default`; changes nothing on a host without IPv6 |
 | `/var/spool/cron/crontabs/root` | backup-only | acme.sh (`--cron` line) | `/var/spool/cron/crontabs` | |
 | `/usr/local/sbin/site-freshen.py` | backup-only (`deployment-local`) | the operator | `/usr/local/sbin` | the decoy rewriter — by [design](hysteria.md#keeping-the-decoy-in-step-vpn-bot-decoy-freshensh) never in the repo, so the offsite system bundle is its only off-box copy |
 | `/etc/sysctl.d/99-amneziawg.conf` | retired | — | — | a duplicate `ip_forward=1` |
@@ -120,6 +122,7 @@ The relay runs no bot, so it sends no offsite backup: its files come back from t
 | `/etc/systemd/system/vpn-bot-host-check.service`, `.timer` | repo-managed (`unit`) | deploy.sh | as on main; the relay's verdict stays in its journal — [Between deploys](#between-deploys) |
 | `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh | cloud-init stays off |
 | `/etc/ssh/sshd_config.d/50-cloud-init.conf`, `/etc/sudoers.d/90-cloud-init-users` | retired | — | cloud-init's password login and `NOPASSWD:ALL` grant |
+| `/etc/ssh/sshd_config.d/60-cloudimg-settings.conf`, `/etc/sysctl.d/99-cloudimg-ipv6.conf` | backup-only (`provider`) | the VPS image (no package owns them) | as on main |
 | `/etc/systemd/system/vpn-relay.service` | repo-managed | deploy.sh, verbatim | |
 | `/etc/sysctl.d/90-vpn-relay.conf` | template + host values | `vpn-relay-apply apply`, from the relay's `.env` | |
 | `/etc/apt/sources.list.d/ookla_speedtest-cli.list` | retired | — | as on main |

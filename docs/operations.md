@@ -47,11 +47,20 @@ checked out. The branch the checkout was on is left where it is.
 
 **Merged local branches are cleaned up after a successful deploy (both roles).** Once the deploy
 is certain (after DEPLOY OK can no longer roll back), every local branch
-`git branch --merged origin/main` lists — except the one the checkout is on and `main` — is
-deleted with `git branch -d`, **never `-D`**: git itself refuses a branch that is not merged
-into its upstream (or into `HEAD` without one) or that another worktree has checked out, and such
-a refusal is only a `WARN`. Each deletion is logged as `merged branch: Deleted branch <name>
-(was <sha>)`; DEPLOY OK carries `merged branches : N deleted …, M kept …`. To get one back:
+`git for-each-ref --merged origin/main refs/heads/` lists — except the one the checkout is on and
+`main` — is deleted when its commit is an **ancestor of `origin/main`**: checked again right
+before (`git merge-base --is-ancestor <sha> origin/main`), then
+`git update-ref -d refs/heads/<name> <sha>`, which refuses when the branch moved since it was
+listed, then `git config --remove-section branch.<name>`. A branch with a commit `origin/main`
+lacks is never touched (**never `-D`**). Kept as well: a branch in use — checked out in another
+worktree, or under a rebase or bisect in any worktree — and a symbolic branch ref (update-ref
+would delete its target). Not
+`git branch -d`: it judges a branch by its upstream, and the deploy fetches only `main`, so
+`origin/<name>` is a stale remote-tracking ref the local branch is "ahead" of — on 2026-11-16 that
+kept 10 of 13 merged branches on the main server. Not `git branch --merged` either: on a detached
+HEAD (a relay, always) it also prints `(HEAD detached at <sha>)`. Every refusal is only a `WARN`.
+Each deletion is logged as `merged branch: Deleted branch <name> (was <sha>)`; DEPLOY OK carries
+`merged branches : N deleted …, M kept …`. To get one back:
 
 ```bash
 git -C /opt/vpn-service branch <name> <sha>

@@ -5061,30 +5061,131 @@ noop_pin_branch() {
 # --------------------------------------------------------------------------- #
 # A checkout that once followed feature branches keeps every one of them (the main
 # server had 15 on 2026-11-16). Once a deploy is certain — after disarm, so this can
-# never roll a deploy back — every local branch `git branch --merged origin/main`
-# lists, except the branch the tree is on and DEPLOY_BRANCH, is deleted with
-# `git branch -d`. NEVER -D: git itself refuses a branch whose commits are not merged
-# (into its upstream, or into HEAD when it has none) or that another worktree has
-# checked out, and such a refusal is a warning, never a failure. Every deletion is
-# logged with the commit it pointed at ("Deleted branch X (was <sha>)"), so a branch
-# comes back with `git branch X <sha>`. DEPLOY OK carries one counter line.
+# never roll a deploy back — every local branch whose tip is an ANCESTOR OF
+# origin/main is deleted, except the branch the tree is on and DEPLOY_BRANCH.
+#
+# Candidates: `git for-each-ref --merged origin/main refs/heads/`, branches only, each
+# with the sha it pointed at when listed. Not `git branch --merged`: on a detached HEAD
+# (a relay, always) it also prints the pseudo-line "(HEAD detached at <sha>)", which
+# was then fed to the deletion — a WARN on every relay deploy.
+#
+# The rule: the listed sha is an ancestor of origin/main, re-checked right before the
+# deletion (`git merge-base --is-ancestor <sha> origin/main`), and the deletion is
+# `git update-ref -d refs/heads/<b> <sha>` — WITH the old value, so git refuses when
+# the branch has moved since it was listed: what goes is exactly a commit origin/main
+# contains. Then `git config --remove-section branch.<b>` (no section is fine). A
+# branch that is not an ancestor of origin/main is never touched; NEVER -D.
+#
+# Why not `git branch -d`: it checks a branch against its UPSTREAM when it has one,
+# not against origin/main. The deploy fetches only main, so origin/<b> is a stale
+# remote-tracking ref, and a local branch that an old deploy moved with reset --hard
+# is "ahead" of it (up to 149 commits). On 2026-11-16 that refused 10 of 13 merged
+# branches on the main server: "not deleting branch '<b>' that is not yet merged to
+# 'refs/remotes/origin/<b>', even though it is merged to HEAD".
+#
+# update-ref, unlike branch -d, has none of git's "branch in use" checks, so they are
+# done here (merged_branches_held): a branch another worktree has checked out, or
+# one a rebase or bisect in any worktree is working on (the worktree then shows as
+# detached), is kept — deleting it would leave that worktree on a missing branch or
+# break `git rebase --continue`. A SYMBOLIC branch ref is kept too: update-ref
+# follows it and would delete its target (refs/heads/alias -> main would take main);
+# --no-deref covers one that turns symbolic after the listing. Every refusal is a
+# warning, never a failure. Every deletion is logged with the commit it pointed at
+# ("Deleted branch X (was <sha>)"), so a branch comes back with `git branch X <sha>`.
+# DEPLOY OK carries one counter line.
 MERGED_DELETED=0
 MERGED_KEPT=0
 delete_merged_branches() {
-  local current b out
+  local current line ref sha symref b out rc
+  local -A held=()
   MERGED_DELETED=0; MERGED_KEPT=0
   current="$(current_branch)"
-  while IFS= read -r b; do
-    [[ -n "$b" && "$b" != "$current" && "$b" != "$DEPLOY_BRANCH" ]] || continue
-    if out="$(git branch -d -- "$b" 2>&1)"; then
-      MERGED_DELETED=$(( MERGED_DELETED + 1 ))
-      log "merged branch: ${out}"
-    else
+  while IFS= read -r line; do
+    held["${line%%$'\t'*}"]="${line#*$'\t'}"
+  done < <(merged_branches_held)
+  while IFS=' ' read -r ref sha symref; do
+    [[ "$ref" == refs/heads/?* && -n "$sha" ]] || continue
+    b="${ref#refs/heads/}"
+    [[ "$b" != "$current" && "$b" != "$DEPLOY_BRANCH" ]] || continue
+    if [[ -n "$symref" ]]; then
       MERGED_KEPT=$(( MERGED_KEPT + 1 ))
-      warn "merged branch ${b} kept — git branch -d refused: ${out//$'\n'/; }"
+      warn "merged branch ${b} kept — a symbolic ref to ${symref}, never deleted (update-ref would take ${symref})"
+      continue
     fi
-  done < <(git branch --format='%(refname:short)' --merged origin/main 2>/dev/null || true)
+    if [[ -n "${held[$ref]+x}" ]]; then
+      MERGED_KEPT=$(( MERGED_KEPT + 1 ))
+      warn "merged branch ${b} kept — ${held[$ref]}"
+      continue
+    fi
+    rc=0; git merge-base --is-ancestor "$sha" origin/main >/dev/null 2>&1 || rc=$?
+    if (( rc != 0 )); then
+      MERGED_KEPT=$(( MERGED_KEPT + 1 ))
+      warn "merged branch ${b} kept — ${sha} is not an ancestor of origin/main (git merge-base --is-ancestor: rc=${rc})"
+      continue
+    fi
+    if ! out="$(git update-ref --no-deref -d "$ref" "$sha" 2>&1)"; then
+      MERGED_KEPT=$(( MERGED_KEPT + 1 ))
+      warn "merged branch ${b} kept — git update-ref --no-deref -d ${ref} ${sha} refused: ${out//$'\n'/; }"
+      continue
+    fi
+    if ! git config --remove-section "branch.${b}" >/dev/null 2>&1 && branch_config_left "$b"; then
+      warn "merged branch ${b}: its config section is left (git config --remove-section branch.${b} failed) — harmless, remove it by hand"
+    fi
+    MERGED_DELETED=$(( MERGED_DELETED + 1 ))
+    log "merged branch: Deleted branch ${b} (was ${sha})."
+  done < <(git for-each-ref --format='%(refname) %(objectname) %(symref)' --merged origin/main refs/heads/ 2>/dev/null || true)
   return 0
+}
+
+# The branches git itself treats as in use, one "<refs/heads/X><TAB><why>" per line (a
+# tab never occurs in a refname, "|" may): the branch each OTHER worktree has checked
+# out (this one's is `current`, excluded anyway), and the branch a rebase
+# (rebase-merge/ or rebase-apply/head-name) or a bisect (BISECT_START) is working on
+# in any worktree, this one included. Those worktrees are detached while it runs, so
+# the porcelain listing alone misses them.
+merged_branches_held() {
+  local line wt="" here common gd f name
+  here="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  here="$(realpath -m "${here:-$PWD}" 2>/dev/null || printf '%s' "${here:-$PWD}")"
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) wt="${line#worktree }" ;;
+      "branch refs/heads/"*)
+        if [[ "$(realpath -m "$wt" 2>/dev/null || printf '%s' "$wt")" != "$here" ]]; then
+          printf '%s\tchecked out in another worktree (%s)\n' "${line#branch }" "$wt"
+        fi ;;
+    esac
+  done < <(git worktree list --porcelain 2>/dev/null || true)
+  common="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+  [[ -n "$common" ]] || return 0
+  for gd in "$common" "$common"/worktrees/*; do
+    [[ -d "$gd" ]] || continue
+    for f in rebase-merge/head-name rebase-apply/head-name; do
+      name=""
+      [[ -r "${gd}/${f}" ]] && { IFS= read -r name < "${gd}/${f}" || true; }
+      if [[ "$name" == refs/heads/?* ]]; then
+        printf '%s\tbeing rebased (%s)\n' "$name" "${gd}/${f%%/*}"
+      fi
+    done
+    name=""
+    [[ -r "${gd}/BISECT_START" ]] && { IFS= read -r name < "${gd}/BISECT_START" || true; }
+    if [[ -n "$name" ]]; then
+      printf 'refs/heads/%s\tbeing bisected (%s)\n' "${name#refs/heads/}" "${gd}/BISECT_START"
+    fi
+  done
+  return 0
+}
+
+# Does the repo config still hold a key of section [branch "<b>"]? Exact subsection
+# match, no regex built from the name ("feat" is not "feat.x"); locale-proof, unlike
+# reading git's "no such section" message.
+branch_config_left() {
+  local n
+  while IFS= read -r n; do
+    n="${n#branch.}"
+    [[ "${n%.*}" == "$1" ]] && return 0
+  done < <(git config --local --name-only --get-regexp '^branch\.' 2>/dev/null || true)
+  return 1
 }
 
 # The DEPLOY OK counter line.
@@ -5092,7 +5193,7 @@ merged_branches_summary() {
   if (( MERGED_DELETED + MERGED_KEPT == 0 )); then
     printf 'none merged into origin/main besides %s' "$DEPLOY_BRANCH"
   else
-    printf '%s deleted (git branch -d; each with its sha in the log above), %s kept (git refused — see the WARN lines)' \
+    printf '%s deleted (ancestors of origin/main; each with its sha in the log above), %s kept (see the WARN lines)' \
       "$MERGED_DELETED" "$MERGED_KEPT"
   fi
 }

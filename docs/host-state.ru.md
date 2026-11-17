@@ -88,6 +88,8 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/usr/local/bin/wgcf`, `/usr/local/bin/qr` | backup-only (`installer`) | их собственные установщики | — (переустанавливаются) | |
 | `/etc/nginx/conf.d/*.conf` | backup-only | оператор | `/etc/nginx/conf.d` | vhost decoy / self-steal с доменом хоста; шаблон в репо — отдельная задача |
 | `/etc/netplan/*` | backup-only (`provider`) | образ VPS | `/etc/netplan` | вне сканируемого набора; перечислен для полноты |
+| `/etc/ssh/sshd_config.d/60-cloudimg-settings.conf` | backup-only (`provider`) | образ VPS (ни один пакет им не владеет) | `/etc/ssh` | одна строка `PasswordAuthentication no` — совпадает с политикой репо; наши `00-*` читаются раньше (first match wins) |
+| `/etc/sysctl.d/99-cloudimg-ipv6.conf` | backup-only (`provider`) | образ VPS (ни один пакет им не владеет) | `/etc/sysctl.d` | `use_tempaddr = 0` для `all`/`default`; на хосте без IPv6 ни на что не влияет |
 | `/var/spool/cron/crontabs/root` | backup-only | acme.sh (строка `--cron`) | `/var/spool/cron/crontabs` | |
 | `/usr/local/sbin/site-freshen.py` | backup-only (`deployment-local`) | оператор | `/usr/local/sbin` | перезаписыватель decoy — [по замыслу](hysteria.ru.md) никогда не в репо, поэтому offsite system-бандл — его единственная копия вне хоста |
 | `/etc/sysctl.d/99-amneziawg.conf` | retired | — | — | дубль `ip_forward=1` |
@@ -120,6 +122,7 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/systemd/system/vpn-bot-host-check.service`, `.timer` | repo-managed (`unit`) | deploy.sh | как на main; вердикт relay остаётся в его журнале — [Между деплоями](#между-деплоями) |
 | `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh | cloud-init выключен |
 | `/etc/ssh/sshd_config.d/50-cloud-init.conf`, `/etc/sudoers.d/90-cloud-init-users` | retired | — | вход по паролю и `NOPASSWD:ALL` от cloud-init |
+| `/etc/ssh/sshd_config.d/60-cloudimg-settings.conf`, `/etc/sysctl.d/99-cloudimg-ipv6.conf` | backup-only (`provider`) | образ VPS (ни один пакет им не владеет) | как на main |
 | `/etc/systemd/system/vpn-relay.service` | repo-managed | deploy.sh, как есть | |
 | `/etc/sysctl.d/90-vpn-relay.conf` | шаблон + значения хоста | `vpn-relay-apply apply`, из `.env` relay | |
 | `/etc/apt/sources.list.d/ookla_speedtest-cli.list` | retired | — | как на main |
