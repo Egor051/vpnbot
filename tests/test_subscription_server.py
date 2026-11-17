@@ -2507,3 +2507,269 @@ async def test_relay_probe_connects_to_every_port_at_once(tmp_path: Path) -> Non
         await client.close()
         await store.close()
         await harness.db.close()
+
+
+# ── the fallback mode (hub): rate limit, ssh-probe, fallback-url ──────────────
+#
+# docs/relay.md «Режим фолбэка». In the fallback mode every client — and every RU
+# relay — reaches this server from the hub's address (the hub masquerades), so a
+# limit per peer would be one bucket for everybody and the ssh-probe would connect
+# back to the hub instead of the relay that asked.
+
+HUB_PEER = "192.0.2.10"
+
+
+async def _make_hub(harness: _Harness, *, name: str = "he1", source_ips: str = "192.0.2.0/28",
+                    enabled: bool = True) -> int:
+    from repositories.relays import RelayRepository
+
+    relay_id = await _add_relay(harness, name=name, source_ips=source_ips, enabled=enabled)
+    assert await RelayRepository(harness.db).set_role(relay_id, "hub", now="2026-11-17T00:00:00+00:00", updated_by=None)
+    return relay_id
+
+
+async def test_requests_through_a_hub_are_limited_per_token_not_per_peer(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path, subscription_rate_limit_seconds=30, subscription_rate_limit_burst=2)
+    await _make_hub(harness)
+    client, store, _ = await _probe_client(harness)
+    other = "A" * 43  # well-formed, unknown: its own bucket, a 404
+    try:
+        via_hub = {"X-Test-Peer": HUB_PEER}
+        for _ in range(2):
+            assert (await client.get(f"/sub/{harness.token}", headers=via_hub)).status == 200
+        assert (await client.get(f"/sub/{harness.token}", headers=via_hub)).status == 429
+        # Another subscriber behind the same hub is NOT throttled by the first one.
+        assert (await client.get(f"/sub/{other}", headers=via_hub)).status == 404
+        assert (await client.get(f"/sub/{other}", headers=via_hub)).status == 404
+        # ...and the 429 still comes BEFORE the lookup: an unknown token is throttled
+        # exactly like a real one, so the refusal tells nothing about existence.
+        assert (await client.get(f"/sub/{other}", headers=via_hub)).status == 429
+
+        # Outside the hub the bucket is the peer, as before: one peer, two tokens.
+        direct = {"X-Test-Peer": "198.51.100.9"}
+        assert (await client.get(f"/sub/{harness.token}", headers=direct)).status == 200
+        assert (await client.get(f"/sub/{other}", headers=direct)).status == 404
+        assert (await client.get(f"/sub/{harness.token}", headers=direct)).status == 429
+        # An IPv4-mapped hub peer is the hub too.
+        mapped = {"X-Test-Peer": f"::ffff:{HUB_PEER}"}
+        assert (await client.get(f"/sub/{harness.token}", headers=mapped)).status == 429
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_a_hub_rate_limit_refusal_logs_no_token(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    from subscription_server.server import _bucket_tag, _token_key
+
+    harness = await _seed(tmp_path, subscription_rate_limit_seconds=30, subscription_rate_limit_burst=1)
+    await _make_hub(harness)
+    client, store, _ = await _probe_client(harness)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            assert (await client.get(f"/sub/{harness.token}", headers={"X-Test-Peer": HUB_PEER})).status == 200
+            assert (await client.get(f"/sub/{harness.token}", headers={"X-Test-Peer": HUB_PEER})).status == 429
+        refusal = [r.getMessage() for r in caplog.records if "rate limit hit" in r.getMessage()]
+        assert len(refusal) == 1
+        assert "token bucket (via hub)" in refusal[0]
+        assert _bucket_tag(_token_key(harness.token)) in refusal[0]
+        for text in (caplog.text, refusal[0]):
+            assert harness.token not in text
+            for length in (8, 12, 16):
+                assert harness.token[:length] not in text
+        assert token_fingerprint(harness.token) not in refusal[0]
+        assert HUB_PEER not in caplog.text
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+def test_the_token_bucket_is_not_the_token_or_its_fingerprint() -> None:
+    from subscription_server.server import _bucket_tag, _client_key, _token_key
+
+    token = "B" * 43
+    assert _token_key(token) == _token_key(token)
+    assert _token_key(token) != _token_key("C" * 43)
+    tag = _bucket_tag(_token_key(token))
+    assert token[:8] not in tag and tag not in token_fingerprint(token)
+    # Never the peer bucket of the same string either.
+    assert _token_key(token) != _client_key(SimpleNamespace(remote=token))  # type: ignore[arg-type]
+
+
+async def test_hub_networks_are_cached_and_survive_a_failed_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subscription_server.server import _HubNetworks
+
+    harness = await _seed(tmp_path)
+    await _make_hub(harness)
+    store = ReadOnlyBundleStore(harness.db.path)
+    await store.connect()
+    now = [0.0]
+    cache = _HubNetworks(ttl=30.0, clock=lambda: now[0])
+    try:
+        first = await cache.get(store)
+        assert [str(n) for n in first] == ["192.0.2.0/28"]
+
+        async def _boom() -> object:
+            raise BundleStoreUnavailable("disk I/O error")
+
+        monkeypatch.setattr(store, "load_relays", _boom)
+        assert await cache.get(store) == first  # within the TTL: not read at all
+        now[0] = 31.0
+        assert await cache.get(store) == first  # read failed: the previous set holds
+    finally:
+        await store.close()
+        await harness.db.close()
+
+
+@pytest.mark.parametrize("hub_enabled", [True, False])
+async def test_relay_probe_refuses_a_caller_inside_a_hubs_source_ips(tmp_path: Path, hub_enabled: bool) -> None:
+    """SECURITY: a hub masquerades the subscription port. In the fallback mode an RU
+    relay's POST /relay/ssh-probe arrives from the HUB's address; connecting back
+    would test the hub's SSH ports and confirm a filter that is somebody else's.
+    So a caller inside any hub's source IPs gets the stranger's 404 — even when an
+    ordinary relay also covers that address — and no connection is opened."""
+    harness = await _seed(tmp_path)
+    await _make_hub(harness, source_ips="203.0.113.0/28", enabled=hub_enabled)
+    # An enabled edge relay whose source IPs ALSO cover the peer: without the hub
+    # rule, _relay_of would answer it.
+    await _add_relay(harness, name="ru1", source_ips="203.0.113.0/24")
+    client, store, connect = await _probe_client(harness)
+    try:
+        status, text, _ = await _post_probe(client, "[22]", peer=RELAY_PEER)
+        assert (status, text) == (404, "")
+        status, text, _ = await _post_probe(client, "[22]", peer=f"::ffff:{RELAY_PEER}")
+        assert (status, text) == (404, "")
+        assert connect.calls == [], "nothing behind a hub is ever probed"
+        # Outside the hub's networks the edge relay is answered exactly as before.
+        status, text, _ = await _post_probe(client, "[22]", peer="203.0.113.77")
+        assert (status, text) == (200, '{"22":"ok"}')
+        assert connect.calls == [("203.0.113.77", 22, 5.0)]
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_a_relay_stops_being_probed_the_moment_it_becomes_a_hub(tmp_path: Path) -> None:
+    from repositories.relays import RelayRepository
+
+    harness = await _seed(tmp_path)
+    relay_id = await _add_relay(harness)
+    client, store, connect = await _probe_client(harness)
+    try:
+        assert (await _post_probe(client, "[22]"))[0] == 200
+        await RelayRepository(harness.db).set_role(relay_id, "hub", now="2026-11-17T00:00:00+00:00", updated_by=None)
+        assert (await _post_probe(client, "[22]"))[:2] == (404, "")
+        assert len(connect.calls) == 1
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def _set_meta(harness: _Harness, key: str, value: str) -> None:
+    await harness.db.set_meta(key, value)
+
+
+async def _public_client(harness: _Harness, port: int) -> tuple[TestClient, ReadOnlyBundleStore]:
+    """A client of an endpoint whose settings carry a public port (the TLS listener
+    itself is not what these tests are about, so the config is built around it)."""
+    from dataclasses import replace
+
+    store = ReadOnlyBundleStore(harness.db.path)
+    await store.connect()
+    config = load_config(harness.settings)
+    config = replace(config, settings=replace(harness.settings, subscription_public_port=port))
+    client = TestClient(TestServer(build_app(store, config)))
+    await client.start_server()
+    return client, store
+
+
+async def test_fallback_url_header_is_off_by_default(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path)
+    await _make_hub(harness)
+    client, store = await _public_client(harness, 2096)
+    try:
+        resp = await client.get(f"/sub/{harness.token}")
+        assert resp.status == 200
+        assert "fallback-url" not in resp.headers
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_fallback_url_header_points_at_the_hub_when_switched_on(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path)
+    hub_id = await _make_hub(harness)
+    await _set_meta(harness, "failover_sub_fallback_url", "1")
+    client, store = await _public_client(harness, 2096)
+    try:
+        resp = await client.get(f"/sub/{harness.token}")
+        assert resp.status == 200
+        assert resp.headers["fallback-url"] == f"https://he1.example.net:2096/sub/{harness.token}"
+        # Two enabled hubs: no single hub to name (select_hub) — no header.
+        await _make_hub(harness, name="he9", source_ips="192.0.2.64/28")
+        assert "fallback-url" not in (await client.get(f"/sub/{harness.token}")).headers
+        # The extra hub switched off: the first is THE hub again.
+        from repositories.relays import RelayRepository
+
+        extra = await RelayRepository(harness.db).get_by_name("he9")
+        assert extra is not None
+        await RelayRepository(harness.db).update(extra.id, {"enabled": False}, now="x", updated_by=None)
+        assert (await client.get(f"/sub/{harness.token}")).headers["fallback-url"].startswith("https://he1.example.net")
+        assert hub_id
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+def test_fallback_url_needs_a_public_port_and_drops_the_default_https_port(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from models.dto import KeyBundle, Relay
+    from services.relay import RelaySnapshot
+    from subscription_server.render import fallback_url
+    from subscription_server.store import BundleView
+
+    hub = Relay(
+        id=1, name="he1", label="he1", host="hub.example.net",
+        source_ips=validators_networks("192.0.2.0/28"), enabled=True, in_subscriptions=False, note=None,
+        created_at="x", updated_at="x", created_by=None, updated_by=None, role="hub",
+    )
+    bundle = SimpleNamespace(token="tok/en")
+    view = BundleView(bundle=bundle, keys=(), traffic=None, relays=RelaySnapshot.of([hub]), fallback_url=True)  # type: ignore[arg-type]
+    assert fallback_url(view, _settings(tmp_path, subscription_public_port=443)) == "https://hub.example.net/sub/tok%2Fen"
+    assert fallback_url(view, _settings(tmp_path, subscription_public_port=0)) is None
+    assert fallback_url(replace(view, fallback_url=False), _settings(tmp_path, subscription_public_port=443)) is None
+    assert KeyBundle  # imported for the type only
+
+
+def validators_networks(value: str) -> tuple[object, ...]:
+    from config import validators
+
+    return validators.parse_ipv4_networks("source_ips", value)
+
+
+async def test_direct_children_follow_the_direct_host_name(tmp_path: Path) -> None:
+    """«host прямых ссылок = имя»: subscriptions are rendered on the fly, so the
+    direct children carry the name on the very next fetch; unset — the .env host."""
+    harness = await _seed(tmp_path)
+    client, store = await _client(harness)
+    try:
+        before = _decode(await (await client.get(f"/sub/{harness.token}")).text())
+        assert any("@vpn.example.com:443" in link for link in before)
+        await _set_meta(harness, "failover_direct_host", "edge.example.net")
+        after = _decode(await (await client.get(f"/sub/{harness.token}")).text())
+        assert not any("@vpn.example.com:" in link for link in after)
+        assert len([link for link in after if "@edge.example.net:443" in link]) == len(before)
+        # Only the host moved: everything else in every link is byte-identical.
+        assert [link.replace("edge.example.net", "vpn.example.com") for link in after] == before
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()

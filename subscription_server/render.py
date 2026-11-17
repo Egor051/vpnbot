@@ -2,6 +2,7 @@
 import base64
 import logging
 import time
+from urllib.parse import quote
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ from models.dto import VpnKey
 from models.enums import KeyBundleKind, VpnKeyType
 from services.key_bundles import subscription_sort_key
 from services.key_naming import NameStyle, bundle_name_style, key_display_name, key_member_name
-from services.relay import RelayCatalog, RelaySnapshot, basic_visible_child, relay_available
+from services.relay import RelayCatalog, RelaySnapshot, basic_visible_child, relay_available, select_hub
 from services.xray import XrayService
 from subscription_server.store import BundleView
 
@@ -241,7 +242,29 @@ def _headers(view: BundleView, settings: Settings) -> dict[str, str]:
     userinfo = _subscription_userinfo(view)
     if userinfo:
         headers["Subscription-Userinfo"] = userinfo
+    fallback = fallback_url(view, settings)
+    if fallback:
+        headers["fallback-url"] = fallback
     return headers
+
+
+def fallback_url(view: BundleView, settings: Settings) -> str | None:
+    """``https://<hub host>:<SUBSCRIPTION_PUBLIC_PORT>/sub/<token>`` — or None.
+
+    Only when the admin switched «fallback-url в подписке» on (off by default),
+    there is exactly one enabled hub (services.relay.select_hub) and the endpoint
+    has a public port. Happ reads this header only for a subscription with a
+    Provider ID; the fallback mode's real mechanism is the DNS switch
+    (docs/relay.md). The hub forwards the subscription port to this server, so the
+    URL reaches the very same endpoint; its certificate must cover the hub's host.
+    """
+    if not view.fallback_url or settings.subscription_public_port <= 0:
+        return None
+    hub = select_hub(view.relays.hubs)
+    if hub is None or not hub.host:
+        return None
+    netloc = hub.host if settings.subscription_public_port == 443 else f"{hub.host}:{settings.subscription_public_port}"
+    return f"https://{netloc}/sub/{quote(view.bundle.token, safe='')}"
 
 
 def _profile_title(label: str) -> str:

@@ -62,10 +62,31 @@ class RelaySnapshot:
     """
 
     relays: tuple[Relay, ...] = ()
+    # The DNS name direct links point at instead of XRAY_PUBLIC_HOST /
+    # HYSTERIA2_HOST (the fallback mode's «host прямых ссылок», schema_meta);
+    # None — the .env value, exactly as before. Read with the table, so the bot and
+    # the subscription endpoint render direct links from the same value.
+    direct_host: str | None = None
 
     @classmethod
-    def of(cls, relays: Iterable[Relay]) -> RelaySnapshot:
-        return cls(tuple(sorted(relays, key=lambda relay: relay.id)))
+    def of(cls, relays: Iterable[Relay], *, direct_host: str | None = None) -> RelaySnapshot:
+        return cls(tuple(sorted(relays, key=lambda relay: relay.id)), direct_host=direct_host or None)
+
+    @property
+    def hubs(self) -> tuple[Relay, ...]:
+        """Relays with the role 'hub' (enabled or not), in ``id`` order."""
+        return tuple(relay for relay in self.relays if relay.is_hub)
+
+    @property
+    def hub_networks(self) -> tuple[ipaddress.IPv4Network, ...]:
+        """The source IPs of every hub: in the fallback mode the main server sees
+        EVERY relayed client — and every RU relay — come from these."""
+        networks: list[ipaddress.IPv4Network] = []
+        for relay in self.hubs:
+            for network in relay.source_ips:
+                if network not in networks:
+                    networks.append(network)
+        return tuple(networks)
 
     def get(self, name: str) -> Relay | None:
         """The relay named *name*, enabled or not; None when there is none."""
@@ -143,6 +164,18 @@ class RelayCatalog:
         self._snapshot = snapshot
 
 
+def select_hub(hubs: Iterable[Relay]) -> Relay | None:
+    """The hub the fallback mode uses — THE seam of a future balancer.
+
+    The model allows several relays with the role 'hub'; today the mode works with
+    exactly one ENABLED hub and this returns it (None for none or several, which
+    the fallback service reports). A balancer would pick here, and the failover
+    names would then carry several addresses.
+    """
+    enabled = [relay for relay in hubs if relay.is_hub and relay.enabled]
+    return enabled[0] if len(enabled) == 1 else None
+
+
 def serves_basic(relay: Relay) -> bool:
     """A relay a BASIC subscription shows: enabled, «в подписках» and «👁 в базовых».
 
@@ -184,12 +217,14 @@ def relay_available(relays: RelaySnapshot, relay: str) -> bool:
 def relay_link_host(relays: RelaySnapshot, relay: str | None, *, direct_host: str) -> str:
     """The host a key's link points at.
 
-    ``relay is None`` → *direct_host*, exactly as before relays existed. An
-    enabled relay → its ``host``. Anything else (switched off, deleted, unknown)
-    → :class:`RelayUnavailable`, never a fallback.
+    ``relay is None`` → the snapshot's :attr:`RelaySnapshot.direct_host` when the
+    admin set one (a DNS name: in the fallback mode it can move with the failover
+    set), else *direct_host* — exactly as before relays existed. An enabled relay →
+    its ``host``. Anything else (switched off, deleted, unknown) →
+    :class:`RelayUnavailable`, never a fallback.
     """
     if relay is None:
-        return direct_host
+        return relays.direct_host or direct_host
     known = relays.get(relay)
     if known is not None and known.enabled and known.host:
         return known.host

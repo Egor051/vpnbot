@@ -793,6 +793,7 @@ STRINGS: dict[str, str] = {
     "relay_health_line": "{icon} {reason} ({time})",
     "relay_reason_ok": "TCP ✓ · UDP {udp}",
     "relay_reason_ok_agent": "TCP ✓ · UDP {udp} · агент ✓",
+    "relay_reason_behind_hub": "за hub: режим фолбэка, напрямую с main недоступен — ожидаемо, без алертов",
     "relay_reason_tcp_down": "TCP {port} через relay не проходит — ключи через relay не работают",
     "relay_reason_udp_down": "UDP {port} (Hysteria2) через relay не проходит",
     "relay_reason_tcp_udp_down": "TCP {port} и UDP {udp_port} через relay не проходят — ключи через relay не работают",

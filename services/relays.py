@@ -252,6 +252,7 @@ def _audit_view(relay: Relay) -> dict[str, object]:
         "in_subscriptions": relay.in_subscriptions,
         "basic_visible": relay.basic_visible,
         "note": relay.note,
+        "role": relay.role,
     }
     if relay.agent is not None:
         view["agent"] = {
@@ -460,7 +461,7 @@ class RelayService:
 
     async def refresh_catalog(self) -> RelaySnapshot:
         """Re-read the table into the bot's snapshot (after every write, and at startup)."""
-        snapshot = RelaySnapshot.of(await self.relays.list_all())
+        snapshot = RelaySnapshot.of(await self.relays.list_all(), direct_host=await self.relays.direct_host())
         self.catalog.replace(snapshot)
         return snapshot
 

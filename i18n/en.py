@@ -783,6 +783,7 @@ STRINGS: dict[str, str] = {
     "relay_health_line": "{icon} {reason} ({time})",
     "relay_reason_ok": "TCP ✓ · UDP {udp}",
     "relay_reason_ok_agent": "TCP ✓ · UDP {udp} · agent ✓",
+    "relay_reason_behind_hub": "behind the hub: fallback mode, not reachable from main directly — expected, no alerts",
     "relay_reason_tcp_down": "TCP {port} through the relay fails — keys through the relay do not work",
     "relay_reason_udp_down": "UDP {port} (Hysteria2) through the relay fails",
     "relay_reason_tcp_udp_down": "TCP {port} and UDP {udp_port} through the relay fail — keys through the relay do not work",

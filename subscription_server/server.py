@@ -33,6 +33,35 @@ _CLOCK_KEY: web.AppKey[Callable[[], float]] = web.AppKey("subscription_clock")
 # is 127.0.0.1, which the handler refuses to connect to).
 _PROBE_CONNECT_KEY: web.AppKey[ProbeConnect] = web.AppKey("relay_probe_connect")
 
+
+class _HubNetworks:
+    """The source IPs of every hub (fallback mode), cached for :attr:`ttl` seconds.
+
+    The rate limiter asks on every ``GET /sub`` BEFORE anything else, and that check
+    exists to keep a flood away from the database — so it must not read the database
+    per request. A hub added or removed in the panel is picked up within ``ttl``; a
+    failed read keeps the previous set (fails toward the per-peer limit it had).
+    """
+
+    def __init__(self, ttl: float = 30.0, clock: Callable[[], float] = time.monotonic) -> None:
+        self.ttl = ttl
+        self._clock = clock
+        self._networks: tuple[ipaddress.IPv4Network, ...] = ()
+        self._expires: float | None = None
+
+    async def get(self, store: ReadOnlyBundleStore) -> tuple[ipaddress.IPv4Network, ...]:
+        now = self._clock()
+        if self._expires is None or now >= self._expires:
+            try:
+                self._networks = (await store.load_relays()).hub_networks
+            except BundleStoreUnavailable:
+                pass
+            self._expires = now + self.ttl
+        return self._networks
+
+
+_HUB_NETWORKS_KEY: web.AppKey[_HubNetworks] = web.AppKey("hub_networks", _HubNetworks)
+
 # POST /relay/ssh-probe — main proves to a relay that a NEW TCP connection from the
 # outside reaches its SSH ports through the relay's input filter (docs/relay.md).
 RELAY_PROBE_PATH = "/relay/ssh-probe"
@@ -117,6 +146,38 @@ def _client_key(request: web.Request) -> int:
     return int.from_bytes(hashlib.sha256(remote.encode("utf-8")).digest()[:8], "big")
 
 
+def _token_key(token: str) -> int:
+    """The limiter bucket of one subscription token (a request that came through a hub).
+
+    In the fallback mode every client reaches this server from the hub's address, so
+    a bucket per peer would be ONE bucket for everybody behind it. Such requests are
+    limited per token instead — keyed by a hash under its own prefix (neither the
+    token nor its log fingerprint can be read back from the bucket or its tag), and
+    still checked BEFORE the token is looked up, so a 429 says nothing about whether
+    the token exists.
+    """
+    digest = hashlib.sha256(b"vpnbot-sub-token\0" + token.encode("utf-8", errors="replace")).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def _peer_ipv4(remote: str | None) -> ipaddress.IPv4Address | None:
+    """The peer as an IPv4 address (an IPv4-mapped IPv6 peer unwrapped), or None."""
+    if not remote:
+        return None
+    try:
+        address = ipaddress.ip_address(remote)
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address):
+        return address.ipv4_mapped
+    return address
+
+
+def _from_hub(remote: str | None, hubs: tuple[ipaddress.IPv4Network, ...]) -> bool:
+    peer = _peer_ipv4(remote)
+    return peer is not None and any(peer in network for network in hubs)
+
+
 def _bucket_tag(bucket: int) -> str:
     """The limiter bucket as a short, stable tag for logs.
 
@@ -152,7 +213,9 @@ async def _subscription_handler(request: web.Request) -> web.Response:
         cooldown = config.settings.subscription_rate_limit_seconds
         if cooldown > 0:
             burst = config.settings.subscription_rate_limit_burst
-            bucket = _client_key(request)
+            hubs = await request.app[_HUB_NETWORKS_KEY].get(store)
+            via_hub = _from_hub(request.remote, hubs)
+            bucket = _token_key(request.match_info.get("token", "")) if via_hub else _client_key(request)
             try:
                 # Deliberately BEFORE the token is looked at: a 429 must not
                 # depend on whether the token exists, or the refusal itself would
@@ -164,8 +227,9 @@ async def _subscription_handler(request: web.Request) -> web.Response:
                 # is all a diagnosis needs, and a rejected request must not put
                 # anything token-shaped in the log.
                 logger.warning(
-                    "subscription: rate limit hit for client %s — %d requests per %ds exhausted, "
+                    "subscription: rate limit hit for %s %s — %d requests per %ds exhausted, "
                     "answering 429 (Retry-After: %ds)",
+                    "token bucket (via hub)" if via_hub else "client",
                     _bucket_tag(bucket),
                     burst,
                     cooldown,
@@ -352,6 +416,14 @@ async def _relay_ssh_probe_handler(request: web.Request) -> web.Response:
             relays = await store.load_relays()
         except BundleStoreUnavailable:
             return _not_found()
+        if any(caller in network for network in relays.hub_networks):
+            # A hub masquerades what it forwards: in the fallback mode an RU relay's
+            # probe reaches this server from the HUB's address, and connecting back
+            # would test the hub's SSH ports and "confirm" the RU relay's filter. The
+            # caller cannot be told apart, so nothing behind a hub is confirmed —
+            # the hub's own filter included (input-confirm by hand, docs/relay.md).
+            logger.info("relay ssh-probe: client %s is a hub — 404, nothing confirmed", _bucket_tag(bucket))
+            return _not_found()
         relay = _relay_of(relays.relays, caller)
         if relay is None:
             # Routine for anyone who finds the route: quiet, and no address in the log.
@@ -406,6 +478,7 @@ def build_app(
     app[_LIMITER_KEY] = RateLimiter()
     app[_CLOCK_KEY] = clock
     app[_PROBE_CONNECT_KEY] = probe_connect
+    app[_HUB_NETWORKS_KEY] = _HubNetworks()
     app.router.add_get("/sub/{token}", _subscription_handler)
     app.router.add_post(RELAY_PROBE_PATH, _relay_ssh_probe_handler)
     return app

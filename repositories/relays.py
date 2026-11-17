@@ -64,6 +64,9 @@ UPDATABLE_COLUMNS: frozenset[str] = frozenset(
 # has no row of its own, so its flag lives in the database's runtime key-value
 # store (db.database.Database.get_meta / set_meta) rather than in .env.
 MAIN_BASIC_VISIBLE_META_KEY = "basic_visible_main"
+# schema_meta key of the direct links' host (repositories.failover.META_DIRECT_HOST
+# is the same string; the fallback service writes it).
+DIRECT_HOST_META_KEY = "failover_direct_host"
 
 _DELETED = VpnKeyStatus.DELETED.value
 _ACTIVE = VpnKeyStatus.ACTIVE.value
@@ -268,6 +271,15 @@ class RelayRepository:
 
     async def set_main_basic_visible(self, visible: bool) -> None:
         await self.db.set_meta(MAIN_BASIC_VISIBLE_META_KEY, "1" if visible else "0")
+
+    async def direct_host(self) -> str | None:
+        """The DNS name direct links point at (fallback mode's setting), None: .env.
+
+        Read here, next to the table, because it rides in the same
+        :class:`services.relay.RelaySnapshot` every link builder reads.
+        """
+        value = ((await self.db.get_meta(DIRECT_HOST_META_KEY)) or "").strip()
+        return value or None
 
     # ── writes ────────────────────────────────────────────────────────────────
 

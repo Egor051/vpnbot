@@ -21,6 +21,7 @@ from aiosqlite import Row
 from db.database import Database
 from models.dto import FailoverName
 from models.enums import VpnKeyStatus
+from repositories.relays import DIRECT_HOST_META_KEY
 
 _COLUMNS = "id, name, applied, applied_ipv4, applied_at, last_error, created_at, created_by"
 APPLIED_STATES = frozenset({"normal", "failover"})
@@ -37,7 +38,7 @@ META_HUB_IPV4 = "failover_hub_ipv4"
 META_SUB_FALLBACK_URL = "failover_sub_fallback_url"
 # The DNS name direct links point at instead of XRAY_PUBLIC_HOST / HYSTERIA2_HOST
 # (absent or empty: .env, exactly as before), and when it was set.
-META_DIRECT_HOST = "failover_direct_host"
+META_DIRECT_HOST = DIRECT_HOST_META_KEY
 META_DIRECT_HOST_AT = "failover_direct_host_at"
 
 _ACTIVE = VpnKeyStatus.ACTIVE.value
