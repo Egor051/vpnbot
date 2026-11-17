@@ -1161,7 +1161,8 @@ class KeyBundleService:
         own: list[VpnKey],
         scope: tuple[tuple[str, str], ...],
     ) -> _ReconcilePlan | ReconcileResult:
-        """Remove every child of the relay — nothing else is read beyond emptiness."""
+        """Remove every child of the relay — the rest is read only to see whether the
+        subscription would be left serving nothing."""
         if not own:
             return _noop_result(bundle)
         unsupported = [key for key in own if key.key_type not in _BUNDLE_CHILD_TYPES]
@@ -1171,13 +1172,24 @@ class KeyBundleService:
                 ReconcileSkipReason.UNSUPPORTED_CHILD,
                 tuple(f"{key.key_type.value}#{key.id}" for key in unsupported),
             )
+        # «Would empty» counts what the endpoint would actually SERVE: an active
+        # child that is direct or rides a relay available right now. An active
+        # child of a relay switched off is skipped by the renderer, so it keeps
+        # nothing alive — and removing such children loses nothing either.
+        snapshot = self.relays.snapshot
+
+        def served(key: VpnKey) -> bool:
+            return key.status is VpnKeyStatus.ACTIVE and (
+                key.relay is None or relay_available(snapshot, key.relay)
+            )
+
         own_ids = {key.id for key in own}
-        survivors = [key for key in children if key.id not in own_ids and key.status is VpnKeyStatus.ACTIVE]
-        if not survivors and any(key.status is VpnKeyStatus.ACTIVE for key in own):
+        survivors = [key for key in children if key.id not in own_ids and served(key)]
+        if not survivors and any(served(key) for key in own):
             return _skipped_result(
                 bundle,
                 ReconcileSkipReason.WOULD_EMPTY,
-                tuple(f"{child_audit_name(key)}#{key.id}" for key in own if key.status is VpnKeyStatus.ACTIVE),
+                tuple(f"{child_audit_name(key)}#{key.id}" for key in own if served(key)),
             )
         delete = tuple(sorted(own, key=lambda key: key.id))
         degraded = self._degraded_backend((), delete)

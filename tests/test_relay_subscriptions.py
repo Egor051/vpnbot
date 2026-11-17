@@ -511,6 +511,27 @@ async def test_remove_skips_a_bundle_it_would_leave_without_an_active_key(estate
     assert await estate.rows(bundle.id) == before
 
 
+async def test_remove_counts_a_switched_off_relay_as_serving_nothing(estate: _Estate) -> None:
+    """Direct children revoked, the rest on ru1 and on ru2 — and ru2 is switched
+    off, so the renderer skips its children. Removing ru1 would leave nothing to
+    serve (a 404): skipped. Removing ru2 instead loses nothing served: allowed."""
+    await estate.add_relay("ru1", in_subscriptions=True)
+    ru2 = await estate.add_relay("ru2", in_subscriptions=True)
+    bundle = await estate.create(KeyBundleKind.BASIC)
+    await _set(estate, "UPDATE vpn_keys SET status = 'revoked' WHERE bundle_id = ? AND relay IS NULL", bundle.id)
+    await estate.relays.update(ADMIN, ru2.id, enabled=False)
+    before = await estate.rows(bundle.id)
+
+    [result] = (await estate.remove("ru1")).results
+
+    assert result.outcome is ReconcileOutcome.SKIPPED and result.skip_reason is ReconcileSkipReason.WOULD_EMPTY
+    assert await estate.rows(bundle.id) == before
+    assert await estate.hosts(bundle.id) == [HOSTS["ru1"]] * 2  # still served
+    [result] = (await estate.remove("ru2")).results
+    assert result.outcome is ReconcileOutcome.APPLIED and len(result.deleted_key_ids) == 2
+    assert await estate.hosts(bundle.id) == [HOSTS["ru1"]] * 2
+
+
 async def test_only_a_superadmin_runs_it(estate: _Estate) -> None:
     from services.errors import AccessDenied
 
