@@ -17,11 +17,22 @@ def _row(text: str, data: str) -> list[InlineKeyboardButton]:
     return [InlineKeyboardButton(text=text, callback_data=data)]
 
 
+# The relay card's «в подписках» actions as they appear in callback data:
+# ``admin:relay:<id>:subs:<action>[:run]``.
+SUBS_ADD = "add"
+SUBS_REMOVE = "rm"
+SUBS_ACTIONS: tuple[str, ...] = (SUBS_ADD, SUBS_REMOVE)
+
+
 def relays_list_keyboard(
     overviews: Sequence[RelayOverview],
     probes: dict[int, ProbeResult | None] | None = None,
     pending: Sequence[RelayPairing] = (),
+    *,
+    main_basic_visible: bool | None = None,
 ) -> InlineKeyboardMarkup:
+    """The relay list. *main_basic_visible* (when known) adds the main server's
+    «👁 в базовых» switch — the main server has no card of its own."""
     from bot.relays import relay_icon
 
     probes = probes or {}
@@ -34,6 +45,13 @@ def relays_list_keyboard(
         )
     for pairing in pending:
         rows.append(_row(f"⏳ {pairing.name}", f"admin:rpair:{pairing.id}"))
+    if main_basic_visible is not None:
+        rows.append(
+            _row(
+                t("btn_relays_main_basic_on") if main_basic_visible else t("btn_relays_main_basic_off"),
+                "admin:relays:mainbasic",
+            )
+        )
     rows.append(_row(t("btn_relay_add"), "admin:relay:add"))
     rows.append(_row(t("btn_back"), "admin:grp:infra"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -62,10 +80,11 @@ def relay_card_keyboard(
                     callback_data=f"{base}:toggle:enabled",
                 ),
                 InlineKeyboardButton(
-                    text=t("btn_relay_subs_off") if relay.in_subscriptions else t("btn_relay_subs_on"),
-                    callback_data=f"{base}:toggle:subs",
+                    text=t("btn_relay_subs_rm") if relay.in_subscriptions else t("btn_relay_subs_add"),
+                    callback_data=f"{base}:subs:{SUBS_REMOVE if relay.in_subscriptions else SUBS_ADD}",
                 ),
             ],
+            _row(t("btn_relay_basic_on") if relay.basic_visible else t("btn_relay_basic_off"), f"{base}:basic"),
             _row(t("btn_relay_check"), f"{base}:check"),
         ]
     )
@@ -103,8 +122,29 @@ def relay_back_keyboard(relay_id: int | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def relay_subs_confirm_keyboard(relay_id: int, action: str) -> InlineKeyboardMarkup:
+    """Run / cancel under the plan of «Добавить в подписки» / «Убрать из подписок»."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            _row(t("btn_relay_subs_run"), f"admin:relay:{relay_id}:subs:{action}:run"),
+            _row(t("btn_cancel"), f"admin:relay:{relay_id}"),
+        ]
+    )
+
+
+def relay_subs_report_keyboard(relay_id: int, action: str, *, retry: bool) -> InlineKeyboardMarkup:
+    """Under the final report of a run: run it again (it finishes what failed), the
+    relay's page, the list."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if retry:
+        rows.append(_row(t("btn_relay_subs_retry"), f"admin:relay:{relay_id}:subs:{action}"))
+    rows.append(_row(t("btn_relay_page"), f"admin:relay:{relay_id}"))
+    rows.append(_row(t("btn_relays_back"), "admin:relays"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def relay_toggle_confirm_keyboard(relay_id: int, field: str) -> InlineKeyboardMarkup:
-    """Confirm switching a relay off / out of subscriptions while it carries keys."""
+    """Confirm switching a relay off while it carries keys."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             _row(t("btn_confirm"), f"admin:relay:{relay_id}:toggle:{field}:ok"),

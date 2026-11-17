@@ -205,7 +205,7 @@ CREATE TABLE IF NOT EXISTS key_bundles (
 );
 
 -- L4 relays — ONE table for every relay, whoever set it up (docs/relay.md).
--- Mirrors _migrate_v38 + _migrate_v44.
+-- Mirrors _migrate_v38 + _migrate_v44 + _migrate_v45.
 --   name    — immutable slug, the value keys carry in vpn_keys.relay (no FK, see
 --             vpn_keys.relay above). Never reused for a different relay while any
 --             key row still names it — enforced by services.relays.
@@ -216,7 +216,14 @@ CREATE TABLE IF NOT EXISTS key_bundles (
 --   source_ips — normalized comma-separated IPv4/CIDR list, never empty: the
 --             relay's egress addresses, excluded from anomaly-detection IPs.
 --   enabled — 0: links of its keys are refused, it is not offered anywhere.
---   in_subscriptions — 0: new all-in-one bundles get no members through it.
+--   in_subscriptions — 0: new all-in-one bundles get no members through it. The
+--             column default stays 1 (changing a default needs a table rebuild),
+--             but a NEW relay is written with 0 by the code (RelayRepository.create):
+--             «в подписках» is switched on from its card, which also adds its
+--             members to every issued subscription.
+--   basic_visible — 0: BASIC subscriptions do not serve this relay's children
+--             (render-time only; EXTENDED ones are unaffected). Mirrors _migrate_v45.
+--             The main server's twin lives in schema_meta (basic_visible_main).
 -- How the relay is MANAGED (its agent, vpn-relay-agent) is a property of the
 -- relay, not a separate entity: «the relay has an agent» = ssh_host IS NOT NULL,
 -- and then every agent column below is set (services.relays writes them all at
@@ -249,7 +256,8 @@ CREATE TABLE IF NOT EXISTS relays (
   agent_version TEXT,
   agent_paired_at TEXT,
   agent_status_json TEXT,
-  agent_status_at TEXT
+  agent_status_at TEXT,
+  basic_visible INTEGER NOT NULL DEFAULT 1
 );
 
 -- Issued pairing codes (services/relays.py, docs/relay.md). Temporary rows:

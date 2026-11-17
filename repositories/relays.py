@@ -35,7 +35,7 @@ _COLUMNS = (
     "id, name, label, host, source_ips, enabled, in_subscriptions, note, "
     "created_at, updated_at, created_by, updated_by, "
     "ssh_host, ssh_port, host_key, target_host, tcp_ports, udp_ports, "
-    "agent_version, agent_paired_at, agent_status_json, agent_status_at"
+    "agent_version, agent_paired_at, agent_status_json, agent_status_at, basic_visible"
 )
 # The agent columns, written all together and cleared all together.
 AGENT_COLUMNS: tuple[str, ...] = (
@@ -56,8 +56,14 @@ PAIRING_KINDS = frozenset({"new", "attach"})
 # Columns an update may change. ``name`` is absent on purpose: it is the value
 # keys carry in vpn_keys.relay and must never change once the row exists.
 UPDATABLE_COLUMNS: frozenset[str] = frozenset(
-    {"label", "host", "source_ips", "enabled", "in_subscriptions", "note"}
+    {"label", "host", "source_ips", "enabled", "in_subscriptions", "basic_visible", "note"}
 )
+# schema_meta key holding whether BASIC subscriptions serve the MAIN server's
+# (direct) children: "0" hides them, anything else — the key absent included —
+# shows them. The relays' twin is the relays.basic_visible column; the main server
+# has no row of its own, so its flag lives in the database's runtime key-value
+# store (db.database.Database.get_meta / set_meta) rather than in .env.
+MAIN_BASIC_VISIBLE_META_KEY = "basic_visible_main"
 
 _DELETED = VpnKeyStatus.DELETED.value
 _ACTIVE = VpnKeyStatus.ACTIVE.value
@@ -124,6 +130,7 @@ def _row_to_relay(row: Row) -> Relay:
         created_by=None if row["created_by"] is None else int(row["created_by"]),
         updated_by=None if row["updated_by"] is None else int(row["updated_by"]),
         agent=_row_to_agent(row),
+        basic_visible=bool(row["basic_visible"]),
     )
 
 
@@ -164,7 +171,7 @@ def _agent_values(agent: RelayAgent) -> tuple[object, ...]:
 
 def _column_value(column: str, value: object) -> object:
     """Convert one updatable field to what the column stores."""
-    if column in {"enabled", "in_subscriptions"}:
+    if column in {"enabled", "in_subscriptions", "basic_visible"}:
         return 1 if value else 0
     if column == "source_ips":
         assert isinstance(value, tuple)
@@ -239,6 +246,21 @@ class RelayRepository:
         row = await self.db.conn.execute_fetchone("SELECT COUNT(*) AS n FROM relays")
         return int(row["n"]) if row is not None else 0
 
+    # ── the main server's visibility in BASIC subscriptions (schema_meta) ─────
+
+    async def main_basic_visible(self) -> bool:
+        """Whether BASIC subscriptions serve the main server's (direct) children.
+
+        True unless the flag was explicitly switched off — a database that never
+        had it (every one before this setting existed) keeps serving them. Read by
+        both processes: the bot's relay screen and, per request, the subscription
+        endpoint through its read-only connection.
+        """
+        return await self.db.get_meta(MAIN_BASIC_VISIBLE_META_KEY) != "0"
+
+    async def set_main_basic_visible(self, visible: bool) -> None:
+        await self.db.set_meta(MAIN_BASIC_VISIBLE_META_KEY, "1" if visible else "0")
+
     # ── writes ────────────────────────────────────────────────────────────────
 
     async def create(
@@ -250,21 +272,27 @@ class RelayRepository:
         source_ips: tuple[ipaddress.IPv4Network, ...],
         now: str,
         enabled: bool = True,
-        in_subscriptions: bool = True,
+        in_subscriptions: bool = False,
+        basic_visible: bool = True,
         note: str | None = None,
         created_by: int | None = None,
         agent: RelayAgent | None = None,
     ) -> Relay:
         """Insert a relay — with its agent in the same row when given. Values are
         validated by the caller (the relay service); the UNIQUE constraints on
-        ``name``/``label`` are the backstop for a race."""
+        ``name``/``label`` are the backstop for a race.
+
+        ``in_subscriptions`` defaults to False and is ALWAYS written explicitly:
+        the column's DEFAULT 1 (kept because changing it needs a table rebuild —
+        see ``_migrate_v45``) never applies to a row created here. A relay joins
+        subscriptions from its card, which also tops up the issued ones."""
         agent_values = _agent_values(agent) if agent is not None else (None,) * len(AGENT_COLUMNS)
         cursor = await self.db.conn.execute(
             f"""
             INSERT INTO relays
-              (name, label, host, source_ips, enabled, in_subscriptions, note,
+              (name, label, host, source_ips, enabled, in_subscriptions, basic_visible, note,
                created_at, updated_at, created_by, updated_by, {", ".join(AGENT_COLUMNS)})
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {", ".join("?" for _ in AGENT_COLUMNS)})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {", ".join("?" for _ in AGENT_COLUMNS)})
             """,
             (
                 name,
@@ -273,6 +301,7 @@ class RelayRepository:
                 format_ipv4_networks(source_ips),
                 1 if enabled else 0,
                 1 if in_subscriptions else 0,
+                1 if basic_visible else 0,
                 note,
                 now,
                 now,
@@ -527,6 +556,10 @@ class RelayRepository:
                 host=host,
                 source_ips=source_ips,
                 now=now,
+                # A paired relay starts OUT of subscriptions: «Добавить в
+                # подписки» on its card switches it in and tops every issued
+                # subscription up in the same step.
+                in_subscriptions=False,
                 note=note,
                 created_by=created_by,
                 agent=agent,

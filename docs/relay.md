@@ -525,9 +525,9 @@ domain or port, set `RELAY_CONFIRM_URL=https://<that domain>:<port>` too.
 
 Before the first deploy, on the **main server**: a DNS A record for the relay and the relay in
 the admin panel, **enabled**, with the relay's egress IPv4 in its source IPs (steps 1–2 below) —
-main's probe answers only the address of an enabled relay. (Switch «в подписках» off until the
-deploy is done if new bundles must not get relay members a few minutes early.) Then inspect, and
-deploy:
+main's probe answers only the address of an enabled relay. (A new relay is created **out of**
+«в подписках»: subscriptions get it only once you press «➕ Добавить в подписки» on its page —
+conveniently after the deploy.) Then inspect, and deploy:
 
 ```bash
 cd /opt/vpn-service && sudo CHECK=1 DEPLOY_REF=main bash scripts/redeploy.sh
@@ -734,7 +734,9 @@ A relay that was set up by hand — `/etc/vpn-relay.nft`, a `vpn-relay.service` 
    `<relay>:HYSTERIA2_PORT`, which every QUIC server answers with version negotiation. A failure of
    either changes nothing and offers «Подключить снова»;
 4. **a new relay**: creates the row of `relays` WITH its agent, in one transaction with closing the
-   code — enabled, «в подписках», label `relay` or the name, `host` = the public host for links
+   code — enabled, **not** «в подписках» (it joins them with «➕ Добавить в подписки»,
+   [below](#in-subscriptions-an-action-on-every-subscription)), «👁 в базовых», label `relay` or the
+   name, `host` = the public host for links
    from the code, **source IPs** = the address it is reached at plus the source address the agent
    reports for the upstream, when that is public (what the [anomaly detector excludes](#limitations)).
    When the public host does not resolve to the relay, the result says so;
@@ -846,9 +848,12 @@ TOTP code ([below](#managing-relays-in-the-admin-panel)) and is audited (entity 
 
 SUPERADMIN only. **🛡 Админ-панель → 🧩 Протоколы и маршрутизация → 🛰 Relay** — ONE screen for
 every relay; the setup wizard's «🛰 Relay» opens it too (it has no list of its own). The list shows
-each relay with its label, name, host for links, on/off, «в подписках», the number of active keys,
-its [health](#health-monitor) (one icon, one reason) and how it is managed — «агент vX» or
-«⚠️ без агента»; then the codes still waiting.
+each relay with its label, name, host for links, on/off, «в подписках», «👁 в базовых», the number
+of active keys, its [health](#health-monitor) (one icon, one reason) and how it is managed —
+«агент vX» or «⚠️ без агента»; then the codes still waiting. Above the relays is the **main
+server's** line (the direct keys) with its «👁 в базовых», and below them its switch **«👁 Основной
+сервер в базовых: да/нет»** ([below](#in-basic-a-servers-visibility-in-basic-subscriptions)): the
+main server has no page of its own.
 
 **A relay's page** — common actions for every relay:
 
@@ -860,7 +865,10 @@ its [health](#health-monitor) (one icon, one reason) and how it is managed — �
   per relay, 1–16 characters on one line, emoji welcome (`🇷🇺➜`), glued to the flag with no `_`.
   The **name** (`^[a-z0-9][a-z0-9-]{0,31}$`, what keys carry in `vpn_keys.relay`) never changes;
   a name any key row still carries — in any status — is never given to a new relay;
-- **«✏️ Source IPs»**, **«✏️ Заметка»**, **on/off**, **«в подписках»** ([below](#switching-a-relay-off)),
+- **«✏️ Source IPs»**, **«✏️ Заметка»**, **on/off** ([below](#switching-a-relay-off)),
+  **«➕ Добавить в подписки» / «➖ Убрать из подписок»**
+  ([below](#in-subscriptions-an-action-on-every-subscription)), **«👁 В базовых: да/нет»**
+  ([below](#in-basic-a-servers-visibility-in-basic-subscriptions)),
   **«🔍 Проверить сейчас»** (one health pass: traffic and the agent; the verdict stays on the page),
   **«🗑 Удалить»** ([below](#deleting-a-relay));
 - the **agent block**: «🔗 Подключить агент» for a relay without one, or status / update / ports and
@@ -871,14 +879,20 @@ always comes with its agent ([above](#installing-a-relay-with-one-command)). The
 form that writes a relay without one.
 
 **Every change is a dangerous action**: with TOTP on, the button asks for the code first
-([wizard.md](wizard.md#where-it-is-asked)) — on/off, «в подписках», every edit, the source IP
+([wizard.md](wizard.md#where-it-is-asked)) — on/off, «➕ Добавить в подписки» / «➖ Убрать из
+подписок» (the code is asked on «✅ Выполнить» under the plan), «👁 в базовых» of a relay and of the
+main server, every edit, the source IP
 offer, delete (with or without keys, record only), «Добавить relay», «Подключить агент»,
 «Подключить», update, ports/target, disconnect. A step that waits for typed input checks the
 elevation again before it acts. Every change is audited (entity `relay`) with the values before
 and after: `relay_updated`, `relay_deleted`, `relay_delete_incomplete`, `relay_pairing_issued`,
 `relay_pairing_cancelled`, `relay_pairing_check_failed`, `relay_paired`, `relay_attach_refused`,
 `relay_agent_attached`, `relay_agent_detached`, `relay_agent_update`, `relay_agent_apply`,
-`relay_agent_uninstall`.
+`relay_agent_uninstall`, `relay_main_basic_visibility_changed` (the main server «в базовых»).
+Adding and removing a relay's members in subscriptions is audited per subscription (entity
+`key_bundle`): `key_bundle_relay_members_added` / `key_bundle_relay_members_removed`, on a failure
+`key_bundle_reconcile_rolled_back` / `key_bundle_reconcile_partial`; the details carry `relay` and
+`relay_action`.
 
 Every change **takes effect on the next rendered link**: the bot keeps an in-memory snapshot of the
 table that every write replaces immediately (the bot is the only writer); the subscription endpoint
@@ -887,7 +901,63 @@ table that every write replaces immediately (the bot is the only writer); the su
 **Buttons from before** — messages in the chat history of the two former sections («🛰 Управлять
 relay» and «Мастер настройки → Relay», `wrl:*`) and of the old manual «Добавить relay» lead to this
 screen: a relay's button to its page, a code's to the code, everything else to the list — never to
-an error, and an old button never changes anything by itself.
+an error, and an old button never changes anything by itself. The former «Убрать из подписок /
+Вернуть в подписки» toggle opens the plan of what it means now (add or remove, by the relay's
+current state) and changes nothing without a confirmation either.
+
+### «In subscriptions»: an action on every subscription
+
+«В подписках» is not a "for new bundles" flag but an action on **every** issued subscription at
+once:
+
+- **A new relay is created out of subscriptions** (`in_subscriptions=0` — through the pairing and
+  in `RelayService.create`). Existing relays do not change. The schema column keeps `DEFAULT 1`:
+  SQLite cannot change a column default without rebuilding the table, and rebuilding `relays`
+  inside the bootstrap transaction (where `PRAGMA foreign_keys` cannot be switched off) would fire
+  the `ON DELETE SET NULL` of `relay_pairings.relay_id` and orphan pending codes. So the code sets
+  the value: every insert names the column explicitly and the default is never used.
+- **«➕ Добавить в подписки»** — a dry run over every active subscription and a plan screen («to be
+  topped up N, keys to create X, skipped …»); nothing changes before «✅ Выполнить». Once confirmed,
+  the relay is marked «в подписках» (new subscriptions get it on their own), and in the background
+  every active subscription gets **only this relay's members**: basic — 2 (VLESS (TCP),
+  Hysteria2), extended — 5 (plus the three VLESS (HTTP)); a protocol switched off right now is not
+  created, exactly as on creation. The subscription's kind, the direct keys, VLESS (HTTP) and the
+  members of other relays are not touched. A disabled relay cannot be added — a clear refusal
+  («enable it first»).
+- **«➖ Убрать из подписок»** — the same with a plan «affected N subscriptions, keys to delete Y»;
+  once confirmed, the relay leaves «в подписках» and each of its members is deleted from every
+  active subscription the way a subscription delete removes it (Xray client, traffic archive,
+  audit). A subscription that would be left with no active key at all (its others revoked one by
+  one) is skipped with the reason.
+- The guarantees are those of the bulk reconcile
+  ([docs/subscription.md](subscription.md#bringing-existing-bundles-in-line)): creates first, and a
+  failure rolls back what this subscription got; then deletes, and after a failure a re-run
+  finishes the job (the «🔁 Повторить» button under the report); new keys get the subscription's
+  shared `expires_at` and VLESS fingerprint; the token never changes; an unusual subscription
+  (mixed expiry, a duplicate member, an inactive member, a degraded backend) is skipped with the
+  reason. A child of this relay whose earlier removal did not finish (`delete_failed`) is cleaned
+  up and its slot filled afresh.
+- The run goes in the background with progress (at most every 3 s) and a final report — on the
+  same runner as «🔗 All-in-One», so only one bulk run of either kind goes at a time.
+- With `SUBSCRIPTION_ENABLED=false` no subscription is issued: the button only flips the flag.
+
+### «In basic»: a server's visibility in basic subscriptions
+
+**«👁 В базовых: да/нет»** on a relay's page (`relays.basic_visible`, yes by default) and
+**«👁 Основной сервер в базовых: да/нет»** on the list (the `basic_visible_main` key in
+`schema_meta` — the database's runtime settings store, not `.env`; no key means shown) decide
+whether a **basic** subscription serves that server's children:
+
+- applied **only when rendering** and **only to basic** subscriptions; extended ones are unchanged.
+  Keys, Xray clients and subscription rows are untouched, so the switch is instant and reversible:
+  clients see it on their next subscription update;
+- **a basic subscription is never empty**: hiding a server (or taking a relay out of
+  subscriptions) after which basic subscriptions would have no visible server left — the main one,
+  or a relay that is enabled, «в подписках» and «👁 в базовых» — is refused, and the bot says why.
+  Switching a relay off or deleting it is never refused (those are emergency actions); when that
+  leaves no visible server, the relay list warns about it and the endpoint serves basic
+  subscriptions **unfiltered** with a `WARNING` in the log (fail-open) — showing a hidden server
+  beats serving an empty subscription.
 
 ### Switching a relay off
 
@@ -896,9 +966,10 @@ an error, and an old button never changes anything by itself.
   WARNING; direct members are still served), and it is not offered for new keys or
   bundles. Its source IPs **stay excluded** from anomaly detection — clients may still
   be connected. Switching it back on brings everything back unchanged.
-- **not in subscriptions** (`in_subscriptions=0`): new all-in-one bundles get no
-  members through it; single keys can still be issued through it while it is on.
-  Existing bundles keep the members they have.
+- **not in subscriptions** (`in_subscriptions=0`): neither new nor issued all-in-one
+  bundles carry members through it — «➖ Убрать из подписок» deletes them from the issued
+  ones ([above](#in-subscriptions-an-action-on-every-subscription)); single keys can still be
+  issued through it while it is on.
 
 ### Deleting a relay
 
@@ -1050,9 +1121,8 @@ work); 🟡 **warn** — traffic passes, the agent does not (keys work, manageme
   deployment) is fetched from the main server's domain, not through a relay; only the
   links inside it point at relays. What moving it behind a relay would take:
   [Forwarding the subscription port](#forwarding-the-subscription-port-2096-through-a-relay).
-- **Existing bundles gain relay members only through the admin reconcile.** Adding a relay
-  or switching one on does not touch existing bundles by itself. Admin panel →
-  «🧩 Протоколы и маршрутизация» → «🔗 All-in-One» → «Дополнить все подписки по текущим настройкам» adds the members through
-  every relay that is enabled and «в подписках» to every active bundle (or «Перевести все
-  подписки в базовый вид», which also drops the XHTTP members) — see
-  [docs/subscription.md](subscription.md#bringing-existing-bundles-in-line).
+- **Issued subscriptions change only through the «в подписках» buttons.** «➕ Добавить в
+  подписки» / «➖ Убрать из подписок» on a relay's page add or delete its members in every active
+  subscription ([above](#in-subscriptions-an-action-on-every-subscription)); merely switching a
+  disabled relay back on does not top them up. The bulk reconcile «🔗 All-in-One» is still there —
+  see [docs/subscription.md](subscription.md#bringing-existing-bundles-in-line).

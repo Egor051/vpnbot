@@ -55,6 +55,11 @@ def relay_subs_text(relay: Relay) -> str:
     return t("relay_subs_on") if relay.in_subscriptions else t("relay_subs_off")
 
 
+def basic_visibility_text(visible: bool) -> str:
+    """«👁 в базовых» / «🙈 скрыт в базовых» — a server's visibility in BASIC subscriptions."""
+    return t("relay_basic_shown") if visible else t("relay_basic_hidden")
+
+
 def relay_management_text(relay: Relay) -> str:
     """How the relay is managed: «агент vX» or «⚠️ без агента»."""
     agent = relay.agent
@@ -76,9 +81,20 @@ def relays_list_text(
     *,
     pending: Sequence[RelayPairing] = (),
     reason: ReasonFn | None = None,
+    main_basic_visible: bool | None = None,
+    basic_has_server: bool = True,
 ) -> str:
-    """The relay list: one entry per relay (``id`` order), then the codes still waiting."""
+    """The relay list: the main server's line (its visibility in BASIC subscriptions,
+    when known), one entry per relay (``id`` order), then the codes still waiting.
+
+    *basic_has_server* False adds the warning that BASIC subscriptions currently
+    show nothing and are therefore served unfiltered (fail-open).
+    """
     lines = [t("relays_title"), "", t("relays_intro")]
+    if main_basic_visible is not None:
+        lines.extend(["", t("relays_main_line", basic=basic_visibility_text(main_basic_visible))])
+    if not basic_has_server:
+        lines.extend(["", t("relays_basic_fail_open")])
     if not overviews and not pending:
         lines.extend(["", t("relays_empty")])
         return "\n".join(lines)
@@ -95,6 +111,7 @@ def relays_list_text(
                 host=code(relay.host),
                 state=relay_state_text(relay),
                 subs=relay_subs_text(relay),
+                basic=basic_visibility_text(relay.basic_visible),
                 keys=overview.active_keys,
                 health=relay_health_text(probe, reason),
                 managed=relay_management_text(relay),
@@ -147,6 +164,7 @@ def relay_card_text(
         f"{t('relay_field_host')}: {code(relay.host)}",
         f"{t('relay_field_source_ips')}: {code(format_ipv4_networks(relay.source_ips))}",
         f"{t('relay_field_state')}: {relay_state_text(relay)} · {relay_subs_text(relay)}",
+        f"{t('relay_field_basic')}: {basic_visibility_text(relay.basic_visible)}",
     ]
     if active_keys is not None:
         lines.append(f"{t('relay_field_keys')}: {active_keys}")

@@ -474,6 +474,10 @@ async def test_new_relay_public_host_and_a_mismatch_warning(env: Env) -> None:
     relay = outcome.relay
     assert relay.host == "relay2.example.net" and relay.agent is not None and relay.agent.ssh_host == "203.0.113.50"
     assert outcome.host_mismatch == ("192.0.2.99",)
+    # A paired relay starts OUT of subscriptions (its card's «Добавить в
+    # подписки» switches it in and tops the issued ones up); BASIC shows it.
+    assert not relay.in_subscriptions and relay.basic_visible
+    assert env.service.snapshot.for_subscriptions == ()
     assert "192.0.2.99" in outcome_text(outcome)
 
 
@@ -750,7 +754,9 @@ async def test_attach_from_the_page_and_the_list_shows_one_relay(prod: Env) -> N
     assert t("relay_attached_sources_added", sources=EGRESS) in msg.shown
     listing = Callback("admin:relays")
     await ui.relays_panel(listing, fsm(), services)  # type: ignore[arg-type]
-    assert _buttons(listing.message.markups[-1]) == ["admin:relay:1", "admin:relay:add", "admin:grp:infra"]
+    assert _buttons(listing.message.markups[-1]) == [
+        "admin:relay:1", "admin:relays:mainbasic", "admin:relay:add", "admin:grp:infra"
+    ]
     assert t("relay_managed_agent", version="1") in listing.message.edits[-1]
 
     card = Callback("admin:relay:1")
@@ -836,7 +842,10 @@ async def test_typed_steps_recheck_the_elevation(prod: Env) -> None:
     "data",
     [
         "admin:relay:add",
-        "admin:relay:1:toggle:subs:ok",
+        "admin:relay:1:subs:add:run",
+        "admin:relay:1:subs:rm:run",
+        "admin:relay:1:basic",
+        "admin:relays:mainbasic",
         "admin:relay:1:toggle:enabled:ok",
         "admin:relay:1:edit:host",
         "admin:relay:1:edit:label",
@@ -884,10 +893,14 @@ async def test_connecting_a_code_asks_the_totp_code(prod: Env) -> None:
 def _handler_for(data: str) -> tuple[Any, bool]:
     if data == "admin:relay:add":
         return ui.relay_add_start, True
+    if data == "admin:relays:mainbasic":
+        return ui.relays_main_basic_toggle, True
     action = data.split(":")[3]
     sub = data.split(":")[4] if len(data.split(":")) > 4 else ""
     return {
         "toggle": (ui.relay_toggle, True),
+        "subs": (ui.relay_subs_run, True),
+        "basic": (ui.relay_basic_toggle, True),
         "edit": (ui.relay_edit_start, True),
         "del": (ui.relay_delete_execute, True),
         "ag": {

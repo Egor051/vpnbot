@@ -295,6 +295,19 @@ class ReconcileSkipReason(StrEnum):
     # failed to apply, …).
     INACTIVE_CHILD = "inactive_child"
     BACKEND_DEGRADED = "backend_degraded"
+    # Removing a relay's members would leave the bundle with no active child at
+    # all (its other children were revoked one by one): the subscription would
+    # start answering 404, so the bundle is left as it is.
+    WOULD_EMPTY = "would_empty"
+
+
+class RelayMembersAction(StrEnum):
+    """What :meth:`KeyBundleService.reconcile_relay_members` does with one relay."""
+
+    # Create the relay's missing members in every active bundle.
+    ADD = "add"
+    # Remove every member of the relay from every active bundle.
+    REMOVE = "remove"
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +393,49 @@ class _ReconcilePlan:
     delete: tuple[VpnKey, ...]
     expires_at: str | None
     fingerprint: str | None
+    # A scoped reconcile (one relay's members) names its relay and action here;
+    # merged into every audit record the apply writes.
+    scope: tuple[tuple[str, str], ...] = ()
+    # The audit action of a successful apply.
+    applied_action: str = "key_bundle_composition_reconciled"
+
+
+def _skipped_result(
+    bundle: KeyBundle, reason: ReconcileSkipReason, anomalies: tuple[str, ...] = ()
+) -> ReconcileResult:
+    """A SKIPPED result: the bundle is left untouched, *reason* says why."""
+    return ReconcileResult(
+        bundle_id=bundle.id,
+        display_no=bundle.display_no,
+        outcome=ReconcileOutcome.SKIPPED,
+        kind_before=bundle.kind,
+        kind_after=bundle.kind,
+        skip_reason=reason,
+        anomalies=anomalies,
+    )
+
+
+def _noop_result(bundle: KeyBundle) -> ReconcileResult:
+    return ReconcileResult(
+        bundle_id=bundle.id,
+        display_no=bundle.display_no,
+        outcome=ReconcileOutcome.NOOP,
+        kind_before=bundle.kind,
+        kind_after=bundle.kind,
+    )
+
+
+def _planned_result(bundle: KeyBundle, plan: _ReconcilePlan) -> ReconcileResult:
+    """The dry-run answer: what applying *plan* would do, nothing written."""
+    return ReconcileResult(
+        bundle_id=bundle.id,
+        display_no=bundle.display_no,
+        outcome=ReconcileOutcome.PLANNED,
+        kind_before=bundle.kind,
+        kind_after=plan.kind_after,
+        to_create=tuple(member_audit_name(member) for member in plan.create),
+        to_delete=tuple(child_audit_name(key) for key in plan.delete),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -788,15 +844,7 @@ class KeyBundleService:
             if isinstance(plan, ReconcileResult):
                 return plan
             if dry_run:
-                return ReconcileResult(
-                    bundle_id=bundle.id,
-                    display_no=bundle.display_no,
-                    outcome=ReconcileOutcome.PLANNED,
-                    kind_before=bundle.kind,
-                    kind_after=plan.kind_after,
-                    to_create=tuple(member_audit_name(member) for member in plan.create),
-                    to_delete=tuple(child_audit_name(key) for key in plan.delete),
-                )
+                return _planned_result(bundle, plan)
             return await self._apply_reconcile(actor_user_id, bundle, plan)
 
     async def reconcile_all(
@@ -821,6 +869,84 @@ class KeyBundleService:
         """
         self._require_enabled()
         await self.users.require_superadmin(actor_user_id)
+
+        async def one(bundle_id: int) -> ReconcileResult:
+            return await self.reconcile_composition(
+                bundle_id, actor_user_id=actor_user_id, target_kind=target_kind, dry_run=dry_run
+            )
+
+        return await self._reconcile_each(one, on_progress=on_progress, should_stop=should_stop)
+
+    async def reconcile_relay_members(
+        self,
+        relay: str,
+        action: RelayMembersAction,
+        *,
+        actor_user_id: int,
+        dry_run: bool = False,
+        on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> ReconcileSummary:
+        """Add or remove the members of ONE relay in every active bundle.
+
+        The scoped twin of :meth:`reconcile_all` behind the relay card's «Добавить
+        в подписки» / «Убрать из подписок». Nothing but the members of *relay* is
+        ever touched: not the kind, not the direct children, not the VLESS (HTTP)
+        ones, not another relay's.
+
+        * **add** — the members a new bundle of the bundle's own kind would get
+          through *relay* (basic: VLESS (TCP) + Hysteria2, extended: those plus the
+          VLESS (HTTP) profiles; a protocol switched off is left out, exactly as on
+          creation) are created where missing, for the bundle's owner, with its
+          note, the children's shared ``expires_at`` and the existing VLESS
+          fingerprint. A member of *relay* left mid-removal by an earlier failure
+          is removed and its slot filled afresh. Refused up front for a relay that
+          is switched off (``err_relay_subs_add_disabled``).
+        * **remove** — every child of *relay* goes through :meth:`_delete_child`,
+          the very path a bundle delete uses.
+
+        The guarantees are those of :meth:`reconcile_composition`: creates first,
+        rolled back if one fails (``FAILED``); then deletes, a failure stops the
+        bundle (``PARTIAL``) and a re-run finishes it; the subscription token never
+        changes; an anomalous bundle (mixed expiry, duplicates, a non-active child
+        holding a target slot, a degraded backend, …) is skipped with the reason.
+        Same progress / stop contract as :meth:`reconcile_all`. Superadmin only.
+        """
+        self._require_enabled()
+        action = RelayMembersAction(action)
+        await self.users.require_superadmin(actor_user_id)
+        if action is RelayMembersAction.ADD and not relay_available(self.relays.snapshot, relay):
+            raise InvalidOperation(
+                "Выключенный relay нельзя добавить в подписки",
+                key="err_relay_subs_add_disabled",
+                params={"relay": relay},
+            )
+
+        async def one(bundle_id: int) -> ReconcileResult:
+            async with self._lock:
+                bundle = await self._get_bundle(bundle_id)
+                plan = await self._plan_relay_members(bundle, relay, action)
+                if isinstance(plan, ReconcileResult):
+                    return plan
+                if dry_run:
+                    return _planned_result(bundle, plan)
+                return await self._apply_reconcile(actor_user_id, bundle, plan)
+
+        return await self._reconcile_each(one, on_progress=on_progress, should_stop=should_stop)
+
+    async def _reconcile_each(
+        self,
+        one: Callable[[int], Awaitable[ReconcileResult]],
+        *,
+        on_progress: Callable[[int, int], Awaitable[None]] | None,
+        should_stop: Callable[[], bool] | None,
+    ) -> ReconcileSummary:
+        """Run *one* over every active bundle in id order (the bulk-run contract).
+
+        One bundle's error never stops the rest: it becomes a ``FAILED`` result.
+        *should_stop* is asked between bundles only; *on_progress* errors are
+        logged and ignored.
+        """
         bundle_ids = await self.bundles.list_ids_by_status(KeyBundleStatus.ACTIVE)
         results: list[ReconcileResult] = []
         for done, bundle_id in enumerate(bundle_ids, start=1):
@@ -829,9 +955,7 @@ class KeyBundleService:
                 logger.warning("Приведение состава бандлов остановлено: не обработано %d", remaining)
                 return ReconcileSummary(tuple(results), remaining=remaining)
             try:
-                result = await self.reconcile_composition(
-                    bundle_id, actor_user_id=actor_user_id, target_kind=target_kind, dry_run=dry_run
-                )
+                result = await one(bundle_id)
             except Exception as exc:
                 logger.warning("Не удалось привести состав бандла bundle_id=%s", bundle_id, exc_info=True)
                 result = ReconcileResult(
@@ -854,15 +978,7 @@ class KeyBundleService:
         """The plan for *bundle*, or a NOOP/SKIPPED result. Reads only."""
 
         def skip(reason: ReconcileSkipReason, anomalies: tuple[str, ...] = ()) -> ReconcileResult:
-            return ReconcileResult(
-                bundle_id=bundle.id,
-                display_no=bundle.display_no,
-                outcome=ReconcileOutcome.SKIPPED,
-                kind_before=bundle.kind,
-                kind_after=bundle.kind,
-                skip_reason=reason,
-                anomalies=anomalies,
-            )
+            return _skipped_result(bundle, reason, anomalies)
 
         if bundle.status is not KeyBundleStatus.ACTIVE:
             return skip(ReconcileSkipReason.NOT_ACTIVE, (bundle.status.value,))
@@ -929,20 +1045,11 @@ class KeyBundleService:
             )
         )
         if not create and not delete and kind == bundle.kind:
-            return ReconcileResult(
-                bundle_id=bundle.id,
-                display_no=bundle.display_no,
-                outcome=ReconcileOutcome.NOOP,
-                kind_before=bundle.kind,
-                kind_after=bundle.kind,
-            )
+            return _noop_result(bundle)
 
-        affected = dict.fromkeys([member.key_type for member in create] + [key.key_type for key in delete])
-        for backend in affected:
-            try:
-                self.backend_health.require_mutation_allowed(backend)
-            except InvalidOperation:
-                return skip(ReconcileSkipReason.BACKEND_DEGRADED, (backend.value,))
+        degraded = self._degraded_backend(create, delete)
+        if degraded is not None:
+            return skip(ReconcileSkipReason.BACKEND_DEGRADED, (degraded.value,))
 
         return _ReconcilePlan(
             kind_after=kind,
@@ -950,6 +1057,140 @@ class KeyBundleService:
             delete=delete,
             expires_at=expires_at,
             fingerprint=_bundle_fingerprint(active, self.relays.snapshot),
+        )
+
+    def _degraded_backend(
+        self, create: Sequence[BundleMember], delete: Sequence[VpnKey]
+    ) -> VpnKeyType | None:
+        """The first backend the plan touches that refuses mutations right now."""
+        affected = dict.fromkeys([member.key_type for member in create] + [key.key_type for key in delete])
+        for backend in affected:
+            try:
+                self.backend_health.require_mutation_allowed(backend)
+            except InvalidOperation:
+                return backend
+        return None
+
+    async def _plan_relay_members(
+        self, bundle: KeyBundle, relay: str, action: RelayMembersAction
+    ) -> _ReconcilePlan | ReconcileResult:
+        """The scoped plan for *relay*'s members of *bundle*, or a NOOP/SKIPPED result.
+
+        Reads only. Only children with ``relay == relay`` are ever planned for
+        creation or deletion; everything else is read to decide whether the bundle
+        is sound enough to touch (add) or would be left empty (remove).
+        """
+        if bundle.status is not KeyBundleStatus.ACTIVE:
+            return _skipped_result(bundle, ReconcileSkipReason.NOT_ACTIVE, (bundle.status.value,))
+        scope = (("relay", relay), ("relay_action", action.value))
+        children = await self.bundles.list_keys_of_bundle(bundle.id)
+        own = [key for key in children if key.relay == relay]
+        if action is RelayMembersAction.REMOVE:
+            return self._plan_relay_removal(bundle, children, own, scope)
+
+        unsupported = [key for key in children if key.key_type not in _BUNDLE_CHILD_TYPES]
+        if unsupported:
+            return _skipped_result(
+                bundle,
+                ReconcileSkipReason.UNSUPPORTED_CHILD,
+                tuple(f"{key.key_type.value}#{key.id}" for key in unsupported),
+            )
+        target = [
+            member
+            for member in bundle_composition(bundle.kind, relays=(relay,))
+            if member.relay == relay and await self._member_enabled(member)
+        ]
+        if not target:
+            return _skipped_result(bundle, ReconcileSkipReason.NO_MEMBERS)
+        active = [key for key in children if key.status is VpnKeyStatus.ACTIVE]
+        if not active:
+            return _skipped_result(bundle, ReconcileSkipReason.NO_ACTIVE_CHILDREN)
+        by_slot: dict[tuple[str, str | None], list[VpnKey]] = {}
+        for key in active:
+            by_slot.setdefault(_child_slot(key), []).append(key)
+        duplicates = [keys for keys in by_slot.values() if len(keys) > 1]
+        if duplicates:
+            return _skipped_result(
+                bundle,
+                ReconcileSkipReason.DUPLICATE_MEMBER,
+                tuple(f"{child_audit_name(keys[0])}: " + ", ".join(f"#{key.id}" for key in keys) for keys in duplicates),
+            )
+        expiries = {key.expires_at for key in active}
+        if len(expiries) > 1:
+            return _skipped_result(bundle, ReconcileSkipReason.MIXED_EXPIRY, tuple(sorted(value or "-" for value in expiries)))
+        expires_at = next(iter(expiries))
+        if expires_at is not None and expires_at <= self.clock.now():
+            return _skipped_result(bundle, ReconcileSkipReason.EXPIRED, (expires_at,))
+
+        target_slots = {_member_slot(member) for member in target}
+        inactive_own = [key for key in own if key.status is not VpnKeyStatus.ACTIVE]
+        stale = [
+            key for key in inactive_own if key.status not in _REMOVAL_STATUSES and _child_slot(key) in target_slots
+        ]
+        if stale:
+            return _skipped_result(
+                bundle,
+                ReconcileSkipReason.INACTIVE_CHILD,
+                tuple(f"{child_audit_name(key)}#{key.id}: {key.status.value}" for key in stale),
+            )
+        create = tuple(member for member in target if _member_slot(member) not in by_slot)
+        # A child of this relay whose removal did not finish (a failed rollback or
+        # delete) was meant to go: finish it; its slot counts as empty above and is
+        # filled by a fresh create first. Any other child — active or not, inside
+        # the target or outside it — is left exactly as it is.
+        delete = tuple(sorted((key for key in inactive_own if key.status in _REMOVAL_STATUSES), key=lambda key: key.id))
+        if not create and not delete:
+            return _noop_result(bundle)
+        degraded = self._degraded_backend(create, delete)
+        if degraded is not None:
+            return _skipped_result(bundle, ReconcileSkipReason.BACKEND_DEGRADED, (degraded.value,))
+        return _ReconcilePlan(
+            kind_after=bundle.kind,
+            create=create,
+            delete=delete,
+            expires_at=expires_at,
+            fingerprint=_bundle_fingerprint(active, self.relays.snapshot),
+            scope=scope,
+            applied_action="key_bundle_relay_members_added",
+        )
+
+    def _plan_relay_removal(
+        self,
+        bundle: KeyBundle,
+        children: list[VpnKey],
+        own: list[VpnKey],
+        scope: tuple[tuple[str, str], ...],
+    ) -> _ReconcilePlan | ReconcileResult:
+        """Remove every child of the relay — nothing else is read beyond emptiness."""
+        if not own:
+            return _noop_result(bundle)
+        unsupported = [key for key in own if key.key_type not in _BUNDLE_CHILD_TYPES]
+        if unsupported:
+            return _skipped_result(
+                bundle,
+                ReconcileSkipReason.UNSUPPORTED_CHILD,
+                tuple(f"{key.key_type.value}#{key.id}" for key in unsupported),
+            )
+        own_ids = {key.id for key in own}
+        survivors = [key for key in children if key.id not in own_ids and key.status is VpnKeyStatus.ACTIVE]
+        if not survivors and any(key.status is VpnKeyStatus.ACTIVE for key in own):
+            return _skipped_result(
+                bundle,
+                ReconcileSkipReason.WOULD_EMPTY,
+                tuple(f"{child_audit_name(key)}#{key.id}" for key in own if key.status is VpnKeyStatus.ACTIVE),
+            )
+        delete = tuple(sorted(own, key=lambda key: key.id))
+        degraded = self._degraded_backend((), delete)
+        if degraded is not None:
+            return _skipped_result(bundle, ReconcileSkipReason.BACKEND_DEGRADED, (degraded.value,))
+        return _ReconcilePlan(
+            kind_after=bundle.kind,
+            create=(),
+            delete=delete,
+            expires_at=None,
+            fingerprint=None,
+            scope=scope,
+            applied_action="key_bundle_relay_members_removed",
         )
 
     async def _apply_reconcile(
@@ -994,6 +1235,7 @@ class KeyBundleService:
                     else "key_bundle_reconcile_rollback_failed",
                     entity_id=bundle.id,
                     details={
+                        **dict(plan.scope),
                         "kind_before": bundle.kind.value,
                         "kind_after": bundle.kind.value,
                         "created_key_ids": [key.id for key in created],
@@ -1032,6 +1274,7 @@ class KeyBundleService:
                 action="key_bundle_reconcile_partial",
                 entity_id=bundle.id,
                 details={
+                    **dict(plan.scope),
                     "kind_before": bundle.kind.value,
                     "kind_after": bundle.kind.value,
                     "created_key_ids": list(created_ids),
@@ -1050,9 +1293,10 @@ class KeyBundleService:
 
         await self._write_audit_best_effort(
             actor_user_id=actor_user_id,
-            action="key_bundle_composition_reconciled",
+            action=plan.applied_action,
             entity_id=bundle.id,
             details={
+                **dict(plan.scope),
                 "kind_before": bundle.kind.value,
                 "kind_after": plan.kind_after.value,
                 "created_key_ids": list(created_ids),

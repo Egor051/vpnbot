@@ -677,7 +677,7 @@ STRINGS: dict[str, str] = {
     "relays_title": "<b>🛰 Relays</b>",
     "relays_intro": "A relay is an intermediate server that forwards traffic to this server; a key «via relay» differs from a direct one only by the address in its link and a marker in its name. Every relay is here — installed by the bot or set up by hand. The bot looks after a relay with an agent itself over SSH (update, ports and target, removal from its host); a relay without one works as before — an agent can be connected from its page, the keys do not change. A new relay is added with one command: «➕ Add a relay».",
     "relays_empty": "No relays yet. «➕ Add a relay» gives one command for a new server — then the relay can be chosen when a key is created.",
-    "relays_list_line": "{icon} <b>{label}</b> · {name} → {host}\n{state} · {subs} · active keys: {keys}\nHealth: {health}\nManaged: {managed}",
+    "relays_list_line": "{icon} <b>{label}</b> · {name} → {host}\n{state} · {subs} · {basic} · active keys: {keys}\nHealth: {health}\nManaged: {managed}",
     "relay_state_on": "enabled",
     "relay_state_off": "disabled",
     "relay_subs_on": "in subscriptions",
@@ -702,8 +702,6 @@ STRINGS: dict[str, str] = {
     "btn_relay_edit_note": "✏️ Note",
     "btn_relay_disable": "⏸ Disable",
     "btn_relay_enable": "▶️ Enable",
-    "btn_relay_subs_off": "Remove from subscriptions",
-    "btn_relay_subs_on": "Return to subscriptions",
     "btn_relay_check": "🔍 Check now",
     "btn_relay_delete": "🗑 Delete",
     "btn_relay_add_source_ip": "➕ Add {ip} to source IPs",
@@ -1327,7 +1325,9 @@ STRINGS: dict[str, str] = {
         "set: VLESS (TCP) and Hysteria2, plus their copies through every enabled relay that is "
         "«in subscriptions». VLESS (HTTP) keys are deleted, missing keys are created.\n\n"
         "<b>Top every subscription up to current settings</b> — the same without changing the "
-        "kind: e.g. to add the relay members after a relay was added in «🛰 Relays».\n\n"
+        "kind: e.g. to add the keys of a protocol switched on after the subscriptions were "
+        "issued. A relay is added to and removed from the issued subscriptions on its own page "
+        "in «🛰 Relays».\n\n"
         "Users keep their subscription link. A plan is shown first; nothing changes until you "
         "confirm."
     ),
@@ -1818,9 +1818,82 @@ STRINGS: dict[str, str] = {
     "warp_restart_routes_off": "WARP routes are off — nothing to restart. Use «Enable».",
     "warp_killswitch_on_confirm": "Turn the kill-switch on? When the tunnel is down, WARP-routed traffic is blocked instead of going direct.",
     "warp_killswitch_off_confirm": "Turn the kill-switch off? When the tunnel is down, traffic goes direct from the server's real IP.",
+    "btn_relay_subs_add": "➕ Add to subscriptions",
+    "btn_relay_subs_rm": "➖ Remove from subscriptions",
+    "btn_relay_subs_run": "✅ Run",
+    "btn_relay_subs_retry": "🔁 Retry",
+    "btn_relay_basic_on": "👁 In basic: yes",
+    "btn_relay_basic_off": "👁 In basic: no",
+    "btn_relays_main_basic_on": "👁 Main server in basic: yes",
+    "btn_relays_main_basic_off": "👁 Main server in basic: no",
+    "relay_field_basic": "Basic subscriptions",
+    "relay_basic_shown": "👁 shown in basic",
+    "relay_basic_hidden": "🙈 hidden in basic",
+    "relays_main_line": "🖥 <b>Main server</b> (direct keys): {basic}",
+    "relays_basic_fail_open": (
+        "⚠️ Basic subscriptions have no visible server left: the main server is hidden and no "
+        "enabled relay «in subscriptions» is shown. Until that changes, basic subscriptions are "
+        "served unfiltered — with every server. Show the main server or a relay in basic."
+    ),
+    "relay_basic_saved_on": "Relay {label} is shown in basic subscriptions again — clients get it on their next subscription update.",
+    "relay_basic_saved_off": (
+        "Relay {label} is hidden from basic subscriptions — clients stop seeing it on their next "
+        "subscription update. Keys and extended subscriptions are unchanged."
+    ),
+    "relays_main_basic_saved_on": "The main server is shown in basic subscriptions again.",
+    "relays_main_basic_saved_off": (
+        "The main server is hidden from basic subscriptions — only relays stay in them. Keys and "
+        "extended subscriptions are unchanged."
+    ),
+    "err_basic_would_be_empty": (
+        "Basic subscriptions would have no visible server left. First show the main server or "
+        "another enabled relay «in subscriptions» in basic."
+    ),
+    "err_relay_subs_add_disabled": "Relay {relay} is disabled and cannot be added to subscriptions. Enable it first.",
+    "relay_subs_title_add": "Adding relay {label} to subscriptions",
+    "relay_subs_title_rm": "Removing relay {label} from subscriptions",
+    "relay_subs_plan_header_add": (
+        "<b>{title}: plan</b>\n\n"
+        "Active subscriptions: {total}\n"
+        "To be topped up: {planned} (keys to create: {create})\n"
+        "Already have this relay: {noop}\n"
+        "To be skipped: {skipped}"
+    ),
+    "relay_subs_plan_header_rm": (
+        "<b>{title}: plan</b>\n\n"
+        "Active subscriptions: {total}\n"
+        "Affected: {planned} (keys to delete: {delete})\n"
+        "Without keys of this relay: {noop}\n"
+        "To be skipped: {skipped}"
+    ),
+    "relay_subs_plan_cleanup": "Keys of this relay whose earlier removal did not finish will be cleaned up: {count}.",
+    "relay_subs_plan_note_add": (
+        "Once confirmed, relay {label} is marked «in subscriptions»: new subscriptions get it on "
+        "their own, and its keys are added to the issued ones. Direct keys, VLESS (HTTP), other "
+        "relays, the kind and the links of subscriptions do not change. Every VLESS key created "
+        "applies the Xray config."
+    ),
+    "relay_subs_plan_note_rm": (
+        "Once confirmed, relay {label} is taken out of «in subscriptions» and its keys are "
+        "deleted from the issued subscriptions. Other keys, the kind and the links do not change. "
+        "Every VLESS key deleted applies the Xray config."
+    ),
+    "relay_subs_plan_flag_only_add": (
+        "All-in-One subscriptions are off (SUBSCRIPTION_ENABLED): none are issued. Relay {label} "
+        "is only marked «in subscriptions» — subscriptions get it once they are switched on."
+    ),
+    "relay_subs_plan_flag_only_rm": (
+        "All-in-One subscriptions are off (SUBSCRIPTION_ENABLED): none are issued. Relay {label} "
+        "is only taken out of «in subscriptions»."
+    ),
+    "relay_subs_flag_add": "Relay {label} is marked «in subscriptions».",
+    "relay_subs_flag_rm": "Relay {label} is out of «in subscriptions».",
+    "relay_subs_run_later": (
+        "A subscription run is already in progress — the issued subscriptions were not changed. "
+        "Once it finishes, repeat the action on this page."
+    ),
+    "aio_reason_would_empty": "the subscription would be left with no active key",
     "relay_toggle_enabled_confirm": "Disable relay {label}? {count} active keys use it — their links stop working.",
-    "relay_toggle_subs_confirm": "Remove relay {label} from subscriptions? {count} active keys use it.",
-    "relay_subs_topup_hint": "ℹ️ Subscriptions already issued get this relay after «🧩 Protocols → 🔗 All-in-One → Top up every subscription».",
     # The setup wizard and the TOTP second factor (docs/wizard.md).
     "btn_wizard": "🧙 Setup wizard",
     "btn_security": "🔐 Security",

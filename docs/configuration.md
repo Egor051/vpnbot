@@ -369,7 +369,8 @@ limitations are in [docs/relay.md](relay.md).
 
 **Relays are managed in the admin panel, not here** (🛡 Админ-панель → 🧩 Протоколы и маршрутизация →
 🛰 Relay — one screen; stored in the `relays` table): name, host for links, source IPs, the marker in key names,
-on/off, «в подписках», the relay's agent, several relays at once. See
+on/off, «в подписках», «👁 в базовых» (also the main server's — kept in the database, there is no
+`.env` variable for it), the relay's agent, several relays at once. See
 [docs/relay.md](relay.md#managing-relays-in-the-admin-panel).
 
 | Variable | Required | Default | Description | Example |

@@ -143,6 +143,38 @@ class RelayCatalog:
         self._snapshot = snapshot
 
 
+def serves_basic(relay: Relay) -> bool:
+    """A relay a BASIC subscription shows: enabled, «в подписках» and «👁 в базовых».
+
+    What counts toward the «basic is never empty» invariant: a relay switched off
+    serves no link, and one out of subscriptions has (or soon has) no members.
+    """
+    return relay.enabled and relay.in_subscriptions and relay.basic_visible
+
+
+def basic_has_visible_server(relays: RelaySnapshot, *, main_visible: bool) -> bool:
+    """Whether BASIC subscriptions still show at least one server.
+
+    The main server (its direct children) when *main_visible*, else any relay that
+    :func:`serves_basic`. The admin panel refuses a switch that would make this
+    False; the renderer fails open if it is False anyway (a relay switched off or
+    deleted — never refused, those are emergency actions).
+    """
+    return main_visible or any(serves_basic(relay) for relay in relays.relays)
+
+
+def basic_visible_child(relays: RelaySnapshot, relay: str | None, *, main_visible: bool) -> bool:
+    """Whether a child of *relay* (``None``: a direct one) passes the BASIC filter.
+
+    Only ``basic_visible`` is asked here: whether the relay can render at all
+    (enabled, known) is :func:`relay_available`'s question, answered separately.
+    """
+    if relay is None:
+        return main_visible
+    known = relays.get(relay)
+    return known is None or known.basic_visible
+
+
 def relay_available(relays: RelaySnapshot, relay: str) -> bool:
     """Whether links for keys of *relay* can be rendered right now."""
     known = relays.get(relay)

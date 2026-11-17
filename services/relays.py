@@ -56,7 +56,7 @@ import socket
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +69,7 @@ from repositories.relays import AGENT_UNINSTALLED_KEY, RelayRepository, RelayUsa
 from services.audit import AuditService
 from services.errors import InvalidOperation, NotFound, ServiceError
 from services.notes import MAX_NOTE_LENGTH, normalize_note
-from services.relay import RelayCatalog, RelaySnapshot
+from services.relay import RelayCatalog, RelaySnapshot, basic_has_visible_server
 from services.relay_health import AgentCheck, agent_check_from_status, tls_probe, udp_relay_probe
 from services.relay_pairing import (
     COMPLETION_GRACE_SECONDS,
@@ -250,6 +250,7 @@ def _audit_view(relay: Relay) -> dict[str, object]:
         "source_ips": validators.format_ipv4_networks(relay.source_ips),
         "enabled": relay.enabled,
         "in_subscriptions": relay.in_subscriptions,
+        "basic_visible": relay.basic_visible,
         "note": relay.note,
     }
     if relay.agent is not None:
@@ -553,13 +554,16 @@ class RelayService:
         label: str = validators.DEFAULT_RELAY_LABEL,
         note: str | None = None,
         enabled: bool = True,
-        in_subscriptions: bool = True,
+        in_subscriptions: bool = False,
     ) -> Relay:
         """Insert a relay WITHOUT an agent.
 
         Not offered in the panel — a new relay is added through a pairing code, so
         it always comes with its agent. Kept as the primitive the tests seed rows
         with; tests/test_relay_unified.py checks no bot handler calls it.
+
+        Like a paired relay it starts OUT of subscriptions: joining them is the
+        card's «Добавить в подписки», which tops every issued one up as well.
         """
         await self.users.require_superadmin(actor_user_id)
         clean_name = parse_relay_name(name)
@@ -607,12 +611,18 @@ class RelayService:
         note: object = _UNSET,
         enabled: bool | None = None,
         in_subscriptions: bool | None = None,
+        basic_visible: bool | None = None,
     ) -> RelayUpdateResult:
         """Change any editable field; ``name`` is not one of them.
 
         Takes effect on the very next rendered link: the bot's snapshot is replaced
         before this returns, the subscription endpoint reads the table per request.
         *note* is left alone unless passed (``None`` clears it).
+
+        Hiding the relay from BASIC subscriptions or taking it out of subscriptions
+        is refused (``err_basic_would_be_empty``) when no server would be left in
+        BASIC subscriptions afterwards. Switching it off is never refused — that is
+        an emergency action; the renderer fails open instead.
         """
         await self.users.require_superadmin(actor_user_id)
         changes: dict[str, object] = {}
@@ -628,9 +638,12 @@ class RelayService:
             changes["enabled"] = bool(enabled)
         if in_subscriptions is not None:
             changes["in_subscriptions"] = bool(in_subscriptions)
+        if basic_visible is not None:
+            changes["basic_visible"] = bool(basic_visible)
         async with self._lock:
             before = await self._require(relay_id)
             changes = {field: value for field, value in changes.items() if getattr(before, field) != value}
+            await self._ensure_basic_keeps_a_server(before, changes)
             if "label" in changes:
                 taken = await self.relays.get_by_label(str(changes["label"]))
                 if taken is not None and taken.id != relay_id:
@@ -672,6 +685,85 @@ class RelayService:
                 changed=tuple(sorted(changes)),
                 single_keys_to_reimport=reimport,
                 suggest_source_ip=suggest,
+            )
+
+    # ── visibility in BASIC subscriptions ────────────────────────────────────
+
+    async def main_basic_visible(self, actor_user_id: int) -> bool:
+        """Whether BASIC subscriptions show the main server (its direct children)."""
+        await self.users.require_superadmin(actor_user_id)
+        return await self.relays.main_basic_visible()
+
+    async def basic_has_visible_server(self, actor_user_id: int) -> bool:
+        """Whether BASIC subscriptions show any server right now (False: they fail open)."""
+        await self.users.require_superadmin(actor_user_id)
+        return basic_has_visible_server(
+            RelaySnapshot.of(await self.relays.list_all()), main_visible=await self.relays.main_basic_visible()
+        )
+
+    async def set_main_basic_visible(self, actor_user_id: int, visible: bool) -> bool:
+        """Show / hide the main server in BASIC subscriptions; returns the new value.
+
+        A render-time switch (nothing about keys or Xray changes), so it is instant
+        and reversible. Hiding it is refused when no relay would be left to show.
+        """
+        await self.users.require_superadmin(actor_user_id)
+        async with self._lock:
+            before = await self.relays.main_basic_visible()
+            if before == visible:
+                return before
+            if not visible and not basic_has_visible_server(
+                RelaySnapshot.of(await self.relays.list_all()), main_visible=False
+            ):
+                raise InvalidOperation(
+                    "в базовых подписках не останется ни одного сервера", key="err_basic_would_be_empty"
+                )
+            await self.relays.set_main_basic_visible(visible)
+            await self._audit(
+                actor_user_id,
+                "relay_main_basic_visibility_changed",
+                None,
+                {"basic_visible": {"before": before, "after": visible}},
+            )
+            return visible
+
+    async def check_basic_keeps_a_server(
+        self,
+        actor_user_id: int,
+        relay_id: int,
+        *,
+        in_subscriptions: bool | None = None,
+        basic_visible: bool | None = None,
+    ) -> None:
+        """Raise ``err_basic_would_be_empty`` if the change would empty BASIC subscriptions.
+
+        The same check :meth:`update` makes, asked up front — e.g. before the
+        «Убрать из подписок» plan is shown, so the admin does not confirm a plan
+        that is then refused.
+        """
+        await self.users.require_superadmin(actor_user_id)
+        changes: dict[str, object] = {}
+        if in_subscriptions is not None:
+            changes["in_subscriptions"] = in_subscriptions
+        if basic_visible is not None:
+            changes["basic_visible"] = basic_visible
+        await self._ensure_basic_keeps_a_server(await self._require(relay_id), changes)
+
+    async def _ensure_basic_keeps_a_server(self, before: Relay, changes: Mapping[str, object]) -> None:
+        """Refuse hiding *before* / taking it out of subscriptions if BASIC would show nothing."""
+        if changes.get("in_subscriptions") is not False and changes.get("basic_visible") is not False:
+            return
+        after = replace(
+            before,
+            in_subscriptions=bool(changes.get("in_subscriptions", before.in_subscriptions)),
+            basic_visible=bool(changes.get("basic_visible", before.basic_visible)),
+        )
+        relays = [after if relay.id == before.id else relay for relay in await self.relays.list_all()]
+        if not basic_has_visible_server(
+            RelaySnapshot.of(relays), main_visible=await self.relays.main_basic_visible()
+        ):
+            raise InvalidOperation(
+                "в базовых подписках не останется ни одного сервера", key="err_basic_would_be_empty"
             )
 
     async def add_source_ip(self, actor_user_id: int, relay_id: int, address: str) -> RelayUpdateResult:

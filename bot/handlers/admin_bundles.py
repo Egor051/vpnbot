@@ -17,6 +17,10 @@ one run per process at a time.
 
 Superadmin only, and inert while ``SUBSCRIPTION_ENABLED`` is false — every
 handler checks both itself, so a replayed callback is refused, not just hidden.
+
+The relay card's «Добавить в подписки» / «Убрать из подписок»
+(bot/handlers/admin_relays.py) run a scoped twin of these operations through the
+SAME :data:`runner`, so only one bulk run of either kind goes at a time.
 """
 
 from __future__ import annotations
@@ -284,7 +288,6 @@ def aio_plan_text(mode: str, summary: ReconcileSummary) -> str:
     """The plan screen: what a confirmed run would do, from a dry run."""
     planned = summary.with_outcome(ReconcileOutcome.PLANNED)
     skipped = summary.with_outcome(ReconcileOutcome.SKIPPED)
-    failed = summary.with_outcome(ReconcileOutcome.FAILED, ReconcileOutcome.PARTIAL)
     parts = [
         t(
             "aio_plan_header",
@@ -298,10 +301,7 @@ def aio_plan_text(mode: str, summary: ReconcileSummary) -> str:
             skipped=len(skipped),
         )
     ]
-    if skipped:
-        parts.append(_list_block("aio_skipped_title", [_skip_line(result) for result in skipped]))
-    if failed:
-        parts.append(_list_block("aio_failed_title", [_failure_line(result) for result in failed]))
+    parts.extend(reconcile_issue_blocks(summary))
     if planned:
         parts.append(t(f"aio_plan_note_{mode}"))
     else:
@@ -311,13 +311,34 @@ def aio_plan_text(mode: str, summary: ReconcileSummary) -> str:
 
 def aio_report_text(mode: str, summary: ReconcileSummary) -> str:
     """The final report of a run: ok / skipped (with reasons) / errors."""
+    return reconcile_report_text(_mode_title(mode), summary)
+
+
+def reconcile_issue_blocks(summary: ReconcileSummary) -> list[str]:
+    """The «Пропущены» (with reasons) and «Ошибки» blocks of a plan or a report.
+
+    Shared with the relay card's scoped runs (bot/handlers/admin_relays.py), so a
+    skipped or failed bundle reads the same in both sections.
+    """
+    skipped = summary.with_outcome(ReconcileOutcome.SKIPPED)
+    failed = summary.with_outcome(ReconcileOutcome.FAILED, ReconcileOutcome.PARTIAL)
+    blocks: list[str] = []
+    if skipped:
+        blocks.append(_list_block("aio_skipped_title", [_skip_line(result) for result in skipped]))
+    if failed:
+        blocks.append(_list_block("aio_failed_title", [_failure_line(result) for result in failed]))
+    return blocks
+
+
+def reconcile_report_text(title: str, summary: ReconcileSummary) -> str:
+    """The final report of a bulk run titled *title*: ok / skipped / errors / stop."""
     applied = summary.with_outcome(ReconcileOutcome.APPLIED)
     skipped = summary.with_outcome(ReconcileOutcome.SKIPPED)
     failed = summary.with_outcome(ReconcileOutcome.FAILED, ReconcileOutcome.PARTIAL)
     parts = [
         t(
             "aio_report_header",
-            title=_mode_title(mode),
+            title=title,
             total=len(summary.results),
             applied=len(applied),
             created=summary.keys_created,
@@ -327,10 +348,7 @@ def aio_report_text(mode: str, summary: ReconcileSummary) -> str:
             failed=len(failed),
         )
     ]
-    if skipped:
-        parts.append(_list_block("aio_skipped_title", [_skip_line(result) for result in skipped]))
-    if failed:
-        parts.append(_list_block("aio_failed_title", [_failure_line(result) for result in failed]))
+    parts.extend(reconcile_issue_blocks(summary))
     if summary.remaining:
         parts.append(t("aio_report_stopped", remaining=summary.remaining))
     if failed or summary.remaining:

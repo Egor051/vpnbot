@@ -204,7 +204,10 @@ class _World:
         await self.db.close()
 
     async def add_relay(self, name: str = "ru1", **kwargs: Any) -> Any:
-        values: dict[str, Any] = {"host": RELAY_HOST, "source_ips": "198.51.100.7"}
+        # «в подписках» unless a test says otherwise: most tests here are about a
+        # relay that new bundles get members through (a new relay starts out of
+        # subscriptions — tests/test_relay_subscriptions.py).
+        values: dict[str, Any] = {"host": RELAY_HOST, "source_ips": "198.51.100.7", "in_subscriptions": True}
         values.update(kwargs)
         return await self.relays.create(ADMIN, name=name, **values)
 
@@ -248,6 +251,8 @@ async def test_fresh_database_has_an_empty_relays_table(tmp_path: Path) -> None:
             # how the relay is managed: its agent, all NULL without one (v44)
             "ssh_host", "ssh_port", "host_key", "target_host", "tcp_ports", "udp_ports",
             "agent_version", "agent_paired_at", "agent_status_json", "agent_status_at",
+            # visibility in BASIC subscriptions (v45)
+            "basic_visible",
         }
         tables = {row["name"] for row in await db.conn.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "relay_agents" not in tables
@@ -1094,7 +1099,10 @@ async def test_list_and_card(world: _World, panel_services: Any) -> None:
     text = callback.message.last_text
     assert "ru1" in text and RELAY_HOST in text and t("relay_managed_none") in text
     # «Назад» returns to the «Протоколы и маршрутизация» section of the panel.
-    assert _callbacks(callback.message.last_markup) == [f"admin:relay:{relay.id}", "admin:relay:add", "admin:grp:infra"]
+    # The main server has no card: its «👁 в базовых» switch sits on the list.
+    assert _callbacks(callback.message.last_markup) == [
+        f"admin:relay:{relay.id}", "admin:relays:mainbasic", "admin:relay:add", "admin:grp:infra"
+    ]
     assert callback.message.last_markup.inline_keyboard[0][0].text.endswith("⚠️")
 
     card = _Callback(f"admin:relay:{relay.id}")
@@ -1255,7 +1263,13 @@ async def test_delete_a_relay_without_keys_from_the_panel(world: _World, panel_s
 
 async def test_toggles_from_the_card(world: _World, panel_services: Any) -> None:
     relay = await world.add_relay()
-    await panel.relay_toggle(_Callback(f"admin:relay:{relay.id}:toggle:subs"), _State(), panel_services)  # type: ignore[arg-type]
+    # The former «в подписках» toggle still in the chat history only opens the plan.
+    legacy = _Callback(f"admin:relay:{relay.id}:toggle:subs")
+    await panel.relay_subs_legacy_toggle(legacy, panel_services)  # type: ignore[arg-type]
+    assert f"admin:relay:{relay.id}:subs:rm:run" in _callbacks(legacy.message.last_markup)
+    assert await world.relay_repo.get_by_id(relay.id) == relay
+    # Subscriptions are off here (no settings): «Убрать» is the flag alone.
+    await panel.relay_subs_run(_Callback(f"admin:relay:{relay.id}:subs:rm:run"), _State(), panel_services)  # type: ignore[arg-type]
     await panel.relay_toggle(_Callback(f"admin:relay:{relay.id}:toggle:enabled"), _State(), panel_services)  # type: ignore[arg-type]
     stored = await world.relay_repo.get_by_id(relay.id)
     assert stored is not None and not stored.in_subscriptions and not stored.enabled

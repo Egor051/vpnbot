@@ -227,7 +227,9 @@ class Relay:
     # the create wizard and new bundles get no members through it.
     enabled: bool
     # Off: new all-in-one bundles get no members through this relay (single keys
-    # are still offered while ``enabled``).
+    # are still offered while ``enabled``). Switched from the relay's card, which
+    # also adds / removes its members in every issued subscription; a new relay
+    # starts off.
     in_subscriptions: bool
     note: str | None
     created_at: str
@@ -238,6 +240,9 @@ class Relay:
     # it over SSH, None for a relay set up by hand. A property of the relay, not a
     # separate entity — the agent columns of the same ``relays`` row.
     agent: "RelayAgent | None" = None
+    # Off: BASIC subscriptions do not serve this relay's children (a render-time
+    # filter; EXTENDED subscriptions, the keys and Xray are unaffected).
+    basic_visible: bool = True
 
     @property
     def managed(self) -> bool:
