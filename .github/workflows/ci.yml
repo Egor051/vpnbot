@@ -97,7 +97,8 @@ jobs:
       # layer quietly loses its tests behind gains elsewhere; these read the same
       # .coverage file and fail on a per-layer drop. Each N is the layer's value as
       # measured by this job, minus 1 (CI run 42525873156: repositories 89%, warp
-      # 90%, services 83%, adapters 77%). When a PR raises a layer, raise its N to
+      # 90%, services 83%, adapters 77%; services 84% since the relay «в подписках»
+      # / «в базовых» change). When a PR raises a layer, raise its N to
       # the new CI value minus 1; never lower one to get green. Keep
       # COVERAGE_FLOORS in the Makefile in step with these.
       - name: Coverage floor — repositories (>= 88%)
@@ -106,8 +107,8 @@ jobs:
       - name: Coverage floor — warp (>= 89%)
         run: python -m coverage report --include='warp/*' --fail-under=89
 
-      - name: Coverage floor — services (>= 82%)
-        run: python -m coverage report --include='services/*' --fail-under=82
+      - name: Coverage floor — services (>= 83%)
+        run: python -m coverage report --include='services/*' --fail-under=83
 
       - name: Coverage floor — adapters (>= 76%)
         run: python -m coverage report --include='adapters/*' --fail-under=76
