@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [3.1.1](https://github.com/Egor051/vpnbot/releases/tag/v3.1.1) — 2026-11-17
+
 ### Changed
 
 - **A relay has ONE update engine: `scripts/deploy.sh`, following releases (docs/relay.md#which-revision-a-relay-deploys).**
