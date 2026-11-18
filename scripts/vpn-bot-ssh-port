@@ -1237,16 +1237,32 @@ def confirm_session(ctx: Ctx, port: int, since: int, local_port: int, addr: str)
     The agent passes its OWN session's facts (SSH_CONNECTION): the session that runs it
     came in on *local_port*. Only when that IS the migration's target is the proof
     written — a confirmation that did not arrive over the new port closes nothing.
+
+    The same migration already finished (phase 2 with this *since* and *port*: the timer
+    or a deploy had another proof first) is a success, not a stale button — the bot
+    then moves its row to the new port it just reached the relay on.
     """
-    st = _relay_phase1(ctx, since)
-    if port != st.to:
-        raise Refused(f"the migration goes to {st.to}, not {port} — the button is stale")
+    if ctx.role != "relay":
+        raise Refused("relay only (the main server confirms with `confirm`)")
     if local_port != port:
         raise Refused(f"this session came in on {local_port}, not on {port}: it proves nothing about {port}")
     try:
         ipaddress.ip_address(addr)
     except ValueError:
         raise Refused(f"{addr!r} is not an address") from None
+    done = load_state(ctx)
+    if done is not None and done.phase == 2 and done.since == since and done.to == port:
+        # The timer's `advance` or a deploy finished THIS migration before the button
+        # (another proof came first). The session on the new port is the bot's: ok, so
+        # the bot moves its row to the port it just came in on.
+        proof = done.raw.get("proof")
+        kind = proof.get("kind") if isinstance(proof, dict) else None
+        print(f"vpn-bot-ssh-port: already finished — {csv(done.from_)} -> {port} at {done.raw.get('done_iso')} "
+              f"(proof {kind or 'unknown'}); this session came in on {port}")
+        return 0
+    st = _relay_phase1(ctx, since)
+    if port != st.to:
+        raise Refused(f"the migration goes to {st.to}, not {port} — the button is stale")
     with deploy_lock(ctx) as got:
         if not got:
             raise Refused("a deploy holds the lock — confirm again once it is done")

@@ -105,7 +105,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the new `vpn-bot-ssh-port begin` (phase 1 as a deploy does it, without the deploy; it never stops listening on
   the port the agent's own session came in on — `--keep`; a failed `vpn-relay-apply apply` puts ssh back and
   records nothing; `.env` restored on a failure). The hold is written under the deploy lock, like `advance`; the
-  port prompt's «Отмена» clears the pending input. New whitelisted agent requests `ssh-port-finish port= since=`, `ssh-port-keep since=`,
+  port prompt's «Отмена» clears the pending input; «Подтвердить» after the timer or a deploy already finished the
+  same migration is a success, so the bot still moves to the new port. New whitelisted agent requests `ssh-port-finish port= since=`, `ssh-port-keep since=`,
   `ssh-port-resume since=`, `ssh-port-set port=` — the same regex in `services/relay_ssh.py` `_REQUEST`
   (pinned by `tests/test_relay_jump.py`); agent version 3.
 - **The Phase 1 stamp — a deploy right after a green `CHECK=1` skips the tests

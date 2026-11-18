@@ -738,7 +738,9 @@ deploy). The relay's agent reports the migration in every `status` (`ssh_migrati
   as the input filter: **a confirmation that does not arrive closes nothing** — a new port that does
   not answer from main fails the call before the relay is touched. After it the bot's row says the
   new port, the hub's jump line opens it alone, and the input filter's new TCP set is confirmed by
-  the bot's next NEW session (`input-confirm`).
+  the bot's next NEW session (`input-confirm`). When the timer or a deploy already finished THIS
+  migration with another proof (the old port is closed and the bot cannot reach the relay on it),
+  «Подтвердить» over the new port is still a success (`already finished`): the bot moves its row.
 * **«Оставить 22»** (TOTP): the relay holds phase 1 (`hold` in the state file, `ssh-port-keep`): both
   ports stay, and NO proof finishes it — not a deploy, not the timer, not main's probe — until
   «↩️ Вернуться к переезду» (`ssh-port-resume`). The bot does not ask again. The hold is written
