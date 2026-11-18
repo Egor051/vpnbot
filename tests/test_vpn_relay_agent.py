@@ -1084,7 +1084,8 @@ case "$1" in
   plan) printf '%s\n' ssh_port=54321 current=22,54321 state=phase1 action=wait from=22 to=54321 since=1763460000 hold=0 \
           proof=none "status=ssh port: migrating 22 -> 54321 (waiting for proof)" listen=22,54321 ;;
   confirm-session) [[ -f "@SD@/refuse" ]] && { echo "vpn-bot-ssh-port: stale" >&2; exit 3; }; echo "phase 2: 22 -> 54321" ;;
-  hold|unhold|begin) echo "$1 done" ;;
+  begin) [[ -f "@SD@/refuse" ]] && { echo "vpn-bot-ssh-port: this session came in on 54321" >&2; exit 3; }; echo "$1 done" ;;
+  hold|unhold) echo "$1 done" ;;
 esac
 """
 
@@ -1169,6 +1170,23 @@ def test_set_writes_ssh_port_and_begins(host: Host) -> None:
     assert rc == 0, payload
     assert "ssh-port begin" in host.calls()
     assert "SSH_PORT=60022" in host.env_path.read_text(encoding="utf-8")
+
+
+def test_set_keeps_the_port_this_session_came_in_on(host: Host) -> None:
+    """A new target must not close the port the bot manages the relay through."""
+    _ssh_port_host(host)
+    rc, payload = host.run("ssh-port-set port=60022", conn="192.0.2.1 50000 192.0.2.50 54321")
+    assert rc == 0, payload
+    assert "ssh-port begin --keep 54321" in host.calls()
+
+
+def test_a_refused_begin_restores_ssh_port(host: Host) -> None:
+    _ssh_port_host(host)
+    before = host.env_path.read_text(encoding="utf-8")
+    (host.tmp / "sp" / "refuse").touch()
+    rc, payload = host.run("ssh-port-set port=60022", conn="192.0.2.1 50000 192.0.2.50 54321")
+    assert rc == 4 and "SSH_PORT restored" in payload["error"], payload
+    assert host.env_path.read_text(encoding="utf-8") == before
 
 
 def test_set_refuses_a_forwarded_port(host: Host) -> None:

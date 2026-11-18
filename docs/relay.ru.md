@@ -813,7 +813,7 @@ SSH, как выше, но:
 | `jump-off` | Hub: убрать эту строку. |
 | `ssh-port-finish port=<p> since=<s>` | Фаза 2 переезда SSH-порта — только из сессии, пришедшей на `<p>` (её `SSH_CONNECTION`): `vpn-bot-ssh-port confirm-session` пишет доказательство и закрывает старый порт ([host-state.ru.md](host-state.ru.md#переезд-relay-из-бота)). |
 | `ssh-port-keep since=<s>` / `ssh-port-resume since=<s>` | Удержать фазу 1 (старый порт остаётся, никакое доказательство её не завершает) / продолжить переезд. |
-| `ssh-port-set port=<p>` | `SSH_PORT=<p>` в `.env`, затем `vpn-bot-ssh-port begin`: оба порта слушают сразу, без деплоя; при неудаче `.env` возвращается. Проброшенный порт — отказ. |
+| `ssh-port-set port=<p>` | `SSH_PORT=<p>` в `.env`, затем `vpn-bot-ssh-port begin --keep <порт этой сессии>`: оба порта слушают сразу, без деплоя; порт, по которому пришёл бот, не закрывается; при неудаче (в том числе входного фильтра) `.env` возвращается. Проброшенный порт — отказ. |
 
 **Юниты** в агенте не перечислены. Он берёт их из checkout по тому же правилу, что deploy.sh,
 install.sh и проверка хоста (`relay_unit_names`): каждый `deploy/relay/*.service` и `*.timer` в

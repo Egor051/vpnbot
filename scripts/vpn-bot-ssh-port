@@ -68,9 +68,12 @@ Usage (root, except `render` and a `plan` / `status` that can read what they nee
                                     L == P from A), then phase 2 now (vpn-relay-agent)
   vpn-bot-ssh-port hold --since EPOCH / unhold --since EPOCH
                                     relay: keep the old port (no phase 2) / go on again
-  vpn-bot-ssh-port begin            relay: the start (or the cancel) a deploy would do
+                                    (under the deploy lock)
+  vpn-bot-ssh-port begin [--keep L] relay: the start (or the cancel) a deploy would do
                                     for SSH_PORT, now: both ports listen, the state
-                                    records phase 1 — the agent's `ssh-port-set`
+                                    records phase 1 — the agent's `ssh-port-set`. Never
+                                    stops listening on L (the agent's own session port);
+                                    a failed `vpn-relay-apply apply` reverts it (exit 4)
   vpn-bot-ssh-port proof-journal --ports P[,P] --since EPOCH   read-only: the journal proof for
                                     any port (vpn-bot-ufw-apply's dead-man), key=value lines
 Common options: --env FILE (default /opt/vpn-service/.env), --repo DIR (default
@@ -1125,6 +1128,7 @@ def main(argv: Sequence[str]) -> int:
         p.add_argument("--since", required=True, type=int)
     p = sub.add_parser("begin")
     p.add_argument("--listen-wait", type=int, default=10)
+    p.add_argument("--keep", type=port_arg, default=None)
     args = ap.parse_args(argv)
 
     try:
@@ -1188,7 +1192,7 @@ def main(argv: Sequence[str]) -> int:
         if args.cmd in ("hold", "unhold"):
             return set_hold(ctx, args.since, args.cmd == "hold")
         if args.cmd == "begin":
-            return begin(ctx)
+            return begin(ctx, args.keep)
     except Refused as exc:
         print(f"vpn-bot-ssh-port: {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -1260,20 +1264,36 @@ def confirm_session(ctx: Ctx, port: int, since: int, local_port: int, addr: str)
 
 
 def set_hold(ctx: Ctx, since: int, hold: bool) -> int:
-    st = _relay_phase1(ctx, since)
-    data = dict(st.raw)
-    data["hold"] = hold
-    save_state(ctx, data)
+    """«Оставить» / «Вернуться к переезду» — under the deploy lock, like `advance` and a
+    deploy: the state is read and written by one of them at a time, so a phase 2 that
+    is running finishes first (and this is then refused as stale) and a hold written
+    here is what the next `advance` reads."""
+    with deploy_lock(ctx) as got:
+        if not got:
+            raise Refused("a deploy or the timer's advance holds the lock — try again once it is done")
+        st = _relay_phase1(ctx, since)
+        data = dict(st.raw)
+        data["hold"] = hold
+        save_state(ctx, data)
     print(f"{ctx.state_path}: {'held — the old port stays open' if hold else 'released — waiting for proof again'} "
           f"({csv(st.from_)} -> {st.to})")
     return 0
 
 
-def begin(ctx: Ctx) -> int:
+def begin(ctx: Ctx, keep: int | None = None) -> int:
     """What a deploy does for SSH_PORT around its host files, without the deploy (relay):
     phase 1 of a migration (`start`: the old port(s) AND SSH_PORT) or the cancel of an
     unproven one (`cancel`: back to SSH_PORT alone, which still listens). The ssh files
-    must be the rendering of the ports ssh listens on now — otherwise a deploy decides."""
+    must be the rendering of the ports ssh listens on now — otherwise a deploy decides.
+
+    *keep*: the port the caller's own ssh session came in on (the agent passes it). A
+    plan that would stop listening on it is refused before anything changes — the bot
+    must not lose the port it manages the relay through (a new target while a migration
+    waits for proof drops the previous target).
+
+    The relay's input filter follows the listeners (`vpn-relay-apply apply`). When that
+    fails, the old filter stays and drops the new port: everything is put back and the
+    exit is EXIT_REVERTED — nothing is recorded, the caller restores SSH_PORT."""
     with deploy_lock(ctx) as got:
         if not got:
             raise Refused("a deploy holds the lock — it moves the port itself")
@@ -1284,6 +1304,10 @@ def begin(ctx: Ctx) -> int:
             print(plan.status(ctx))
             return 0
         current = sorted(plan.current)
+        if keep is not None and keep in current and keep not in plan.listen:
+            raise Refused(f"this session came in on {keep}, and the {plan.action} would stop ssh listening on it "
+                          f"({csv(current)} -> {csv(plan.listen)}) — confirm or cancel the migration first; "
+                          "nothing changed")
         targets: list[tuple[Path, str | None, str]] = []
         for rel, dst in TEMPLATES:
             tpl = template_text(ctx, rel)
@@ -1300,8 +1324,8 @@ def begin(ctx: Ctx) -> int:
         for path, _, new_text in targets:
             write_atomic(ctx, path, new_text)
         removed = [p for p in current if p not in plan.listen]
-        probs = apply_set(ctx, plan.listen, removed, ssh_was_active)
-        if probs:
+
+        def revert(why: str) -> int:
             for path, old_text, _ in targets:
                 if old_text is None:
                     with contextlib.suppress(FileNotFoundError):
@@ -1309,13 +1333,25 @@ def begin(ctx: Ctx) -> int:
                 else:
                     write_atomic(ctx, path, old_text)
             back = apply_set(ctx, current, [], ssh_was_active)
-            print(f"vpn-bot-ssh-port: {plan.action} failed its check ({'; '.join(probs)}) — reverted to "
-                  f"{csv(current)}" + ("" if not back else " — REVERT CHECK FAILED TOO: " + "; ".join(back)),
-                  file=sys.stderr)
+            print(f"vpn-bot-ssh-port: {plan.action} failed ({why}) — reverted to {csv(current)}"
+                  + ("" if not back else " — REVERT CHECK FAILED TOO: " + "; ".join(back)), file=sys.stderr)
             return EXIT_REVERTED
+
+        probs = apply_set(ctx, plan.listen, removed, ssh_was_active)
+        if probs:
+            return revert("its check: " + "; ".join(probs))
         if unit_active(RELAY_UNIT):
             rc, text = run([str(ctx.host(RELAY_HELPER)), "apply"], timeout=180)
             print(f"vpn-bot-ssh-port: vpn-relay-apply apply: rc {rc}" + (f" — {text.strip()}" if rc else ""))
+            if rc != 0:
+                # nft applies a ruleset in one transaction: the old filter is in place and
+                # lets in only the old ports. Back to them; the filter is applied again to
+                # the listeners as they are now (best effort — it already matches them).
+                code = revert(f"vpn-relay-apply apply rc {rc}: the input filter would drop {plan.to}")
+                rc2, text2 = run([str(ctx.host(RELAY_HELPER)), "apply"], timeout=180)
+                print(f"vpn-bot-ssh-port: vpn-relay-apply apply (after the revert): rc {rc2}"
+                      + (f" — {text2.strip()}" if rc2 else ""), file=sys.stderr)
+                return code
         print(f"vpn-bot-ssh-port: {record(ctx, plan.action, plan.from_, plan.to, None)}")
         return 0
 

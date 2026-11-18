@@ -741,15 +741,20 @@ deploy). The relay's agent reports the migration in every `status` (`ssh_migrati
   the bot's next NEW session (`input-confirm`).
 * **«Оставить 22»** (TOTP): the relay holds phase 1 (`hold` in the state file, `ssh-port-keep`): both
   ports stay, and NO proof finishes it — not a deploy, not the timer, not main's probe — until
-  «↩️ Вернуться к переезду» (`ssh-port-resume`). The bot does not ask again.
+  «↩️ Вернуться к переезду» (`ssh-port-resume`). The bot does not ask again. The hold is written
+  under the deploy lock, like `advance` and a deploy: a phase 2 already running finishes first.
 * **Setup wizard → «🔑 SSH-порт relay»**: every relay with an agent, its port and its migration;
   per relay «Подтвердить закрытие» / «Оставить» (phase 1), «Вернуться к переезду» (held) and
   **«✏️ Сменить порт»**: a typed port — the agent writes `SSH_PORT` into the relay's `.env` and runs
   `vpn-bot-ssh-port begin`, which does what a deploy does around its host files (phase 1: both files
   rendered for the current port(s) and the new one, the post-check, the state; or the cancel of an
   unproven migration), **without a deploy**; the files must be the rendering of the ports ssh
-  listens on now (or absent on the package's 22), otherwise a deploy decides. A failed `begin` puts
-  the old `.env` back. The old port closes later, on «Подтвердить».
+  listens on now (or absent on the package's 22), otherwise a deploy decides. `begin` never stops
+  listening on the port the agent's own session came in on (`--keep`: a new target while a migration
+  waits for proof would drop the previous target the bot may be on — refused, nothing changed), and
+  when `vpn-relay-apply apply` fails (the old input filter would drop the new port) it puts the ssh
+  files and the listeners back and records nothing (exit 4). A failed `begin` puts the old `.env`
+  back. The old port closes later, on «Подтвердить».
 
 Agent requests (`services/relay_ssh.py` `_REQUEST` and the agent's WHITELIST, run on the same
 requests by `tests/test_relay_jump.py`): `ssh-port-finish port=<1..65535> since=<epoch>`,

@@ -956,17 +956,26 @@ def _helper_lines(done: subprocess.CompletedProcess[str]) -> list[str]:
     return [ln for ln in (done.stdout + done.stderr).splitlines() if ln.strip()][-12:]
 
 
+def _session() -> tuple[str, int] | None:
+    """(client address, local port) of the ssh session that runs this request, or None.
+
+    The seam is off in an ssh session (SSH_CONNECTION set): tests hand the facts in
+    VPN_RELAY_AGENT_SELFTEST_CONN instead."""
+    raw_conn = os.environ.get("VPN_RELAY_AGENT_SELFTEST_CONN") if SELFTEST else os.environ.get("SSH_CONNECTION")
+    conn = (raw_conn or "").split()
+    if len(conn) != 4 or not conn[3].isdigit():
+        return None
+    return conn[0], int(conn[3])
+
+
 def cmd_ssh_port_finish(args: dict[str, str]) -> dict[str, Any]:
     """Phase 2 of the SSH port migration — only from a session that came in on the new port."""
     port, since = _port(args["port"]), _since(args["since"])
     require_paired()
-    # The seam is off in an ssh session (SSH_CONNECTION set): tests hand the facts in
-    # VPN_RELAY_AGENT_SELFTEST_CONN instead.
-    raw_conn = os.environ.get("VPN_RELAY_AGENT_SELFTEST_CONN") if SELFTEST else os.environ.get("SSH_CONNECTION")
-    conn = (raw_conn or "").split()
-    if len(conn) != 4 or not conn[3].isdigit():
+    session = _session()
+    if session is None:
         raise Refused("not an ssh session: there is no port it came in on")
-    addr, local_port = conn[0], int(conn[3])
+    addr, local_port = session
     if local_port != port:
         raise Refused(f"this session came in on {local_port}, not on {port}: call it on the new port")
     with exclusive():
@@ -1009,7 +1018,10 @@ def cmd_ssh_port_set(args: dict[str, str]) -> dict[str, Any]:
         if port in ports_of(env_value(before, "RELAY_FORWARD_TCP_PORTS")):
             raise Refused(f"tcp {port} is forwarded by this relay — it cannot be the SSH port")
         write_atomic(ENV_FILE, env_with(before, {"SSH_PORT": str(port)}))
-        done = _ssh_port_helper(["begin"])
+        # The port this session came in on stays open: the bot manages the relay
+        # through it until it has proved the new one.
+        session = _session()
+        done = _ssh_port_helper(["begin", *(["--keep", str(session[1])] if session else [])])
         if done.returncode != 0:
             write_atomic(ENV_FILE, before)
             raise Failed(f"vpn-bot-ssh-port begin exit {done.returncode} (SSH_PORT restored): "

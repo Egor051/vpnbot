@@ -32,6 +32,7 @@ Pinned:
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import os
@@ -53,6 +54,7 @@ OVERRIDE = "/etc/systemd/system/ssh.socket.d/override.conf"
 PORT_DROPIN = "/etc/ssh/sshd_config.d/00-vpn-bot-port.conf"
 STATE = "/var/lib/vpn-bot/ssh-migration.json"
 MARKER = "/etc/vpn-relay/input.confirmed"
+DEPLOY_LOCK = "/run/vpn-bot-deploy.lock"
 
 pytestmark = pytest.mark.timeout(90)
 
@@ -190,6 +192,7 @@ exit 0
 # The relay's input filter re-applied by `advance`.
 RELAY_APPLY = r"""
 echo "vpn-relay-apply $*" >> "$LOGS/vpn-relay-apply.log"
+if [[ -f "$SD/relay-apply.fail" ]]; then rm -f "$SD/relay-apply.fail"; echo "nft: transaction failed" >&2; exit 6; fi
 exit 0
 """
 
@@ -545,6 +548,57 @@ def test_begin_from_the_package_default_port(tmp_path: Path) -> None:
     proc = host.helper("begin", "--listen-wait", "0")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert (host.sd / "listening").read_text(encoding="utf-8").split() == ["22", "54321"]
+
+
+def test_begin_reverts_when_the_relay_filter_cannot_follow(tmp_path: Path) -> None:
+    """nft refuses the new filter: the old one drops the new port — so ssh goes back to
+    the old ports, nothing is recorded, and a retry starts over."""
+    host = Host(tmp_path, "relay", listening=(54321,), env="SSH_PORT=60022\n")
+    host.with_port_dropin(54321)
+    before = (host.h(OVERRIDE).read_text(encoding="utf-8"), host.h(PORT_DROPIN).read_text(encoding="utf-8"))
+    host.flag("relay-apply.fail")
+    proc = host.helper("begin", "--listen-wait", "0")
+    assert proc.returncode == 4, proc.stdout + proc.stderr
+    assert "would drop 60022" in proc.stderr and "reverted to 54321" in proc.stderr
+    assert (host.h(OVERRIDE).read_text(encoding="utf-8"), host.h(PORT_DROPIN).read_text(encoding="utf-8")) == before
+    assert (host.sd / "listening").read_text(encoding="utf-8").split() == ["54321"]
+    assert host.log("vpn-relay-apply") == ["vpn-relay-apply apply", "vpn-relay-apply apply"], \
+        "applied again to the listeners as they are after the revert"
+    assert host.state() is None
+    retry = host.helper("begin", "--listen-wait", "0")
+    assert retry.returncode == 0, retry.stdout + retry.stderr
+    assert host.state()["to"] == 60022  # type: ignore[index]
+
+
+def test_begin_never_closes_the_port_the_caller_came_in_on(tmp_path: Path) -> None:
+    """22 -> 54321 waits for proof, the bot is on 54321; a new target 60022 would drop
+    54321 — refused before anything changes."""
+    host = Host(tmp_path, "relay", env="SSH_PORT=60022\n")
+    host.phase1((22,), 54321)
+    before = host.h(OVERRIDE).read_text(encoding="utf-8")
+    proc = host.helper("begin", "--keep", "54321", "--listen-wait", "0")
+    assert proc.returncode == 3 and "came in on 54321" in proc.stderr, proc.stdout + proc.stderr
+    assert host.h(OVERRIDE).read_text(encoding="utf-8") == before
+    assert host.state()["to"] == 54321  # type: ignore[index]
+    # On the old port the bot keeps its session: the new target goes ahead.
+    ok = host.helper("begin", "--keep", "22", "--listen-wait", "0")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert (host.sd / "listening").read_text(encoding="utf-8").split() == ["22", "60022"]
+
+
+def test_hold_waits_for_the_deploy_lock(tmp_path: Path) -> None:
+    """«Оставить» does not write the state while a deploy or `advance` holds the lock."""
+    host = Host(tmp_path, "relay")
+    since = host.phase1()
+    lock = host.h(DEPLOY_LOCK)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        proc = host.helper("hold", "--since", str(since))
+    assert proc.returncode == 3 and "holds the lock" in proc.stderr, proc.stdout + proc.stderr
+    assert host.state().get("hold") is not True  # type: ignore[union-attr]
+    assert host.helper("hold", "--since", str(since)).returncode == 0
+    assert host.state()["hold"] is True  # type: ignore[index]
 
 
 def test_begin_leaves_a_hand_edited_file_to_a_deploy(tmp_path: Path) -> None:

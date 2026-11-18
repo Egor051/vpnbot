@@ -822,7 +822,7 @@ line, extra words, an argv, an interactive login — is refused with exit 2 befo
 | `jump-off` | A hub: remove that line. |
 | `ssh-port-finish port=<p> since=<s>` | Phase 2 of the SSH port migration — only from a session that came in on `<p>` (its `SSH_CONNECTION`): `vpn-bot-ssh-port confirm-session` writes the proof and closes the old port ([host-state.md](host-state.md#a-relays-migration-from-the-bot)). |
 | `ssh-port-keep since=<s>` / `ssh-port-resume since=<s>` | Hold phase 1 (the old port stays, no proof finishes it) / go on with the migration. |
-| `ssh-port-set port=<p>` | `SSH_PORT=<p>` in `.env`, then `vpn-bot-ssh-port begin`: both ports listen now, no deploy; `.env` restored on a failure. A forwarded port is refused. |
+| `ssh-port-set port=<p>` | `SSH_PORT=<p>` in `.env`, then `vpn-bot-ssh-port begin --keep <this session's port>`: both ports listen now, no deploy; the port the bot came in on never closes; `.env` restored on a failure (a failed input filter included). A forwarded port is refused. |
 
 **The units** are not a list in the agent. They are read from the checkout by the same rule deploy.sh,
 install.sh and the host check use (`relay_unit_names`): every `deploy/relay/*.service` and `*.timer` of

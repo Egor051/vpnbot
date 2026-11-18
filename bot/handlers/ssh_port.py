@@ -169,11 +169,14 @@ async def relay_ssh_port_list(callback: CallbackQuery, state: FSMContext, servic
 
 
 @router.callback_query(F.data.regexp(r"^admin:sshp:\d+$"))
-async def relay_ssh_port_card(callback: CallbackQuery, services: Services) -> None:
+async def relay_ssh_port_card(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     try:
         if not await _guard(callback, services):
             return
         assert callback.from_user is not None and callback.data is not None
+        # The port prompt's «Отмена» leads here: a number typed afterwards is no port.
+        if await state.get_state() == RelaySshPortStates.port.state:
+            await state.clear()
         await safe_callback_answer(callback)
         text, markup = await _relay_screen(services, callback.from_user.id, int(callback.data.rsplit(":", 1)[1]))
         await safe_edit_message_text(callback.message, text, reply_markup=markup)

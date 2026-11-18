@@ -1123,7 +1123,7 @@ async def test_the_screen_lists_the_relay_and_offers_close_and_keep(prod: Env, s
     relay = await prod.relay()
     assert t("relay_ssh_port_line_phase1", name=relay.name, old="22", new=54321) in cb.message.edits[-1]
     card = Callback("admin:sshp:1")
-    await sshp.relay_ssh_port_card(card, services)
+    await sshp.relay_ssh_port_card(card, fsm(), services)
     buttons = _buttons(card.message.markups[-1])
     assert buttons[:2] == ["sshport:r:ok:1:54321:1763460000", "sshport:r:keep:1:1763460000"]
     assert "admin:sshp:1:set" in buttons
@@ -1182,6 +1182,18 @@ async def test_change_the_port_asks_it_and_runs_set(prod: Env, sshp: Any) -> Non
     assert "ssh-port-set port=60022" in [c["request"] for c in prod.client.calls]
     assert t("relay_ssh_port_set_done", port=60022) in good.answers[-1].edits[-1]
     assert await state.get_state() is None
+
+
+async def test_cancelling_the_port_prompt_forgets_it(prod: Env, sshp: Any) -> None:
+    """«Отмена» of the prompt leads back to the card: a number typed afterwards starts nothing."""
+    await _relay_in_phase1(prod)
+    services = _services(prod)
+    state = fsm()
+    await sshp.relay_ssh_port_set_start(Callback("admin:sshp:1:set"), state, services)
+    assert await state.get_state() == sshp.RelaySshPortStates.port.state
+    await sshp.relay_ssh_port_card(Callback("admin:sshp:1"), state, services)
+    assert await state.get_state() is None
+    assert not [c for c in prod.client.calls if c["request"].startswith("ssh-port-set")]
 
 
 async def test_a_stale_relay_button_changes_nothing(prod: Env, sshp: Any) -> None:
