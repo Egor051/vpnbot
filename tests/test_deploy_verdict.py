@@ -254,3 +254,30 @@ def test_every_reason_deploy_sh_sets_is_in_its_list() -> None:
     reasons = set(_bash_array("DEPLOY_FAIL_REASONS"))
     set_ones = set(re.findall(r"DEPLOY_FAIL_REASON=([a-z_]+)", text))
     assert set_ones and set_ones <= reasons, set_ones - reasons
+
+
+# --------------------------------------------------------------------------- #
+# 5. The progress of a running deploy (D) — the same block
+# --------------------------------------------------------------------------- #
+def test_progress_of_a_running_deploy() -> None:
+    out = "\n".join([
+        "[deploy:step 1/8 preflight]", "[deploy:step 2/8 fetch]",
+        # A relay's handover: the target's own copy starts over.
+        "[deploy:step 1/8 preflight]", "[deploy:step 2/8 fetch]", "[deploy:step 3/8 tests]",
+        "[deploy:tests total=200]", "." * 72 + " [ 36%]", "." * 28,
+    ])
+    p = agent.deploy_progress(out)
+    assert p["step"] == "tests"
+    assert p["steps"] == {"preflight": "ok", "fetch": "ok", "tests": "run", "checks": "wait", "backup": "wait",
+                          "install": "wait", "restart": "wait", "verify": "wait"}
+    assert p["tests"] == {"done": 100, "total": 200}
+
+
+def test_progress_skip_fail_and_done() -> None:
+    skipped = agent.deploy_progress("[deploy:step 3/8 tests]\n[deploy:skip tests] stamp\n[deploy:step 4/8 checks]\n")
+    assert skipped["steps"]["tests"] == "skip" and skipped["steps"]["checks"] == "run"
+    failed = agent.deploy_progress("[deploy:step 7/8 restart]\n[deploy:result failed step=restart reason=rolled_back]\n")
+    assert failed["steps"]["restart"] == "fail" and failed["steps"]["install"] == "ok"
+    done = agent.deploy_progress("[deploy:step 8/8 verify]\n[deploy:result ok]\n")
+    assert set(done["steps"].values()) == {"ok"}
+    assert agent.deploy_progress("nothing yet") == {"step": "", "steps": dict.fromkeys(DEPLOY_STEPS, "wait"), "tests": {}}

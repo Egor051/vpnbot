@@ -1057,10 +1057,11 @@ async def test_a_failed_update_shows_the_cause_step_lines_and_log(prod: Env) -> 
                                "    apt install python3.12-venv"],
                    "log": "/root/deploy-20261118T120000Z.log"},
     })
-    cb = Callback("admin:relay:1:ag:up")
-    await ui.relay_agent_update(cb, fsm(), _services(prod))  # type: ignore[arg-type]
+    cb = Callback("admin:relay:1:ag:up:ok")
+    await ui.relay_agent_update_run(cb, fsm(), _services(prod))  # type: ignore[arg-type]
     text = cb.message.edits[-1]
     assert t("relay_agent_update_failed_cause") in text
+    assert "❌ " + t("deploy_step_tests") in text, "the failing step is marked"
     assert t("deploy_reason_no_venv") in text and t("deploy_step_tests") in text
     assert "apt install python3.12-venv" in text and "/root/deploy-20261118T120000Z.log" in text
     assert t("relay_agent_refused", error="").split(":")[0] not in text
@@ -1073,10 +1074,50 @@ async def test_a_successful_update_shows_the_deploys_warning(prod: Env) -> None:
         "state": "succeeded", "message": "updated to v9.1.0",
         "warnings": [{"code": "upstream_preexisting", "text": "TCP connect 203.0.113.5:443"}],
     }})
-    cb = Callback("admin:relay:1:ag:up")
-    await ui.relay_agent_update(cb, fsm(), _services(prod))  # type: ignore[arg-type]
+    cb = Callback("admin:relay:1:ag:up:ok")
+    await ui.relay_agent_update_run(cb, fsm(), _services(prod))  # type: ignore[arg-type]
     text = cb.message.edits[-1]
     assert "updated to v9.1.0" in text and t("deploy_warn_upstream_preexisting") in text
+    assert "✅ " + t("deploy_step_verify") in text
+
+
+async def test_update_shows_the_plan_first_then_runs_with_progress(prod: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D: the plan (every step ⚪, «Подтвердить»), then the run; `update-status` next to
+    the long call moves the steps and counts the tests."""
+    import asyncio
+
+    issued = await prod.service.issue_attach(ADMIN, 1, target_host=TARGET)
+    await prod.service.complete(ADMIN, issued.pairing.id, RU1_IP)
+    plan = Callback("admin:relay:1:ag:up")
+    await ui.relay_agent_update(plan, fsm(), _services(prod))  # type: ignore[arg-type]
+    assert plan.message.edits[-1].count("⚪") == 8
+    assert "admin:relay:1:ag:up:ok" in _buttons(plan.message.markups[-1])
+    assert not [c for c in prod.client.calls if c["request"] == "update"], "nothing ran before the confirmation"
+
+    monkeypatch.setattr(ui, "UPDATE_POLL_SECONDS", 0.01)
+    progress = {"step": "tests", "steps": {"preflight": "ok", "fetch": "ok", "tests": "run"},
+                "tests": {"done": 2802, "total": 5604}}
+    prod.client.replies["update-status"] = AgentReply(0, {"ok": True, "update": {"state": "running", "progress": progress}})
+    seen: list[str] = []
+    original = prod.client.call
+
+    async def slow(*args: Any, **kwargs: Any) -> AgentReply:
+        if args[2] == "update":
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if any(c["request"] == "update-status" for c in prod.client.calls):
+                    break
+            await asyncio.sleep(0.05)
+            seen.append(run.message.edits[-1] if run.message.edits else "")
+            return AgentReply(0, {"ok": True, "update": {"state": "succeeded", "message": "updated to v9.1.0"}})
+        return await original(*args, **kwargs)
+
+    prod.client.call = slow  # type: ignore[method-assign]
+    run = Callback("admin:relay:1:ag:up:ok")
+    await ui.relay_agent_update_run(run, fsm(), _services(prod))  # type: ignore[arg-type]
+    assert any(c["request"] == "update-status" for c in prod.client.calls)
+    final = run.message.edits[-1]
+    assert "updated to v9.1.0" in final and final.count("✅") >= 8
 
 
 # ── «🔑 SSH-порт relay» and the buttons of a relay's migration (B) ─────────────

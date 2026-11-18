@@ -86,8 +86,11 @@ from services.relay import RelayCatalog
 from services.host_check import HostCheckMonitor
 from services.ssh_port import SshPortMonitor
 from services.ufw import UfwApplier, UfwDeadmanMonitor
-from services.relay_health import build_relay_health_supervisor
+from aiogram.types import InlineKeyboardMarkup
+
+from services.relay_health import broadcast_to_admins, build_relay_health_supervisor
 from services.fallback import FallbackService
+from services.fallback_auto import FallbackAutoSwitch
 from services.relays import RelayService, warn_legacy_relay_env
 from services.relay_ssh import RelayAgentClient, RelayKeyStore, jump_key_store
 from services.server_status import ServerStatusService
@@ -767,6 +770,10 @@ async def _build_app(
     )
     await fallback_service.refresh_state()
     relay_health_supervisor.behind_hub = fallback_service.behind_hub
+    # RU relays cut from main, stably: one suggestion — or, with «Автопереключение»,
+    # the switch itself, always told (services/fallback_auto.py).
+    fallback_auto = FallbackAutoSwitch(fallback_service)
+    relay_health_supervisor.pass_listeners.append(fallback_auto.observe)
     # What the host check (vpn-bot-host-check.timer) last found; alerts the
     # superadmins on a change, remembering what it reported in schema_meta.
     host_check_monitor = HostCheckMonitor(store=db, admin_ids=settings.admin_ids)
@@ -989,6 +996,11 @@ async def _build_app(
     trial_access_service.bot = bot
     anomaly_detection_service.bot = bot
     relay_health_supervisor.bot = bot
+
+    async def _fallback_notify(text: str, markup: InlineKeyboardMarkup | None) -> None:
+        await broadcast_to_admins(bot, settings.admin_ids, text, markup)
+
+    fallback_auto.notify = _fallback_notify
     host_check_monitor.bot = bot
     ssh_port_monitor.bot = bot
     ufw_deadman_monitor.bot = bot

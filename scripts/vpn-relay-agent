@@ -19,6 +19,8 @@ everything else is refused with exit 2 before anything is read or changed:
     update                                deploy the newest release tag (never backwards
                                           or sideways) with scripts/deploy.sh — the
                                           relay's one update engine
+    update-status                         update.json as it is now (the progress of a
+                                          running update: its steps and tests), read-only
     uninstall                             remove everything scripts/install.sh installed
     input-confirm                         run `vpn-relay-apply input-confirm` from THIS
                                           ssh session (a new one: the bot's own proof
@@ -115,6 +117,7 @@ import hmac
 import json
 import os
 import re
+import select
 import shutil
 import subprocess  # noqa: S404 — fixed argv lists of system tools, never a shell
 import sys
@@ -125,7 +128,8 @@ from pathlib import Path
 from typing import Any
 
 # 2: input-confirm, jump, jump-off; input_status and jump in the facts.
-# 3: ssh-port-finish / -keep / -resume / -set; ssh_migration in the facts. The protocol
+# 3: ssh-port-finish / -keep / -resume / -set; ssh_migration in the facts; update-status
+# and update.json's `progress`. The protocol
 # (what `hello` answers) is unchanged.
 AGENT_VERSION = "3"
 PROTOCOL = 1
@@ -210,6 +214,7 @@ WHITELIST: dict[str, re.Pattern[str]] = {
     "status": re.compile(r"status"),
     "apply": re.compile(rf"apply target=(?P<target>{_HOST}) tcp=(?P<tcp>{_PORTS}) udp=(?P<udp>{_PORTS})"),
     "update": re.compile(r"update"),
+    "update-status": re.compile(r"update-status"),
     "uninstall": re.compile(r"uninstall"),
     "input-confirm": re.compile(r"input-confirm"),
     "jump": re.compile(
@@ -370,6 +375,54 @@ def run(
     if check and result.returncode != 0:
         raise Failed(f"{Path(args[0]).name} exit {result.returncode}: {tail(result.stderr or result.stdout)}")
     return result
+
+
+def run_streaming(
+    args: Sequence[str], *, timeout: float, env: dict[str, str] | None = None,
+    on_output: Any = None, every: float = 2.0,
+) -> subprocess.CompletedProcess[str]:
+    """:func:`run` for a long command whose output is read WHILE it runs: stdout and
+    stderr as one stream, *on_output(text_so_far)* at most every *every* seconds
+    (the progress of `update`). 124 on a timeout (the process is killed)."""
+    if _BIN:
+        exe = Path(_BIN) / Path(args[0]).name
+        if not exe.exists():
+            return subprocess.CompletedProcess(list(args), 127, "", f"selftest: no stub for {args[0]}")
+        args = [str(exe), *args[1:]]
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — argv only, fixed programs, never a shell
+            list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            env=command_env(env),
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(list(args), 127, "", f"{args[0]}: not found")
+    assert proc.stdout is not None
+    fd = proc.stdout.fileno()
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    told = 0.0
+
+    def text() -> str:
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            proc.kill()
+            proc.wait()
+            return subprocess.CompletedProcess(list(args), 124, text(), f"{args[0]}: timeout after {timeout}s")
+        ready, _, _ = select.select([fd], [], [], min(left, every))
+        if ready:
+            data = os.read(fd, 65536)
+            if not data:
+                break
+            chunks.append(data)
+        if on_output is not None and time.monotonic() - told >= every:
+            told = time.monotonic()
+            with contextlib.suppress(Exception):
+                on_output(text())
+    proc.wait()
+    return subprocess.CompletedProcess(list(args), proc.returncode, text(), "")
 
 
 def tail(text: str, lines: int = 12) -> str:
@@ -788,6 +841,12 @@ def cmd_update(_: dict[str, str]) -> dict[str, Any]:
     return {"update": result}
 
 
+def cmd_update_status(_: dict[str, str]) -> dict[str, Any]:
+    """update.json as it is now — no lock (it runs next to `update`), nothing else."""
+    require_paired()
+    return {"update": read_json(UPDATE_FILE) or {}}
+
+
 def cmd_uninstall(_: dict[str, str]) -> dict[str, Any]:
     with exclusive():
         require_paired()
@@ -1034,6 +1093,7 @@ COMMANDS = {
     "status": cmd_status,
     "apply": cmd_apply,
     "update": cmd_update,
+    "update-status": cmd_update_status,
     "uninstall": cmd_uninstall,
     "input-confirm": cmd_input_confirm,
     "jump": cmd_jump,
@@ -1170,6 +1230,50 @@ def deploy_verdict(output: str, rc: int) -> dict[str, Any]:
         ],
         "log": log.group("log") if log else "",
     }
+# deploy.sh's DEPLOY_STEPS, in order (the progress of a running deploy).
+DEPLOY_STEPS = ("preflight", "fetch", "tests", "checks", "backup", "install", "restart", "verify")
+_DV_STEP = re.compile(r"\[deploy:step [0-9]+/[0-9]+ ([a-z_]{1,32})\]")
+_DV_SKIP = re.compile(r"\[deploy:skip ([a-z_]{1,32})\]")
+_DV_TOTAL = re.compile(r"\[deploy:tests total=([0-9]{1,7})\]")
+# pytest -q: a line of result characters, "[ NN%]" at its end once it is full.
+_DV_PYTEST_LINE = re.compile(r"^([.FEsxX]+)\s*(?:\[\s*[0-9]{1,3}%\])?\s*$")
+
+
+def deploy_progress(output: str) -> dict[str, Any]:
+    """Where a RUNNING deploy is, from its output so far: every step of DEPLOY_STEPS
+    with its state (wait / run / ok / fail / skip), the current step, and the tests
+    (done of total: total from ``[deploy:tests total=N]``, done counted from pytest's
+    result characters). After a relay's handover the steps start over: the LAST step
+    line is the current one."""
+    steps = _DV_STEP.findall(output)
+    current = steps[-1] if steps else ""
+    skipped = set(_DV_SKIP.findall(output))
+    result = None
+    for match in _DV_RESULT.finditer(output):
+        result = match
+    states: dict[str, str] = {}
+    at = DEPLOY_STEPS.index(current) if current in DEPLOY_STEPS else -1
+    for i, name in enumerate(DEPLOY_STEPS):
+        if name in skipped and i <= max(at, 0):
+            states[name] = "skip"
+        elif i < at:
+            states[name] = "ok"
+        elif i == at:
+            states[name] = "run"
+        else:
+            states[name] = "wait"
+    if result is not None and current in states:
+        if result.group("reason") is not None:
+            states[current] = "fail"
+        else:
+            states = {k: ("ok" if v in ("run", "wait") and DEPLOY_STEPS.index(k) <= at else v)
+                      for k, v in states.items()}
+    totals = _DV_TOTAL.findall(output)
+    done = sum(len(m.group(1)) for line in output.splitlines() if (m := _DV_PYTEST_LINE.match(line.strip())))
+    tests: dict[str, int] = {}
+    if totals or done:
+        tests = {"done": done, **({"total": int(totals[-1])} if totals else {})}
+    return {"step": current, "steps": states, "tests": tests}
 # --- DEPLOY VERDICT (end) ---
 
 
@@ -1236,12 +1340,18 @@ def internal_update() -> int:
              "deploy the relay once by hand: sudo DEPLOY_REF=main bash scripts/redeploy.sh",
              from_commit=old, release=latest, reason="preflight")
         return 1
-    note("running", f"deploying {latest} (scripts/redeploy.sh, DEPLOY_REF={latest})", from_commit=old, release=latest)
+    running = f"deploying {latest} (scripts/redeploy.sh, DEPLOY_REF={latest})"
+    note("running", running, from_commit=old, release=latest)
+
+    def progress(output: str) -> None:
+        # The bot reads it with `update-status` while this runs (bot/progress.py).
+        note("running", running, from_commit=old, release=latest, progress=deploy_progress(output))
+
     # The deploy an operator runs, unattended: redeploy.sh starts the tag's deploy.sh
     # in its own transient unit and, with REDEPLOY_ATTACH=pipe, waits and exits with
     # deploy.sh's code. deploy.sh re-checks forward-only itself and rolls back by itself.
-    done = run(["bash", str(redeploy)], env={"DEPLOY_REF": latest, "REDEPLOY_ATTACH": "pipe"},
-               timeout=UPDATE_TIMEOUT - 120)
+    done = run_streaming(["bash", str(redeploy)], env={"DEPLOY_REF": latest, "REDEPLOY_ATTACH": "pipe"},
+                         timeout=UPDATE_TIMEOUT - 120, on_output=progress)
     output = done.stdout + done.stderr
     verdict_of = deploy_verdict(output, done.returncode)
     where = {"log": verdict_of["log"]} if verdict_of["log"] else {}

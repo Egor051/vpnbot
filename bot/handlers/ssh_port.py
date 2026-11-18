@@ -30,6 +30,7 @@ from bot.guards import require_superadmin
 from bot.handlers.common import answer_callback_error, answer_message_error, service_error_text
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
+from bot.progress import ProgressMessage, render_steps, steps_of
 from bot.totp_gate import require_totp
 from i18n import t
 from models.dto import Relay
@@ -138,10 +139,23 @@ async def _relay_screen(services: Services, actor: int, relay_id: int, notice: s
     lines += [t("relay_ssh_port_relay_title", name=h(relay.name)), relay_ssh_line(relay)]
     if relay.agent is not None:
         lines.append(t("relay_ssh_port_bot_port", port=code(str(relay.agent.ssh_port))))
+        found = _migration(relay)
+        if found is not None and not found[1] and notice is None:
+            # The plan of «Подтвердить»: every step ⚪ (bot/progress.py).
+            lines += ["", render_steps(t("relay_ssh_port_plan_title"), steps_of(ssh_port_steps())).strip()]
         status = _plan(relay).get("status")
         if status:
             lines.append(f"<i>{h(str(status))}</i>")
     return "\n".join(lines), relay_ssh_keyboard(relay)
+
+
+def ssh_port_steps() -> list[tuple[str, str]]:
+    """«Подтвердить» of a relay's migration, as bot/progress.py steps."""
+    return [(key, t(f"relay_ssh_port_step_{key}")) for key in ("probe", "phase2", "jump", "filter")]
+
+
+async def _progress_edit(message: object, text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> bool:
+    return await safe_edit_message_text(message, text, reply_markup=reply_markup)  # type: ignore[arg-type]
 
 
 async def _guard(callback: CallbackQuery, services: Services) -> bool:
@@ -252,13 +266,31 @@ async def relay_ssh_port_button(callback: CallbackQuery, state: FSMContext, serv
         await safe_callback_answer(callback, t("relay_ssh_port_working"))
         try:
             if verb == "ok":
-                await services.relays.finish_ssh_port(actor, relay_id, port=port, since=since)
-                notice = t("relay_ssh_port_finished", port=port)
+                view = ProgressMessage(callback.message, t("relay_ssh_port_progress", port=port),
+                                       steps_of(ssh_port_steps()), edit=_progress_edit)
+                await view.push(force=True)
+
+                async def on_progress(step: str, state: str) -> None:
+                    view.set(step, state)
+                    await view.push()
+
+                try:
+                    await view.run(services.relays.finish_ssh_port(
+                        actor, relay_id, port=port, since=since, on_progress=on_progress))
+                except ServiceError:
+                    if not any(s.state == "fail" for s in view.steps):
+                        view.fail_running()
+                    raise
+                finally:
+                    steps_text = view.text(activity=False).split("\n", 2)[-1].strip()
+                notice = f"{steps_text}\n\n" + t("relay_ssh_port_finished", port=port)
             else:
                 await services.relays.keep_ssh_port(actor, relay_id, since=since, keep=verb == "keep")
                 notice = t("relay_ssh_port_kept") if verb == "keep" else t("relay_ssh_port_resumed")
         except ServiceError as exc:
             notice = t("relay_ssh_port_failed", error=h(service_error_text(exc)))
+            if verb == "ok":
+                notice = f"{steps_text}\n\n{notice}"
         text, markup = await _relay_screen(services, actor, relay_id, notice)
         await safe_edit_message_text(callback.message, text, reply_markup=markup)
     except Exception as exc:

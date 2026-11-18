@@ -849,6 +849,9 @@ case "{outcome}" in
   ok) printf '===== DEPLOY OK =====\n  deployed         : aaaaaaa -> bbbbbbb\n  schema_version   : 41 -> 42 (target 42)\n=====================\n' ;;
   rollback) printf '===== ROLLBACK REPORT =====\n  - start vpn-bot: rc=0\n===========================\n'; exit 1 ;;
   die) echo "[deploy] FATAL: unit drift detected"; exit 1 ;;
+  stepped)
+    printf '%s\n' "[deploy:step 1/8 preflight]" "[deploy:step 3/8 tests]" "[deploy:tests total=4]" "...."
+    printf '===== DEPLOY OK =====\n  deployed         : aaaaaaa -> bbbbbbb\n=====================\n[deploy:result ok]\n' ;;
   marked)
     echo "redeploy: launching vpn-bot-deploy (log: /root/deploy-20261118T120000Z.log)"
     printf '%s\n' "[deploy:step 4/8 checks]" "[deploy][FAIL] unit drift detected (set ALLOW_UNIT_DRIFT=1 ...)" \
@@ -947,6 +950,18 @@ def test_update_failure_carries_the_cause_for_the_bot(host: Host) -> None:
     assert result["reason"] == "checks" and result["fail_step"] == "checks"
     assert result["excerpt"] == ["[deploy][FAIL] unit drift detected (set ALLOW_UNIT_DRIFT=1 ...)"]
     assert result["deploy_log"] == "/root/deploy-20261118T120000Z.log"
+
+
+def test_update_streams_the_deploys_progress_into_the_status_file(host: Host) -> None:
+    _redeploy_stub(host, "stepped")
+    _git_stub(host)
+    _planned(host, 30)
+    assert host.launcher("run", "--mode", "update", "--run", "30", "--phase", "execute").returncode == 0
+    deploys = [e for e in host.events(30) if e["event"] == "deploy"]
+    assert deploys, "at least the final progress"
+    last = deploys[-1]["progress"]
+    assert last["tests"] == {"done": 4, "total": 4}
+    assert set(last["steps"].values()) == {"ok", "wait"} or last["steps"]["tests"] == "ok"
 
 
 def test_update_rollback_carries_rolled_back_without_markers(host: Host) -> None:

@@ -895,9 +895,13 @@ async def test_progress_is_edited_at_most_every_three_seconds() -> None:
     # start + t=103 + t=106 + t=109
     assert reporter.edits == 4
     assert len(message.edits) == 4
-    assert message.edits[-1][0] == t("aio_run_progress", title="T", done=9, total=20)
-    await reporter(20, 20)  # the last bundle: the final report replaces it instead
+    last = message.edits[-1][0]
+    assert "✅ " + t("aio_step_plan") in last and "🔄 " + t("aio_step_apply") + " — 9/20" in last
+    assert last.rstrip().endswith("45%"), "a measurable step shows its percentage, not stars"
+    await reporter(20, 20)  # within 3 s of the last edit: none
     assert len(message.edits) == 4
+    await reporter.finish("REPORT", None)
+    assert "✅ " + t("aio_step_apply") in message.edits[-1][0] and "REPORT" in message.edits[-1][0]
 
 
 def test_report_lists_skip_reasons_and_failures() -> None:

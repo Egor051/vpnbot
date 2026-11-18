@@ -54,6 +54,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The fallback mode sets itself up step by step, and «Включить» is never a dead end
+  (docs/relay.md#the-screen-the-setup-включить-with-an-empty-set).** Not set up, the «🛟 Режим фолбэка» screen
+  says what is missing and offers only «⚙️ Настроить фолбэк»: the token (asked, deleted, checked against the
+  zone right away — `FallbackService.check_zone`), the hub among the relays with an agent outside Russia
+  (`hub_candidates`, by the IP-to-ASN country — `adapters.ip_asn.lookup_country`), the origin (`origin.<zone>`,
+  one tap), the failover set from `explained_candidates` — HYSTERIA2_SNI, the subscription's name, the names
+  the RU relays forward to, a DNS-named XRAY_PUBLIC_HOST, each with why, all checked, one confirmation
+  (`add_names`) — and the preflight with a fix button per problem. Set up, the screen shows the state, the hub
+  and the names and only «Включить/Выключить режим», «Проверить», «⚙️ Настройки», «⬅️ Назад» («🔁 Повторить»
+  only while a switch is partial); names, token, the IPv4s, direct host, `fallback-url` and «Автопереключение»
+  moved to «⚙️ Настройки»; «Обновить» is gone (redrawn on open and after every action). «Включить» with an
+  empty set opens the checked candidates with «🛟 Включить с этими именами», which adds them and switches in the
+  same action; every refusal (empty set, preflight, loop, token, hub) names the cause with the button that
+  removes it (`fix_keyboard`).
+- **Fallback automatics (docs/relay.md#automatics).** `services/fallback_auto.py`, a pass listener of the relay
+  health loop: when every enabled edge relay with an agent is cut from main (its check exits 13/14, or neither
+  its traffic nor its agent answers) while the hub is reachable, for 3 passes AND 10 minutes, the superadmins get
+  ONE message with «🛟 Включить режим фолбэка» — or, with «Автопереключение» on (default off), the bot switches
+  itself (`_switch` with no actor; the hub's status asked as the bot itself — `RelayService.system_status`;
+  `select_hub` untouched) and always tells. One message per incident, an hour's cooldown after any switch, back
+  to normal by hand only (the signal is not observable once the RU relays forward to the hub).
+- **The progress of long operations in one message (`bot/progress.py`).** ⚪ waits · 🔄 runs · ✅ · ❌ · ⏭; an
+  activity line of 1 → 6 stars, or «42%» for a measurable step; the plan first (all ⚪, «Подтвердить»), at most
+  one edit per `PROGRESS_EDIT_INTERVAL_SECONDS` (3 s), «not modified» and 429 handled, a failing edit never
+  fails the operation, the result always sent. Used by the All-in-One reconcile and the relay card's scoped run
+  (steps instead of the old counter; the plan screens list them), the fallback switch (`on_progress` of
+  `enable`/`disable`/`repeat`: preflight, jump line, A records N/M, resolvers), «Подтвердить» of a relay's SSH
+  port move (`finish_ssh_port(on_progress=)`), «⬆️ Обновить агент» (a plan with the deploy's steps, then
+  `update-status` every 10 s next to the long call — a new lock-free agent request answering update.json, where
+  the agent writes `progress` every 2 s while it streams the deploy's output: `run_streaming`, `deploy_progress`
+  in the shared DEPLOY VERDICT block) and «⬆️ Обновить бота» (the wizard helper streams redeploy.sh and writes
+  `deploy` events; the message — its id in `wizard_runs` — is continued by the bot the deploy restarted and
+  closed with the result). `deploy.sh` prints `[deploy:tests total=N]` (`pytest --collect-only`).
 - **A relay's SSH port closes without a redeploy — after the bot proved the new one
   (docs/host-state.md#a-relays-migration-from-the-bot).** he1 kept ssh on 22 (root with a password) next to
   `SSH_PORT` until a manual redeploy: phase 2 of the migration waited for a proof main's probe could not give.

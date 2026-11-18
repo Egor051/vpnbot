@@ -177,3 +177,29 @@ def test_a_successful_update_shows_the_deploys_warning() -> None:
     ])
     text = final_text(run(mode="update", state="succeeded", active=False), parse_status(status))
     assert "⚠️" in text
+
+
+
+def test_the_update_plan_lists_the_deploys_steps_waiting() -> None:
+    text = plan_text(run(mode="update", state="planned", plan_ready=True), StatusSnapshot(plan_text="x"))
+    assert text.count("⚪") == 8
+
+
+def test_a_running_update_shows_its_steps_and_tests_and_survives_the_restart() -> None:
+    """The steps come from the status file (the helper's ``deploy`` events): the bot that
+    the deploy restarted reads the same file and edits the same message (message_id
+    in wizard_runs) — and closes it with the result."""
+    progress = {"step": "tests", "steps": {"preflight": "ok", "fetch": "ok", "tests": "run"},
+                "tests": {"done": 2802, "total": 5604}}
+    status = "\n".join([
+        '{"event": "launched", "phase": "execute"}',
+        '{"event": "deploy", "progress": ' + __import__("json").dumps(progress) + "}",
+    ])
+    snap = parse_status(status)
+    text = progress_text(run(mode="update", phase="execute"), snap)
+    assert "✅" in text and "🔄" in text and "2802/5604" in text and text.count("⚪") == 5
+    assert "50%" in text
+    done = parse_status(status + '\n{"event": "result", "text": "===== DEPLOY OK =====", "verdict": "deploy_ok"}'
+                        '\n{"event": "finished", "outcome": "succeeded"}')
+    final = final_text(run(mode="update", state="succeeded", active=False), done)
+    assert final.count("✅") >= 8 and "⚪" not in final

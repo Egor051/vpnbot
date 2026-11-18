@@ -882,6 +882,7 @@ die()  { printf '[deploy][FAIL] %s\n' "$*" >&2; deploy_result_failed >&2; exit 1
 # Machine-readable lines, never translated, one per event:
 #   [deploy:step <i>/<n> <name>]                         a step begins
 #   [deploy:skip <name>] <why>                           a step is skipped (tests: a stamp)
+#   [deploy:tests total=<N>]                             the tests the gate collected
 #   [deploy:warn <code>] <text>                          DEPLOY OK with a finding to show
 #   [deploy:result ok|noop]                              green / nothing to deploy
 #   [deploy:result failed step=<name> reason=<class>]    why it stopped
@@ -5548,6 +5549,13 @@ run_checkout_tests() {
   #     invariant above holds; what it buys HERE is that a hung test fails this gate
   #     with a traceback instead of holding the deploy open indefinitely — which is
   #     precisely how an unbounded `journalctl` read once blocked a production run.
+  # How many tests the run will have, for the progress readers ([deploy:tests total=N]:
+  # the bot shows «N of M» from pytest's result characters). Informational: a
+  # collection that fails here fails the run below with its own message.
+  local total
+  total="$( (cd "$WT" && "${TEST_VENV}/bin/python" -m pytest --collect-only -q -p no:cacheprovider 2>/dev/null) \
+            | sed -nE 's/^([0-9]+) tests? collected.*/\1/p' | tail -n 1 || true)"
+  [[ -z "$total" ]] || printf '[deploy:tests total=%s]\n' "$total"
   ( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider ) \
     || die "Phase 1 gate: pytest failed on ${DEPLOY_TARGET_LABEL} (above) — nothing was changed"
   DEPLOY_FAIL_REASON=""

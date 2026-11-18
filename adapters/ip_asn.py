@@ -24,6 +24,7 @@ import bisect
 import ipaddress
 import logging
 import os
+import sys
 import threading
 from typing import Final
 
@@ -33,10 +34,12 @@ DEFAULT_DB_PATH: Final = "/opt/vpn-service/data/ip2asn-v4.tsv"
 _DB_PATH_ENV: Final = "IP2ASN_DB_PATH"
 
 # Cached table of (range_start_int, range_end_int, asn) sorted by range start,
-# with a parallel list of just the starts for bisect. Guarded by _LOCK, and
-# reloaded when the source file's (mtime_ns, size) signature changes.
+# with a parallel list of just the starts for bisect, and one of the country codes
+# (the fourth column, interned). Guarded by _LOCK, and reloaded when the source
+# file's (mtime_ns, size) signature changes.
 _LOCK = threading.Lock()
 _TABLE: list[tuple[int, int, int]] | None = None
+_COUNTRIES: list[str] = []
 _STARTS: list[int] = []
 _SIGNATURE: tuple[int, int] | None = None
 _MISSING_LOGGED = False
@@ -46,13 +49,13 @@ def _db_path() -> str:
     return os.environ.get(_DB_PATH_ENV, DEFAULT_DB_PATH)
 
 
-def _load_table(path: str) -> list[tuple[int, int, int]]:
-    """Parse the iptoasn TSV into a list of ``(start_int, end_int, asn)`` ranges.
+def _load_rows(path: str) -> list[tuple[int, int, int, str]]:
+    """Parse the iptoasn TSV into ``(start_int, end_int, asn, country)`` ranges, sorted.
 
     Malformed lines (wrong field count, unparseable IP/ASN, inverted range) are
     skipped defensively so a single bad row never breaks normalization.
     """
-    table: list[tuple[int, int, int]] = []
+    rows: list[tuple[int, int, int, str]] = []
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             parts = line.rstrip("\n").split("\t")
@@ -66,14 +69,20 @@ def _load_table(path: str) -> list[tuple[int, int, int]]:
                 continue
             if end < start:
                 continue
-            table.append((start, end, asn))
-    table.sort(key=lambda row: row[0])
-    return table
+            country = parts[3].strip().upper() if len(parts) > 3 else ""
+            rows.append((start, end, asn, sys.intern(country if len(country) == 2 else "")))
+    rows.sort(key=lambda row: row[0])
+    return rows
+
+
+def _load_table(path: str) -> list[tuple[int, int, int]]:
+    """Parse the iptoasn TSV into a list of ``(start_int, end_int, asn)`` ranges."""
+    return [(start, end, asn) for start, end, asn, _ in _load_rows(path)]
 
 
 def _get_table() -> tuple[list[tuple[int, int, int]], list[int]]:
     """Return the cached ``(table, starts)``, (re)loading it if the file changed."""
-    global _TABLE, _STARTS, _SIGNATURE, _MISSING_LOGGED
+    global _TABLE, _STARTS, _SIGNATURE, _MISSING_LOGGED, _COUNTRIES
     path = _db_path()
     with _LOCK:
         try:
@@ -88,14 +97,17 @@ def _get_table() -> tuple[list[tuple[int, int, int]], list[int]]:
                 _MISSING_LOGGED = True
             _TABLE = None
             _STARTS = []
+            _COUNTRIES = []
             _SIGNATURE = None
             return [], []
         signature = (stat.st_mtime_ns, stat.st_size)
         if _TABLE is not None and _SIGNATURE == signature:
             return _TABLE, _STARTS
-        table = _load_table(path)
+        rows = _load_rows(path)
+        table = [(start, end, asn) for start, end, asn, _ in rows]
         _TABLE = table
         _STARTS = [row[0] for row in table]
+        _COUNTRIES = [row[3] for row in rows]
         _SIGNATURE = signature
         _MISSING_LOGGED = False
         logger.info("Loaded %d IP-to-ASN ranges from %s", len(table), path)
@@ -127,6 +139,30 @@ def lookup_asn(ip: str) -> int | None:
     return None
 
 
+def lookup_country(ip: str) -> str | None:
+    """The ISO country code (``RU``, ``DE``, …) of the range covering ``ip``, or None
+    (not IPv4, not covered, no code in the database, no database)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if addr.version != 4:
+        return None
+    ip_int = int(addr)
+    table, starts = _get_table()
+    if not table:
+        return None
+    idx = bisect.bisect_right(starts, ip_int) - 1
+    if idx < 0:
+        return None
+    start, end, _asn = table[idx]
+    with _LOCK:
+        countries = _COUNTRIES
+    if start <= ip_int <= end and idx < len(countries) and countries[idx]:
+        return countries[idx]
+    return None
+
+
 def normalize_ip(ip: str) -> str:
     """Collapse an IPv4 address to ``AS<asn>`` or, failing that, its ``/24``.
 
@@ -151,9 +187,10 @@ def reset_cache() -> None:
     Primarily a test hook (to switch between fixture databases); also usable to
     force a reload after an out-of-band database swap.
     """
-    global _TABLE, _STARTS, _SIGNATURE, _MISSING_LOGGED
+    global _TABLE, _STARTS, _SIGNATURE, _MISSING_LOGGED, _COUNTRIES
     with _LOCK:
         _TABLE = None
+        _COUNTRIES = []
         _STARTS = []
         _SIGNATURE = None
         _MISSING_LOGGED = False

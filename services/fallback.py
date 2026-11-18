@@ -37,9 +37,17 @@ so while the mode is on the relay service routes every agent call but the hub's
 THROUGH the hub (services/relays.py, «через hub»); the switch rewrites the hub's
 jump line to open exactly those relays.
 
-SEAMS left on purpose (not built here): :func:`services.relay.select_hub` is where
-a balancer would choose among several hubs; :meth:`FallbackService._switch` is the
-switch without the superadmin check, for a future automatic switch on health.
+SEAMS left on purpose: :func:`services.relay.select_hub` is where a balancer would
+choose among several hubs; :meth:`FallbackService._switch` is the switch without the
+superadmin check — the automatic switch on health (services/fallback_auto.py) calls it
+with ``actor_user_id=None`` (its preflight asks the hub's agent as the bot itself).
+
+SETTING IT UP (bot/handlers/admin_fallback.py, «⚙️ Настроить фолбэк»): the token
+(checked against the zone right away, :meth:`FallbackService.check_zone`), the hub
+among the relays with an agent outside Russia (:meth:`hub_candidates`, by the
+IP-to-ASN database's country), the origin (``origin.<zone>`` suggested), the
+failover set from :meth:`explained_candidates` — every name with WHY it belongs
+there, all checked, one confirmation (:meth:`add_names`) — and the preflight.
 """
 
 from __future__ import annotations
@@ -64,6 +72,7 @@ from adapters.cloudflare_dns import (
     fingerprint,
     valid_token,
 )
+from adapters.ip_asn import lookup_country
 from config import validators
 from config.settings import Settings
 from models.dto import RELAY_ROLE_EDGE, RELAY_ROLE_HUB, FailoverName, Relay
@@ -94,8 +103,35 @@ _HUB_CHECK_OK = CHECK_OK_CODES
 # How long the switch waits for public resolvers to agree, and how often it asks.
 VERIFY_TIMEOUT_SECONDS = 30.0
 VERIFY_INTERVAL_SECONDS = 5.0
+# schema_meta (failover settings): «Автопереключение» — "1" on, anything else off.
+META_AUTO_SWITCH = "fallback_auto_switch"
+# The switch's steps, for the progress message (bot/progress.py): on_progress(step,
+# state, done, total).
+SWITCH_STEPS = ("preflight", "dns", "verify", "jump")
 
 Doh = Callable[[str], Awaitable[list[DohAnswer]]]
+Progress = Callable[[str, str, int | None, int | None], Awaitable[None]]
+
+
+async def _noop_progress(step: str, state: str, done: int | None, total: int | None) -> None:
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class Candidate:
+    """A name the failover set likely wants, and why: i18n keys (``fb_cand_why_*``)
+    and, for a relay's upstream, the relays that forward to it."""
+
+    name: str
+    reasons: tuple[str, ...]
+    relays: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class HubCandidate:
+    relay: Relay
+    address: str | None
+    country: str | None
 
 
 # ── results ───────────────────────────────────────────────────────────────────
@@ -361,23 +397,96 @@ class FallbackService:
         return str(singles[0].network_address) if len(singles) == 1 else None
 
     async def candidates(self, actor_user_id: int) -> list[str]:
-        """Names the admin will likely want in the set: HYSTERIA2_SNI (the
-        subscription's and the hy2 certificate's name), the names the edge relays
-        forward to, a DNS-named XRAY_PUBLIC_HOST — minus what is in the set and
-        what can never be there (a hub's origin or host)."""
+        """Names the admin will likely want in the set (:meth:`explained_candidates`)."""
+        return [c.name for c in await self.explained_candidates(actor_user_id)]
+
+    async def explained_candidates(self, actor_user_id: int) -> list[Candidate]:
+        """Names the failover set likely wants, each with WHY: HYSTERIA2_SNI (the hy2
+        certificate's name), the subscription's name (HYSTERIA2_SNI, else
+        HYSTERIA2_HOST — bot/bundles.py subscription_host), the names the RU (edge)
+        relays forward to, a DNS-named XRAY_PUBLIC_HOST (the direct links) — minus
+        what is in the set and what can never be there (a hub's origin or host)."""
         await self.users.require_superadmin(actor_user_id)
         taken = {name.name for name in await self.repo.list_names()}
         forbidden = await self._forbidden_names()
-        found: list[str] = []
-        values: list[str] = [self.settings.hysteria2_sni, self.settings.xray_public_host]
+        reasons: dict[str, list[str]] = {}
+        relays: dict[str, list[str]] = {}
+
+        def add(value: str | None, reason: str, relay: str | None = None) -> None:
+            name = (value or "").strip().lower().rstrip(".")
+            if not valid_dns_name(name) or name in taken or name in forbidden:
+                return
+            bucket = reasons.setdefault(name, [])
+            if reason not in bucket:
+                bucket.append(reason)
+            if relay is not None:
+                relays.setdefault(name, []).append(relay)
+
+        add(self.settings.hysteria2_sni, "fb_cand_why_sni")
+        add((self.settings.hysteria2_sni or self.settings.hysteria2_host), "fb_cand_why_subscription")
         for relay in await self.relays_repo.list_all():
             if not relay.is_hub and relay.agent is not None:
-                values.append(relay.agent.target_host)
-        for value in values:
-            name = (value or "").strip().lower()
-            if valid_dns_name(name) and name not in taken and name not in forbidden and name not in found:
-                found.append(name)
+                add(relay.agent.target_host, "fb_cand_why_relay", relay.name)
+        add(self.settings.xray_public_host, "fb_cand_why_direct")
+        return [Candidate(name, tuple(why), tuple(relays.get(name, ()))) for name, why in reasons.items()]
+
+    async def add_names(self, actor_user_id: int, names: Iterable[str]) -> list[FailoverName]:
+        """Add several names (the setup's and «Включить»'s one confirmation); a name
+        already in the set is skipped, a refused one stops with its reason."""
+        added: list[FailoverName] = []
+        present = {n.name for n in await self.repo.list_names()}
+        for value in names:
+            if value.strip().lower().rstrip(".") in present:
+                continue
+            added.append(await self.add_name(actor_user_id, value))
+        return added
+
+    async def configured(self) -> bool:
+        """The fallback mode is set up: a DNS API token and a hub."""
+        return self.token_file.exists() and select_hub(await self.relays_repo.list_hubs()) is not None
+
+    async def check_zone(self, actor_user_id: int, name: str | None = None) -> str:
+        """The stored token can manage the zone of *name* (default: HYSTERIA2_SNI's) —
+        asked right after the token is set. Returns the zone's name."""
+        await self.users.require_superadmin(actor_user_id)
+        target = (name or self.settings.hysteria2_sni or "").strip().lower()
+        if not valid_dns_name(target):
+            raise InvalidOperation("нет имени для проверки зоны", key="fb_err_bad_name", params={"value": target})
+        self._token()
+        try:
+            zone = await self.dns.find_zone(target)
+        except DnsApiError as exc:
+            raise InvalidOperation(str(exc), key="fb_err_token_zone", params={"name": target, "error": str(exc)}) from None
+        self._zones[target] = zone
+        return zone.name
+
+    async def hub_candidates(self, actor_user_id: int) -> list[HubCandidate]:
+        """Relays that can be THE hub: an agent that answers, enabled, not a hub yet —
+        and outside Russia by the IP-to-ASN database's country of their IPv4 (a relay
+        whose country is unknown is offered, marked as such)."""
+        await self.users.require_superadmin(actor_user_id)
+        found: list[HubCandidate] = []
+        for relay in await self.relays_repo.list_all():
+            if relay.is_hub or not relay.enabled or relay.agent is None or agent_uninstalled(relay.agent):
+                continue
+            address = next(
+                (a for a in (_ipv4(relay.host), _ipv4(relay.agent.ssh_host)) if a),
+                next((str(n.network_address) for n in relay.source_ips if n.prefixlen == 32), None),
+            )
+            country = lookup_country(address) if address else None
+            if country == "RU":
+                continue
+            found.append(HubCandidate(relay=relay, address=address, country=country))
         return found
+
+    async def auto_switch(self) -> bool:
+        return (await self.repo.get_setting(META_AUTO_SWITCH)) == "1"
+
+    async def set_auto_switch(self, actor_user_id: int, on: bool) -> bool:
+        await self.users.require_superadmin(actor_user_id)
+        await self.repo.set_setting(META_AUTO_SWITCH, "1" if on else "0")
+        await self._audit(actor_user_id, "failover_setting_changed", {"setting": META_AUTO_SWITCH, "after": on})
+        return on
 
     async def _forbidden_names(self) -> dict[str, str]:
         """Names that may never join the set → why (origin of a hub, host of a hub)."""
@@ -633,29 +742,34 @@ class FallbackService:
         async with self._lock:
             return await self._preflight(actor_user_id)
 
-    async def enable(self, actor_user_id: int) -> SwitchReport:
+    async def enable(self, actor_user_id: int, *, on_progress: Progress | None = None) -> SwitchReport:
         await self.users.require_superadmin(actor_user_id)
-        return await self._switch(FAILOVER, actor_user_id)
+        return await self._switch(FAILOVER, actor_user_id, on_progress=on_progress)
 
-    async def disable(self, actor_user_id: int) -> SwitchReport:
+    async def disable(self, actor_user_id: int, *, on_progress: Progress | None = None) -> SwitchReport:
         await self.users.require_superadmin(actor_user_id)
-        return await self._switch(NORMAL, actor_user_id)
+        return await self._switch(NORMAL, actor_user_id, on_progress=on_progress)
 
-    async def repeat(self, actor_user_id: int) -> SwitchReport:
+    async def repeat(self, actor_user_id: int, *, on_progress: Progress | None = None) -> SwitchReport:
         """«Повторить»: the switch the mode asks for, again — finishes a partial one."""
         await self.users.require_superadmin(actor_user_id)
-        return await self._switch(FAILOVER if await self.repo.mode_on() else NORMAL, actor_user_id)
+        return await self._switch(FAILOVER if await self.repo.mode_on() else NORMAL, actor_user_id,
+                                  on_progress=on_progress)
 
-    async def _switch(self, target: str, actor_user_id: int | None) -> SwitchReport:
-        """THE switch (no authorization here: the public methods check it — a future
-        automatic switch on health calls this with ``actor_user_id=None``)."""
+    async def _switch(self, target: str, actor_user_id: int | None, *, on_progress: Progress | None = None) -> SwitchReport:
+        """THE switch (no authorization here: the public methods check it — the
+        automatic switch on health calls this with ``actor_user_id=None``).
+        *on_progress* hears the steps (:data:`SWITCH_STEPS`)."""
+        progress = on_progress or _noop_progress
         async with self._lock:
             names = await self.repo.list_names()
             if not names:
                 raise InvalidOperation("набор пуст", key="fb_err_no_names")
+            await progress("preflight", "run", None, None)
             if target == FAILOVER:
                 preflight = await self._preflight(actor_user_id)
                 if not preflight.passed:
+                    await progress("preflight", "fail", None, None)
                     await self._audit(
                         actor_user_id, "failover_preflight_failed",
                         {"failed": [item.key for item in preflight.failures]},
@@ -668,16 +782,24 @@ class FallbackService:
                 address = await self.main_ipv4()
             if address is None:
                 raise InvalidOperation("нет адреса", key="fb_err_no_main_ipv4")
+            await progress("preflight", "ok", None, None)
             await self.repo.set_mode(target == FAILOVER, now=self.clock.now())
             await self.refresh_state()
             # Every relay but the hub is managed through the hub while the mode is
             # on: its jump line follows the mode (a failure is logged, the next call
             # through the hub writes it again — the switch does not wait for it).
+            await progress("jump", "run", None, None)
             await self.relays.sync_hub_jump_quietly()
+            await progress("jump", "ok", None, None)
             written: list[NameResult] = []
+            await progress("dns", "run", 0, len(names))
             for name in names:
                 written.append(await self._write_name(name, target, address))
+                await progress("dns", "run", len(written), len(names))
+            await progress("dns", "ok" if all(r.ok for r in written) else "fail", len(written), len(names))
+            await progress("verify", "run", None, None)
             results = await self._verify(written)
+            await progress("verify", "ok", None, None)
         await self._audit(
             actor_user_id,
             "failover_enabled" if target == FAILOVER else "failover_disabled",
@@ -763,7 +885,7 @@ class FallbackService:
             "fb_pf_addresses", bool(main and hub_ip and main != hub_ip),
             {"main": main or "—", "hub": hub_ip or "—"},
         ))
-        if hub is not None and hub.agent is not None and not agent_uninstalled(hub.agent) and main and actor_user_id:
+        if hub is not None and hub.agent is not None and not agent_uninstalled(hub.agent) and main:
             items.extend(await self._preflight_hub(actor_user_id, hub, main, names_set))
         elif hub is not None:
             items.append(PreflightItem("fb_pf_agent_failed", False, {"name": hub.name, "error": "—"}))
@@ -773,14 +895,17 @@ class FallbackService:
         return Preflight(tuple(items))
 
     async def _preflight_hub(
-        self, actor_user_id: int, hub: Relay, main: str, names: set[str]
+        self, actor_user_id: int | None, hub: Relay, main: str, names: set[str]
     ) -> list[PreflightItem]:
         assert hub.agent is not None
         items: list[PreflightItem] = []
         origin = hub.agent.target_host
         tcp, udp = self.hub_ports()
         try:
-            reply = await self.relays.agent_status(actor_user_id, hub.id)
+            if actor_user_id is None:
+                reply = await self.relays.system_status(hub.id)
+            else:
+                reply = await self.relays.agent_status(actor_user_id, hub.id)
             payload: Mapping[str, Any] = reply.payload
             items.append(PreflightItem("fb_pf_agent", True, {"name": hub.name}))
         except ServiceError as exc:

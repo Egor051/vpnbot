@@ -744,7 +744,8 @@ async def test_card_add_then_remove_runs_over_every_subscription(estate: _Estate
     assert t("aio_report_header", title=title, total=2, applied=2, created=7, deleted=0, noop=0, skipped=0,
              failed=0) in final
     assert _callbacks(final_markup) == [f"admin:relay:{relay.id}", "admin:relays"]  # nothing to retry
-    assert run.message.edits[0][0] == t("aio_run_started", title=title)  # progress came first
+    assert "🔄 " + t("aio_step_apply") in run.message.edits[0][0]  # progress came first
+    assert "✅ " + t("aio_step_apply") in final, "the report closes the step list"
     assert (await estate.relay("ru1")).in_subscriptions
     assert "xray_tcp_relay_ru1" in await estate.members(basic.id)
     assert len([m for m in await estate.members(extended.id) if m.endswith("_relay_ru1")]) == 5
@@ -878,7 +879,8 @@ async def test_a_failing_plan_and_a_failing_run_are_reported(estate: _Estate, se
     await panel.relay_subs_run(run, None, services)  # type: ignore[arg-type]
     await _finish_run()
     final, markup = run.message.edits[-1]
-    assert final == t("aio_failed", title=title, error=error)
+    assert final.endswith(t("aio_failed", title=title, error=error))
+    assert "❌ " + t("aio_step_apply") in final, "the failed step is marked"
     assert f"admin:relay:{relay.id}:subs:add" in _callbacks(markup)  # «🔁 Повторить»
 
 
