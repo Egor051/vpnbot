@@ -211,6 +211,7 @@ async def _card_screen(
         probe=services.relay_health.last_probe(relay.id),
         reason=_reason(services),
         pending_attach=pending,
+        route=await services.relays.route_info(relay),
     )
     if notice:
         text = f"{notice}\n\n{text}"
@@ -1163,6 +1164,62 @@ async def relay_agent_update(callback: CallbackQuery, state: FSMContext, service
             return
         except ServiceError as exc:
             notice = t("relay_agent_update_failed", error=h(service_error_text(exc)))
+        await _show_card(callback, services, relay_id, notice)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(_RELAY_ACTION + r":ag:hub$"))
+async def relay_via_hub_toggle(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """«🛟 Через hub»: the bot reaches this relay's agent through the hub, always
+    (the hub's jump line is rewritten to open it)."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        relay_id = _relay_id(callback.data)
+        try:
+            relay = await services.relays.get(callback.from_user.id, relay_id)
+            if not await require_totp(callback, state, services, action="relay_edit"):
+                return
+            try:
+                result = await services.relays.set_via_hub(callback.from_user.id, relay_id, not relay.via_hub)
+            except InvalidOperation as exc:
+                await _refuse_on_card(callback, services, relay_id, service_error_text(exc))
+                return
+        except NotFound:
+            await _relay_gone(callback, services)
+            return
+        await safe_callback_answer(callback, t("relay_saved_short"))
+        key = "relay_via_hub_saved_on" if result.relay.via_hub else "relay_via_hub_saved_off"
+        notice = t(key, label=h(result.relay.label))
+        if result.sync_error is not None:
+            notice = f"{notice}\n{t('relay_via_hub_sync_failed', error=h(service_error_text(result.sync_error)))}"
+        await _show_card(callback, services, relay_id, notice)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(_RELAY_ACTION + r":ag:inconf$"))
+async def relay_input_confirm(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """«🛡 Подтвердить входной фильтр»: input-confirm from a NEW ssh session of the bot."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        relay_id = _relay_id(callback.data)
+        if not await require_totp(callback, state, services, action="relay_edit"):
+            return
+        await safe_callback_answer(callback, t("relay_input_confirming"))
+        try:
+            reply = await services.relays.confirm_input(callback.from_user.id, relay_id)
+            status = str(reply.payload.get("input_status") or "—")
+            notice = t("relay_input_confirmed", status=h(status))
+        except NotFound:
+            await _relay_gone(callback, services)
+            return
+        except ServiceError as exc:
+            notice = t("relay_input_confirm_failed", error=h(service_error_text(exc)))
         await _show_card(callback, services, relay_id, notice)
     except Exception as exc:
         await answer_callback_error(callback, exc)

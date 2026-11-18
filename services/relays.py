@@ -44,6 +44,26 @@ Deleting a relay with an agent runs ``uninstall`` on the relay FIRST (so no DNAT
 to this server is left behind), then removes the row. A relay that still has keys
 loses each through the SAME path the key screen uses (backend removal, traffic
 archive, audit), stopping at the first failure; running it again finishes the job.
+
+THROUGH THE HUB (docs/relay.md «Управление RU-relay через hub»). The TSPU cuts SSH
+from the main server to the RU relays. Every agent call to a relay that is
+**behind the hub** — «через hub» on its card (``relays.via_hub``), or ANY relay but
+a hub while the fallback mode is on — goes through the hub (:meth:`_route`): ssh to
+the hub with the bot's JUMP key, ``-W`` on to the relay, both hops pinned
+(services/relay_ssh.py). The hub's agent keeps ONE authorized_keys line for the
+jump key whose ``permitopen`` lists exactly those relays' ``ssh_host:ssh_port``;
+:meth:`sync_hub_jump` writes it (``jump key=… open=…`` / ``jump-off``) whenever the
+set changes — the flag, the mode, a pairing, a detach, a delete, a new hub — and
+before the first call through the hub. A pairing completed while the relay is
+behind the hub says ``hello`` through it too; the outside checks from here cannot
+pass then, so the relay's own ``vpn-relay-apply check`` (``status``, through the
+hub) stands in for them.
+
+THE INPUT FILTER. A ``status`` that reports ``PENDING CONFIRM`` (a deploy applied a
+TCP set main's probe could not confirm — in the fallback mode main cannot reach the
+relay at all) is answered with ``input-confirm``: the agent runs ``vpn-relay-apply
+input-confirm`` inside the bot's ssh session, a NEW one, which is exactly the proof
+that check wants. After ``update``, in the health loop, and from the card.
 """
 
 from __future__ import annotations
@@ -69,7 +89,7 @@ from repositories.relays import AGENT_UNINSTALLED_KEY, RelayRepository, RelayUsa
 from services.audit import AuditService
 from services.errors import InvalidOperation, NotFound, ServiceError
 from services.notes import MAX_NOTE_LENGTH, normalize_note
-from services.relay import RelayCatalog, RelaySnapshot, basic_has_visible_server
+from services.relay import RelayCatalog, RelaySnapshot, basic_has_visible_server, select_hub
 from services.relay_health import AgentCheck, agent_check_from_status, tls_probe, udp_relay_probe
 from services.relay_pairing import (
     COMPLETION_GRACE_SECONDS,
@@ -85,7 +105,14 @@ from services.relay_pairing import (
     relay_command,
     valid_dns_name,
 )
-from services.relay_ssh import AgentReply, RelayAgentClient, RelayKeyStore, RelaySshError
+from services.relay_ssh import (
+    AgentReply,
+    JumpHost,
+    RelayAgentClient,
+    RelayKeyStore,
+    RelaySshError,
+    jump_request,
+)
 from services.users import UserService
 
 logger = logging.getLogger(__name__)
@@ -100,6 +127,13 @@ DEFAULT_SSH_PORT = 22
 # long, plus a minute for SSH and the agent itself.
 AGENT_UPDATE_TIMEOUT = 2760.0
 UNINSTALLED_KEY = AGENT_UNINSTALLED_KEY
+# How `vpn-relay-apply input-status` starts while a TCP set waits for input-confirm.
+INPUT_PENDING = "PENDING CONFIRM"
+# `vpn-relay-apply check` exit codes a relay may report and still forward: 0, or only
+# the input filter's own complaints (16-18) — judged by the FAIL lines.
+CHECK_OK_CODES = frozenset({0, 16, 17, 18})
+# Why an ssh through the hub may just need the hub's jump line written again.
+_JUMP_RESYNC_KEYS = frozenset({"relay_ssh_jump_refused", "relay_ssh_jump_denied"})
 _ADDRESS = re.compile(r"(?P<host>[A-Za-z0-9.-]{1,253})(?::(?P<port>[0-9]{1,5}))?")
 
 
@@ -272,8 +306,57 @@ def agent_uninstalled(agent: RelayAgent) -> bool:
 def _slim(payload: Mapping[str, Any]) -> dict[str, object]:
     """What is kept of a status answer (no unbounded fields)."""
     keep = ("agent", "protocol", "target_host", "tcp", "udp", "live_target", "resolved", "ip_forward",
-            "units", "ssh_ports", "egress", "checkout", "update", "check", "paired_at")
+            "units", "ssh_ports", "egress", "checkout", "update", "check", "paired_at", "input_status", "jump")
     return {k: payload[k] for k in keep if k in payload}
+
+
+def only_input_filter_failures(lines: Iterable[str]) -> bool:
+    """Every ``FAIL:`` line of a ``vpn-relay-apply check`` is about the input filter.
+
+    The check exits with the code of its FIRST failure and runs the input filter's
+    steps before ip_forward, conntrack, TCP and TLS, so an exit 16-18 alone does
+    not say the forward is fine — the FAIL lines do. The agent's apply uses the
+    same rule (scripts/vpn-relay-agent: only_input_filter_failures).
+    """
+    fails = [line for line in lines if "FAIL: " in line]
+    return all("vpnrelay_input" in line or "listening but filtered" in line for line in fails)
+
+
+def own_check_healthy(status: Mapping[str, Any]) -> bool:
+    """The relay's own ``vpn-relay-apply check`` (in a ``status`` answer) passed, or
+    failed on nothing but the input filter: its forward reaches its upstream."""
+    check = status.get("check")
+    lines = check.get("lines") if isinstance(check, dict) else None
+    rc = check.get("rc") if isinstance(check, dict) else None
+    text = [str(line) for line in lines] if isinstance(lines, list) else []
+    return isinstance(rc, int) and (rc == 0 or (rc in CHECK_OK_CODES and only_input_filter_failures(text)))
+
+
+def input_pending(status: Mapping[str, Any]) -> bool:
+    """The relay's input filter waits for ``input-confirm`` (its dead-man is armed)."""
+    value = status.get("input_status")
+    return isinstance(value, str) and value.startswith(INPUT_PENDING)
+
+
+async def _agent_call(
+    client: RelayAgentClient,
+    host: str,
+    port: int,
+    request: str,
+    *,
+    alias: str,
+    host_key: str | None,
+    timeout: float = 60.0,
+    sensitive: tuple[str, ...] = (),
+    via: JumpHost | None = None,
+) -> AgentReply:
+    """One agent call; ``via=`` only for a call through the hub (a direct call is
+    exactly the call it always was)."""
+    if via is None:
+        return await client.call(host, port, request, alias=alias, host_key=host_key, timeout=timeout,
+                                 sensitive=sensitive)
+    return await client.call(host, port, request, alias=alias, host_key=host_key, timeout=timeout,
+                             sensitive=sensitive, via=via)
 
 
 def warn_legacy_relay_env(settings: Settings) -> bool:
@@ -304,6 +387,9 @@ class CheckResult:
 
     tcp: bool | None
     udp: bool | None
+    # True: not probed from here (the relay is behind the hub) — ``tcp`` is the
+    # relay's own `vpn-relay-apply check`, asked through the hub.
+    via_hub: bool = False
 
     @property
     def passed(self) -> bool:
@@ -313,7 +399,8 @@ class CheckResult:
         def mark(value: bool | None) -> str:
             return "—" if value is None else ("ok" if value else "FAIL")
 
-        return f"TCP {mark(self.tcp)}, UDP {mark(self.udp)}"
+        text = f"TCP {mark(self.tcp)}, UDP {mark(self.udp)}"
+        return f"{text} (relay's own check, via hub)" if self.via_hub else text
 
 
 class PairingCheckFailed(InvalidOperation):
@@ -396,6 +483,36 @@ class PairingOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class JumpSync:
+    """What :meth:`RelayService.sync_hub_jump` left on the hub: the relays its jump
+    line opens (``hub`` None: there is no usable hub, nothing was done)."""
+
+    hub: Relay | None
+    opens: tuple[tuple[str, int], ...]
+    changed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RouteInfo:
+    """How the bot reaches a relay's agent, for its card: through the hub (because of
+    the «через hub» flag, or the fallback mode) or directly."""
+
+    via_hub: bool
+    # "flag" | "mode" | "" (directly).
+    reason: str = ""
+    # The hub the calls go through; None with via_hub — there is none (calls fail).
+    hub: Relay | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ViaHubResult:
+    relay: Relay
+    # The hub's jump line could not be written (the flag is saved all the same; the
+    # next call through the hub tries again).
+    sync_error: ServiceError | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DetachReport:
     relay: Relay
     uninstalled: bool
@@ -446,6 +563,11 @@ class RelayService:
         self._lock = asyncio.Lock()
         # Relays an agent call is running on right now (taken/released under _lock).
         self._busy: set[int] = set()
+        # The hub's jump line as the bot last wrote it: hub id -> (jump key, opens).
+        self._jump_written: dict[int, tuple[str, tuple[tuple[str, int], ...]]] = {}
+        # Addresses opened on the hub for a pairing that is running (complete()).
+        self._jump_pairing: set[tuple[str, int]] = set()
+        self._jump_lock = asyncio.Lock()
 
     def attach_key_deleters(self, key_deleters: Mapping[VpnKeyType, KeyDeleter]) -> None:
         self._key_deleters = dict(key_deleters)
@@ -878,9 +1000,11 @@ class RelayService:
                 {**_audit_view(relay), "deleted_key_ids": deleted_ids, "uninstalled": uninstalled},
             )
             await self.refresh_catalog()
-            return RelayDeletionReport(
+            done = RelayDeletionReport(
                 relay=relay, deleted=True, deleted_key_ids=tuple(deleted_ids), uninstalled=uninstalled
             )
+        await self.sync_hub_jump_quietly()
+        return done
 
     # ── pairing codes ─────────────────────────────────────────────────────────
 
@@ -1006,54 +1130,79 @@ class RelayService:
                     )
             else:
                 await self._ensure_name_free(pairing.name)
-            reply = await client.call(
-                ssh_host,
-                ssh_port,
-                f"hello {pairing.token}",
-                alias=f"vpn-relay-pairing-{pairing.id}",
-                host_key=None,
-                sensitive=(pairing.token,),
-            )
-            if not reply.ok:
-                raise RelayAgentError(
-                    f"relay отказал: {reply.error}", key="relay_agent_refused", params={"error": reply.error[:300]}
+            # Behind the hub (the fallback mode, or an attach to a relay «через hub»):
+            # the hub's jump line opens this address too, for as long as the pairing
+            # runs — kept in the set every sync builds, so a health poll syncing the
+            # line meanwhile does not close it under the hello or the check.
+            via: JumpHost | None = None
+            opened: tuple[str, int] | None = None
+            if await self.relays.fallback_mode_on() or (target is not None and target.via_hub):
+                opened = (ssh_host.lower(), ssh_port)
+                self._jump_pairing.add(opened)
+            try:
+                if opened is not None:
+                    via = await self._jump_to(None)
+                alias = f"vpn-relay-pairing-{pairing.id}"
+                reply = await _agent_call(
+                    client,
+                    ssh_host,
+                    ssh_port,
+                    f"hello {pairing.token}",
+                    alias=alias,
+                    host_key=None,
+                    sensitive=(pairing.token,),
+                    via=via,
                 )
-            self._expect_pairing(reply.payload, pairing)
-            if reply.learned_host_key is None:
-                raise RelaySshError("ключ хоста relay не получен", key="relay_ssh_bad_host_key")
-            checks = await self.checks(target.host if target is not None else ssh_host)
-            if not checks.passed:
-                await self._audit(
-                    actor_user_id, "relay_pairing_check_failed", target.id if target else None,
-                    {"pairing_id": pairing.id, "host": ssh_host, "checks": checks.describe()},
+                if not reply.ok:
+                    raise RelayAgentError(
+                        f"relay отказал: {reply.error}", key="relay_agent_refused", params={"error": reply.error[:300]}
+                    )
+                self._expect_pairing(reply.payload, pairing)
+                if reply.learned_host_key is None:
+                    raise RelaySshError("ключ хоста relay не получен", key="relay_ssh_bad_host_key")
+                if via is None:
+                    checks = await self.checks(target.host if target is not None else ssh_host)
+                else:
+                    checks = await self._checks_through(ssh_host, ssh_port, alias, reply.learned_host_key, via)
+                if not checks.passed:
+                    await self._audit(
+                        actor_user_id, "relay_pairing_check_failed", target.id if target else None,
+                        {"pairing_id": pairing.id, "host": ssh_host, "checks": checks.describe()},
+                    )
+                    raise PairingCheckFailed(checks)
+                found = await self._source_ips(ssh_host, reply.payload)
+                now = self.clock.now()
+                agent = RelayAgent(
+                    ssh_host=ssh_host,
+                    ssh_port=ssh_port,
+                    host_key=reply.learned_host_key,
+                    target_host=pairing.target_host,
+                    tcp_ports=pairing.tcp_ports,
+                    udp_ports=pairing.udp_ports,
+                    agent_version=str(reply.payload.get("agent", "")),
+                    paired_at=now,
+                    last_status=_slim(reply.payload),
+                    last_status_at=now,
                 )
-                raise PairingCheckFailed(checks)
-            found = await self._source_ips(ssh_host, reply.payload)
-            now = self.clock.now()
-            agent = RelayAgent(
-                ssh_host=ssh_host,
-                ssh_port=ssh_port,
-                host_key=reply.learned_host_key,
-                target_host=pairing.target_host,
-                tcp_ports=pairing.tcp_ports,
-                udp_ports=pairing.udp_ports,
-                agent_version=str(reply.payload.get("agent", "")),
-                paired_at=now,
-                last_status=_slim(reply.payload),
-                last_status_at=now,
-            )
-            if target is None:
-                relay, added, mismatch = await self._complete_new(actor_user_id, pairing, agent, found, now)
-            else:
-                relay, added = await self._complete_attach(actor_user_id, pairing, target, agent, found, now)
-                mismatch = None
-            await self.refresh_catalog()
+                if target is None:
+                    relay, added, mismatch = await self._complete_new(actor_user_id, pairing, agent, found, now)
+                else:
+                    relay, added = await self._complete_attach(actor_user_id, pairing, target, agent, found, now)
+                    mismatch = None
+                await self.refresh_catalog()
+            finally:
+                if opened is not None:
+                    # Paired: the relay itself is behind the hub now (the same set, nothing
+                    # to write). Not paired: the address is closed again.
+                    self._jump_pairing.discard(opened)
+                    await self.sync_hub_jump_quietly()
         if target is None:
             await self._audit(
                 actor_user_id,
                 "relay_paired",
                 relay.id,
-                {**_audit_view(relay), "checks": checks.describe(), "pairing_id": pairing.id},
+                {**_audit_view(relay), "checks": checks.describe(), "pairing_id": pairing.id,
+                 **({"via_hub": True} if via is not None else {})},
             )
         else:
             await self._audit(
@@ -1061,7 +1210,8 @@ class RelayService:
                 "relay_agent_attached",
                 relay.id,
                 {"name": relay.name, "ssh": f"{ssh_host}:{ssh_port}", "target_host": pairing.target_host,
-                 "added_source_ips": list(added), "checks": checks.describe(), "pairing_id": pairing.id},
+                 "added_source_ips": list(added), "checks": checks.describe(), "pairing_id": pairing.id,
+                 **({"via_hub": True} if via is not None else {})},
             )
         return PairingOutcome(
             relay=relay,
@@ -1156,6 +1306,7 @@ class RelayService:
             return AgentCheck(ok=False, error_key=exc.key or "relay_ssh_failed", error_params=dict(exc.params))
         if not reply.ok:
             return AgentCheck(ok=False, error_key="relay_agent_refused", error_params={"error": reply.error[:300]})
+        reply = await self._confirm_if_pending(None, relay, reply)
         await self._record_status(relay, reply)
         return agent_check_from_status(reply.payload)
 
@@ -1174,6 +1325,9 @@ class RelayService:
         try:
             status = await self._call(relay, "status")
             if status.ok:
+                # The deploy may have applied a TCP set main's probe could not
+                # confirm: this ssh session is the proof (input-confirm).
+                status = await self._confirm_if_pending(actor_user_id, relay, status)
                 await self._record_status(relay, status)
         except ServiceError:
             logger.info("Relay %s: status after update not received", relay.name)
@@ -1247,6 +1401,7 @@ class RelayService:
                  "uninstalled": uninstalled},
             )
             await self.refresh_catalog()
+        await self.sync_hub_jump_quietly()
         return DetachReport(relay=after, uninstalled=uninstalled)
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -1279,6 +1434,12 @@ class RelayService:
         if self.client is None:
             raise ServiceError("relay-агенты не подключены", key="relay_agent_unavailable")
         return self.client
+
+    def _require_jump_keys(self) -> RelayKeyStore:
+        jump_keys: RelayKeyStore | None = getattr(self._require_client(), "jump_keys", None)
+        if jump_keys is None:
+            raise ServiceError("jump-ключ не подключён", key="relay_agent_unavailable")
+        return jump_keys
 
     @staticmethod
     def _refuse_hub(relay: Relay) -> None:
@@ -1332,10 +1493,212 @@ class RelayService:
         if agent_uninstalled(agent) and request != "uninstall":
             raise RelayAgentError("relay уже снят с хоста", key="relay_agent_uninstalled")
         client = self._require_client()
-        return await client.call(
-            agent.ssh_host, agent.ssh_port, request, alias=f"vpn-relay-{relay.id}",
-            host_key=agent.host_key, timeout=timeout,
+        via = await self._route(relay)
+        try:
+            return await _agent_call(
+                client, agent.ssh_host, agent.ssh_port, request, alias=f"vpn-relay-{relay.id}",
+                host_key=agent.host_key, timeout=timeout, via=via,
+            )
+        except RelaySshError as exc:
+            if via is None or exc.key not in _JUMP_RESYNC_KEYS:
+                raise
+            # The hub refused the forward: its jump line is not what the bot last
+            # wrote (the hub re-installed, edited by hand). Write it again, once.
+            logger.info("Relay %s: the hub refused the forward — rewriting its jump line", relay.name)
+            via = await self._jump_to(None, force=True)
+            return await client.call(
+                agent.ssh_host, agent.ssh_port, request, alias=f"vpn-relay-{relay.id}",
+                host_key=agent.host_key, timeout=timeout, via=via,
+            )
+
+    # ── through the hub ───────────────────────────────────────────────────────
+
+    def behind_hub(self, relay: Relay, *, mode_on: bool) -> bool:
+        """The bot reaches this relay's agent through the hub: not a hub, an agent
+        that is still installed, and «через hub» or the fallback mode."""
+        return (
+            not relay.is_hub
+            and relay.agent is not None
+            and not agent_uninstalled(relay.agent)
+            and (relay.via_hub or mode_on)
         )
+
+    async def route_info(self, relay: Relay) -> RouteInfo:
+        """How calls to *relay*'s agent go right now (its card says so)."""
+        if relay.is_hub or relay.agent is None:
+            return RouteInfo(via_hub=False)
+        if relay.via_hub:
+            return RouteInfo(via_hub=True, reason="flag", hub=await self._hub())
+        if await self.relays.fallback_mode_on():
+            return RouteInfo(via_hub=True, reason="mode", hub=await self._hub())
+        return RouteInfo(via_hub=False)
+
+    async def _hub(self) -> Relay | None:
+        """THE hub (services.relay.select_hub) when it can carry the jump: an agent
+        that is still installed."""
+        hub = select_hub(await self.relays.list_hubs())
+        if hub is None or hub.agent is None or agent_uninstalled(hub.agent):
+            return None
+        return hub
+
+    async def _route(self, relay: Relay) -> JumpHost | None:
+        """How a call to *relay* goes: None — directly; a :class:`JumpHost` — through
+        the hub (refused when the relay is behind the hub and there is none)."""
+        if relay.is_hub or relay.agent is None:
+            return None
+        if not relay.via_hub and not await self.relays.fallback_mode_on():
+            return None
+        return await self._jump_to(None)
+
+    async def _jump_to(self, extra: tuple[str, int] | None, *, force: bool = False) -> JumpHost:
+        sync = await self.sync_hub_jump(extra=extra, force=force)
+        hub = sync.hub
+        if hub is None or hub.agent is None:
+            raise RelaySshError("нет hub для пути через hub", key="relay_hub_route_no_hub")
+        return JumpHost(
+            host=hub.agent.ssh_host,
+            port=hub.agent.ssh_port,
+            alias=f"vpn-relay-{hub.id}",
+            host_key=hub.agent.host_key,
+            opens=frozenset(sync.opens),
+        )
+
+    async def jump_opens(self, extra: tuple[str, int] | None = None) -> tuple[tuple[str, int], ...]:
+        """``ssh_host:ssh_port`` of every relay behind the hub (+ *extra*), sorted."""
+        mode_on = await self.relays.fallback_mode_on()
+        opens = {
+            (relay.agent.ssh_host.lower(), relay.agent.ssh_port)
+            for relay in await self.relays.list_all()
+            if relay.agent is not None and self.behind_hub(relay, mode_on=mode_on)
+        }
+        opens |= self._jump_pairing
+        if extra is not None:
+            opens.add(extra)
+        return tuple(sorted(opens))
+
+    async def sync_hub_jump(
+        self, actor_user_id: int | None = None, *, extra: tuple[str, int] | None = None, force: bool = False
+    ) -> JumpSync:
+        """Make the hub's jump line open exactly the relays behind it (+ *extra*, a
+        relay being paired). One agent call on the hub (reached directly) — none
+        when the line is already what the bot last wrote, unless *force*."""
+        async with self._jump_lock:
+            hub = await self._hub()
+            if hub is None:
+                return JumpSync(hub=None, opens=())
+            opens = await self.jump_opens(extra)
+            public = self._require_jump_keys().ensure()
+            if not force and self._jump_written.get(hub.id) == (public, opens):
+                return JumpSync(hub=hub, opens=opens)
+            reply = self._require_ok(await self._call(hub, jump_request(public, opens), timeout=60.0), hub)
+            self._jump_written = {hub.id: (public, opens)}
+        result = reply.payload.get("jump")
+        changed = bool(result.get("changed")) if isinstance(result, dict) else False
+        if changed or actor_user_id is not None:
+            await self._audit(
+                actor_user_id, "relay_hub_jump_synced", hub.id,
+                {"hub": hub.name, "open": [f"{host}:{port}" for host, port in opens], "changed": changed},
+            )
+        return JumpSync(hub=hub, opens=opens, changed=changed)
+
+    async def drop_hub_jump(self, actor_user_id: int | None, relay: Relay) -> bool:
+        """``jump-off`` on a relay that stops being the hub: its jump line goes. True
+        when the agent answered."""
+        if relay.agent is None or agent_uninstalled(relay.agent) or self.client is None:
+            return False
+        try:
+            reply = self._require_ok(await self._call(relay, "jump-off", timeout=60.0), relay)
+        except ServiceError as exc:
+            logger.warning("Relay %s: jump-off failed: %s", relay.name, exc)
+            return False
+        self._jump_written.pop(relay.id, None)
+        await self._audit(actor_user_id, "relay_hub_jump_removed", relay.id,
+                          {"hub": relay.name, "changed": bool((reply.payload.get("jump") or {}).get("changed"))})
+        return True
+
+    async def sync_hub_jump_quietly(self) -> None:
+        """:meth:`sync_hub_jump` where a failure must not undo what was done (logged;
+        the next call through the hub writes the line again)."""
+        if getattr(self.client, "jump_keys", None) is None:
+            return
+        try:
+            await self.sync_hub_jump()
+        except ServiceError as exc:
+            logger.warning("The hub's jump line was not written: %s", exc)
+
+    async def set_via_hub(self, actor_user_id: int, relay_id: int, on: bool) -> ViaHubResult:
+        """«Через hub»: the bot reaches this relay's agent through the hub, always."""
+        await self.users.require_superadmin(actor_user_id)
+        async with self._lock:
+            relay = await self._require_managed(relay_id)
+            if relay.is_hub:
+                raise InvalidOperation("relay — hub", key="relay_via_hub_is_hub", params={"name": relay.name})
+            if on and await self._hub() is None:
+                raise InvalidOperation("нет hub", key="relay_hub_route_no_hub", params={"name": relay.name})
+            if relay.via_hub == on:
+                return ViaHubResult(relay=relay)
+            await self.relays.set_via_hub(relay.id, on, now=self.clock.now(), updated_by=actor_user_id)
+            await self.refresh_catalog()
+            after = await self._require(relay.id)
+        await self._audit(actor_user_id, "relay_via_hub_changed", relay.id, {"name": relay.name, "via_hub": on})
+        try:
+            await self.sync_hub_jump(actor_user_id)
+        except ServiceError as exc:
+            return ViaHubResult(relay=after, sync_error=exc)
+        return ViaHubResult(relay=after)
+
+    async def _checks_through(
+        self, ssh_host: str, ssh_port: int, alias: str, host_key: str, via: JumpHost
+    ) -> CheckResult:
+        """A pairing behind the hub: this server cannot probe the relay, so the relay's
+        own ``vpn-relay-apply check`` (TCP to its upstream on every forwarded port,
+        TLS) — asked through the hub with the key the hello just learned."""
+        client = self._require_client()
+        reply = await client.call(ssh_host, ssh_port, "status", alias=alias, host_key=host_key, timeout=150.0, via=via)
+        return CheckResult(tcp=reply.ok and own_check_healthy(reply.payload), udp=None, via_hub=True)
+
+    # ── the input filter ──────────────────────────────────────────────────────
+
+    async def confirm_input(self, actor_user_id: int, relay_id: int) -> AgentReply:
+        """«Подтвердить входной фильтр»: ``input-confirm`` from a NEW ssh session of
+        the bot's (through the hub when the relay is behind it)."""
+        await self.users.require_superadmin(actor_user_id)
+        relay = await self._require_managed(relay_id)
+        reply = await self._input_confirm(actor_user_id, relay, auto=False)
+        self._require_ok(reply, relay)
+        try:
+            status = await self._call(relay, "status")
+            if status.ok:
+                await self._record_status(relay, status)
+        except ServiceError:
+            logger.info("Relay %s: status after input-confirm not received", relay.name)
+        return reply
+
+    async def _input_confirm(self, actor_user_id: int | None, relay: Relay, *, auto: bool) -> AgentReply:
+        reply = await self._call(relay, "input-confirm", timeout=90.0)
+        await self._audit(
+            actor_user_id, "relay_input_confirmed", relay.id,
+            {"name": relay.name, "ok": reply.ok, "auto": auto,
+             **({"input_status": reply.payload.get("input_status")} if reply.ok else {"error": reply.error[:300]})},
+        )
+        return reply
+
+    async def _confirm_if_pending(self, actor_user_id: int | None, relay: Relay, status: AgentReply) -> AgentReply:
+        """*status* — or, when its input filter waits for a confirmation, the same
+        answer after ``input-confirm`` (its ``input_status`` the new one). A failed
+        confirmation is logged and audited; the status stays as it was."""
+        if not input_pending(status.payload):
+            return status
+        try:
+            confirmed = await self._input_confirm(actor_user_id, relay, auto=True)
+        except ServiceError as exc:
+            logger.warning("Relay %s: input-confirm failed: %s", relay.name, exc)
+            return status
+        if not confirmed.ok:
+            logger.warning("Relay %s: input-confirm refused: %s", relay.name, confirmed.error)
+            return status
+        payload = {**status.payload, "input_status": confirmed.payload.get("input_status") or status.payload.get("input_status")}
+        return replace(status, payload=payload)
 
     async def _record_status(self, relay: Relay, reply: AgentReply) -> bool:
         """Keep a ``status`` answer on the relay's row — only if it still describes it.
@@ -1361,8 +1724,13 @@ class RelayService:
             )
 
     @staticmethod
-    def _require_ok(reply: AgentReply) -> AgentReply:
+    def _require_ok(reply: AgentReply, relay: Relay | None = None) -> AgentReply:
         if not reply.ok:
+            if relay is not None and reply.returncode == 2 and "not an agent command" in reply.error:
+                # An agent from before the request existed (input-confirm, jump): update it.
+                raise RelayAgentError(
+                    "агент relay устарел", key="relay_agent_outdated", params={"name": relay.name}
+                )
             raise RelayAgentError(
                 f"relay: {reply.error}", key="relay_agent_refused", params={"error": reply.error[:300]}
             )

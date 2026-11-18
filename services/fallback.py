@@ -32,6 +32,11 @@ write did per name in ``failover_names``: a partial switch is visible name by
 name and the same button finishes it. Everything is audited; the DNS API token is
 never in a log, the audit or the chat (adapters.cloudflare_dns).
 
+MANAGING the RU relays meanwhile: the main server cannot reach them over SSH either,
+so while the mode is on the relay service routes every agent call but the hub's
+THROUGH the hub (services/relays.py, «через hub»); the switch rewrites the hub's
+jump line to open exactly those relays.
+
 SEAMS left on purpose (not built here): :func:`services.relay.select_hub` is where
 a balancer would choose among several hubs; :meth:`FallbackService._switch` is the
 switch without the superadmin check, for a future automatic switch on health.
@@ -76,7 +81,7 @@ from services.audit import AuditService
 from services.errors import InvalidOperation, NotFound, ServiceError
 from services.relay import select_hub
 from services.relay_pairing import format_ports, valid_dns_name
-from services.relays import RelayService, agent_uninstalled
+from services.relays import CHECK_OK_CODES, RelayService, agent_uninstalled, only_input_filter_failures
 from services.users import UserService
 
 logger = logging.getLogger(__name__)
@@ -85,7 +90,7 @@ NORMAL = "normal"
 FAILOVER = "failover"
 # `vpn-relay-apply check` exit codes a hub may report and still be fit: 0, or only
 # the input filter's own complaints (16-18) — not the forward, not the upstream.
-_HUB_CHECK_OK = frozenset({0, 16, 17, 18})
+_HUB_CHECK_OK = CHECK_OK_CODES
 # How long the switch waits for public resolvers to agree, and how often it asks.
 VERIFY_TIMEOUT_SECONDS = 30.0
 VERIFY_INTERVAL_SECONDS = 5.0
@@ -217,18 +222,6 @@ def name_settled(name: FailoverName, mode_on: bool) -> bool:
 def _ipv4(value: str | None) -> str | None:
     address = validators.ipv4_address((value or "").strip())
     return None if address is None else str(address)
-
-
-def only_input_filter_failures(lines: Iterable[str]) -> bool:
-    """Every ``FAIL:`` line of a ``vpn-relay-apply check`` is about the input filter.
-
-    The check exits with the code of its FIRST failure and runs the input filter's
-    steps before ip_forward, conntrack, TCP and TLS, so an exit 16-18 alone does
-    not say the forward is fine — the FAIL lines do. The agent's apply uses the
-    same rule (scripts/vpn-relay-agent: only_input_filter_failures).
-    """
-    fails = [line for line in lines if "FAIL: " in line]
-    return all("vpnrelay_input" in line or "listening but filtered" in line for line in fails)
 
 
 def check_reaches(status: Mapping[str, Any], address: str, ports: Iterable[int]) -> tuple[bool, list[int]]:
@@ -593,6 +586,8 @@ class FallbackService:
             await self.relays_repo.set_role(relay.id, RELAY_ROLE_HUB, now=self.clock.now(), updated_by=actor_user_id)
             await self.relays.refresh_catalog()
             after = await self._require_relay(relay.id)
+            # The relays «через hub» are reached through this one from now on.
+            await self.relays.sync_hub_jump_quietly()
         await self._audit(
             actor_user_id, "relay_hub_assigned",
             {"name": after.name, "origin": name, "main_ipv4": main, "origin_record_created": created,
@@ -620,6 +615,9 @@ class FallbackService:
                 return relay
             if await self.hub_in_use():
                 raise InvalidOperation("имена указывают на hub", key="fb_err_hub_in_use", params={"name": relay.name})
+            # Its jump line goes with the role (best effort: an unreachable relay
+            # keeps a line that opens only the relays' sshd, behind their own keys).
+            await self.relays.drop_hub_jump(actor_user_id, relay)
             await self.relays_repo.set_role(relay.id, RELAY_ROLE_EDGE, now=self.clock.now(), updated_by=actor_user_id)
             await self.relays.refresh_catalog()
             after = await self._require_relay(relay.id)
@@ -672,6 +670,10 @@ class FallbackService:
                 raise InvalidOperation("нет адреса", key="fb_err_no_main_ipv4")
             await self.repo.set_mode(target == FAILOVER, now=self.clock.now())
             await self.refresh_state()
+            # Every relay but the hub is managed through the hub while the mode is
+            # on: its jump line follows the mode (a failure is logged, the next call
+            # through the hub writes it again — the switch does not wait for it).
+            await self.relays.sync_hub_jump_quietly()
             written: list[NameResult] = []
             for name in names:
                 written.append(await self._write_name(name, target, address))

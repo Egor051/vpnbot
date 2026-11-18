@@ -112,6 +112,7 @@ The relay runs no bot, so it sends no offsite backup: its files come back from t
 | Path | Class | Installed by | Notes |
 |---|---|---|---|
 | `/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf` | repo-managed (`ssh`) | deploy.sh | key-only login |
+| `/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf` | repo-managed (`ssh`) | deploy.sh | forwarding: local TCP only (`AllowTcpForwarding local`, `AllowStreamLocalForwarding no`): a hub forwards the bot's jump key to the relays behind it, nothing may open a listener (`-R`) — [relay.md](relay.md#managing-the-ru-relays-through-the-hub); the agent refuses `jump` without it |
 | `/etc/ssh/sshd_config` | package default (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh puts the template back | as on main |
 | `/usr/local/sbin/vpn-relay-apply` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | |
 | `/usr/local/sbin/vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | the host invariants check |

@@ -16,7 +16,7 @@ from models.dto import Relay, RelayAgent, RelayPairing
 from repositories.relays import RelayUsage
 from services.relay_health import LEVEL_ICONS, ProbeResult
 from services.relay_pairing import format_port_specs
-from services.relays import IssuedPairing, PairingOutcome, RelayOverview, agent_uninstalled, host_is_ipv4
+from services.relays import IssuedPairing, PairingOutcome, RelayOverview, RouteInfo, agent_uninstalled, host_is_ipv4
 from utils.formatting import code, format_msk_datetime, h
 
 # Renders a probe's one-line reason (the supervisor's ``reason``).
@@ -148,6 +148,12 @@ def _agent_status_lines(agent: RelayAgent) -> list[str]:
         lines.append(
             t("relay_agent_status_update", state=h(str(update["state"])), message=h(str(update.get("message", ""))))
         )
+    input_status = status.get("input_status")
+    if isinstance(input_status, str) and input_status:
+        lines.append(t("relay_agent_status_input", status=h(input_status)))
+    jump = status.get("jump")
+    if isinstance(jump, dict) and isinstance(jump.get("open"), list):
+        lines.append(t("relay_agent_status_jump", open=h(", ".join(map(str, jump["open"])) or "—")))
     return lines
 
 
@@ -158,8 +164,10 @@ def relay_card_text(
     probe: ProbeResult | None,
     reason: ReasonFn | None = None,
     pending_attach: RelayPairing | None = None,
+    route: RouteInfo | None = None,
 ) -> str:
-    """The relay page: the common fields, then how it is managed (its agent)."""
+    """The relay page: the common fields, then how it is managed (its agent) and
+    how the bot reaches it (*route*: directly, or through the hub)."""
     lines = [
         t("relay_card_title", label=h(relay.label)),
         f"{t('relay_field_name')}: {code(relay.name)} {t('relay_name_immutable')}",
@@ -194,6 +202,12 @@ def relay_card_text(
             ports=h(format_port_specs(agent.tcp_ports, agent.udp_ports)),
         )
     )
+    if route is not None and route.via_hub and not agent_uninstalled(agent):
+        if route.hub is None:
+            lines.append(t("relay_route_no_hub"))
+        else:
+            key = "relay_route_hub_flag" if route.reason == "flag" else "relay_route_hub_mode"
+            lines.append(t(key, hub=h(f"{route.hub.label} · {route.hub.name}")))
     if agent_uninstalled(agent):
         lines.append(t("relay_agent_uninstalled"))
     else:

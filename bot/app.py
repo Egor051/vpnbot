@@ -89,7 +89,7 @@ from services.ufw import UfwApplier, UfwDeadmanMonitor
 from services.relay_health import build_relay_health_supervisor
 from services.fallback import FallbackService
 from services.relays import RelayService, warn_legacy_relay_env
-from services.relay_ssh import RelayAgentClient, RelayKeyStore
+from services.relay_ssh import RelayAgentClient, RelayKeyStore, jump_key_store
 from services.server_status import ServerStatusService
 from services.socks5 import Socks5Service
 from services.superadmin_claim import SuperadminClaimService, claim_status
@@ -346,7 +346,9 @@ async def _build_app(
         catalog=relay_catalog,
         settings=settings,
         keys=relay_keys,
-        client=RelayAgentClient(ShellRunner(max_output_chars=200_000), relay_keys),
+        # The jump key (next to the agent key): the hub forwards it to the relays
+        # behind it — every RU relay while the fallback mode is on.
+        client=RelayAgentClient(ShellRunner(max_output_chars=200_000), relay_keys, jump_keys=jump_key_store()),
         source_root=Path(__file__).resolve().parents[1],
     )
     warn_legacy_relay_env(settings)

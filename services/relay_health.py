@@ -463,20 +463,21 @@ class RelayHealthSupervisor:
                 logger.warning("Relay UDP probe of %s raised", relay.name, exc_info=True)
                 udp = False
         agent: AgentCheck | None = None
+        # Behind the hub too: the relay service asks the agent THROUGH the hub (its
+        # status is kept and a pending input filter confirmed, as for any relay).
+        if relay.agent is not None and self.agent_probe is not None:
+            try:
+                agent = await self.agent_probe(relay)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Relay agent probe of %s raised", relay.name, exc_info=True)
+                agent = AgentCheck(ok=False, error_key="internal_error")
         behind = self.behind_hub is not None and self.behind_hub(relay)
         if behind and not (ok and udp is not False):
-            # Behind the hub: the hairpin cannot pass and SSH to the relay is cut
-            # too — asking its agent would only wait out the SSH timeout every pass.
+            # The hairpin from here cannot pass: expected, not "down".
             level = LEVEL_HUB
         else:
-            if relay.agent is not None and self.agent_probe is not None:
-                try:
-                    agent = await self.agent_probe(relay)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.warning("Relay agent probe of %s raised", relay.name, exc_info=True)
-                    agent = AgentCheck(ok=False, error_key="internal_error")
             # Up when TCP passes and UDP did not FAIL (None: not judged); then the agent.
             level = judge(tcp=bool(ok), udp=udp, agent=agent)
         self._last[relay.id] = ProbeResult(

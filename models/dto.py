@@ -247,6 +247,9 @@ class Relay:
     # that, in the fallback mode, alone reaches the main server and receives every
     # failover name (services/fallback.py, docs/relay.md «Режим фолбэка»).
     role: str = "edge"
+    # The bot reaches this relay's agent THROUGH the hub, always (in the fallback
+    # mode every relay but a hub does anyway). Ignored for a hub.
+    via_hub: bool = False
 
     @property
     def managed(self) -> bool:

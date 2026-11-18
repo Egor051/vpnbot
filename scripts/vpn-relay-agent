@@ -20,6 +20,12 @@ everything else is refused with exit 2 before anything is read or changed:
                                           or sideways) with scripts/deploy.sh — the
                                           relay's one update engine
     uninstall                             remove everything scripts/install.sh installed
+    input-confirm                         run `vpn-relay-apply input-confirm` from THIS
+                                          ssh session (a new one: the bot's own proof
+                                          that the input filter lets ssh in)
+    jump key=<ed25519 blob> open=<host>:<port>[,<host>:<port>...]
+                                          a hub: write the bot's ONE jump line (below)
+    jump-off                              a hub: remove that line
 
 Before a successful `hello` only `hello` is accepted. `hello` compares sha256(token)
 with the hash scripts/install.sh stored from the pairing code (constant time), within
@@ -33,6 +39,32 @@ paired, expired) · 4 failed (the operation itself; the relay is as it was) · 5
 
 Every call is logged to the journal (logger -t vpn-relay-agent) with the command
 name, the caller's address and the verdict — never the token.
+
+THE JUMP LINE (a hub, docs/relay.md «Управление RU-relay через hub»). In the fallback
+mode the TSPU cuts SSH from the main server to the RU relays; the bot reaches them
+THROUGH the hub with a second key of its own, the jump key. `jump` keeps exactly ONE
+line for it in root's authorized_keys:
+
+    restrict,port-forwarding,permitopen="<host>:<port>"[,permitopen="..."],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump
+
+restrict (no pty, no agent/X11 forwarding, no user rc) + port-forwarding back, but only
+to the listed relays' sshd (permitopen — sshd compares the host character for character,
+so hosts are lower-cased here and the bot's -W is too), and /bin/false for any session:
+no shell. The values are
+validated here (DNS name or IPv4, port 1..65535, at most 32, unique); a key that already
+has another line in the file (the agent's own key among them) is refused. And `jump` is
+refused until `sshd -T` shows forwarding LOCAL TCP only (allowtcpforwarding local,
+allowstreamlocalforwarding no): port-forwarding in the key would otherwise also let
+it open listeners here (ssh -R: TCP ports, root-owned Unix sockets), which no
+authorized_keys option forbids. scripts/deploy.sh installs that setting on every relay
+(deploy/host/ssh/00-vpnrelay-forwarding.conf). Every other
+line of the file stays byte-identical: the old jump line is replaced where it stands,
+or the new one appended. `jump-off` removes it; `uninstall` too.
+
+`input-confirm` runs the helper as a direct child, so the ssh session the bot opened is
+among its ancestors — the check «the session began after the filter was applied» is
+the proof. It does not take the agent's lock: the filter waits for its confirmation
+exactly while `update` (the deploy that applied it) holds that lock.
 
 `update` and `uninstall` run in a transient systemd unit (systemd-run --wait), so a
 dropped SSH connection cannot cut them in half. Their bodies are the internal entry
@@ -57,6 +89,8 @@ is set.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
 import fcntl
 import hashlib
@@ -73,9 +107,13 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
-AGENT_VERSION = "1"
+# 2: input-confirm, jump, jump-off; input_status and jump in the facts. The protocol
+# (what `hello` answers) is unchanged.
+AGENT_VERSION = "2"
 PROTOCOL = 1
-MAX_REQUEST = 512
+# A `jump` list is the longest request (up to 32 host:port entries).
+MAX_REQUEST = 4096
+MAX_JUMP_OPEN = 32
 # Accepted `hello` after the code's expiry (clock skew between the two hosts).
 HELLO_GRACE_SECONDS = 900
 MAX_PORTS = 8
@@ -99,6 +137,10 @@ UPSTREAM_STATE = P("/etc/vpn-relay/upstream.resolved")
 VAR_DIR = P("/var/lib/vpn-relay")
 UPDATE_FILE = P("/var/lib/vpn-relay/update.json")
 LOCK_FILE = P("/run/vpn-relay-agent.lock")
+# authorized_keys has its own lock: a hub's `update` holds LOCK_FILE for minutes and the
+# jump list must still follow the relays behind it.
+JUMP_LOCK_FILE = P("/run/vpn-relay-agent.jump.lock")
+DEFAULT_AUTHORIZED_KEYS = "/root/.ssh/authorized_keys"
 UNINSTALL_RESULT = P("/run/vpn-relay-uninstall.json")
 APPLY_HELPER = "/usr/local/sbin/vpn-relay-apply"
 AGENT_PATH = "/usr/local/sbin/vpn-relay-agent"
@@ -125,6 +167,10 @@ ROLLBACK_REPORT = "===== ROLLBACK REPORT (relay) ====="
 RELEASE_TAG_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){1,3}")
 TAG_LIST = ("tag", "-l", "--sort=refname", "v*")
 KEY_MARKER = f'command="{AGENT_PATH}"'
+# The jump line: its options start with this, its comment is JUMP_COMMENT.
+JUMP_PREFIX = "restrict,port-forwarding,"
+JUMP_COMMENT = "vpn-bot-relay-jump"
+JUMP_COMMAND = 'command="/bin/false"'
 
 E_OK, E_REFUSED, E_DENIED, E_FAILED, E_BUSY = 0, 2, 3, 4, 5
 
@@ -134,12 +180,21 @@ E_OK, E_REFUSED, E_DENIED, E_FAILED, E_BUSY = 0, 2, 3, 4, 5
 _TOKEN_RE = r"[A-Za-z0-9_-]{43}"
 _PORTS = r"[0-9]{1,5}(?:,[0-9]{1,5}){0,7}"
 _HOST = r"[A-Za-z0-9.-]{1,253}"
+# An ed25519 public key's base64 blob ("ssh-ed25519" + 32 bytes): always 68 characters.
+_ED25519_BLOB = r"AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}"
+_OPEN = rf"{_HOST}:[0-9]{{1,5}}"
+# services/relay_ssh.py _REQUEST is the same list (tests/test_relay_jump.py runs both).
 WHITELIST: dict[str, re.Pattern[str]] = {
     "hello": re.compile(rf"hello (?P<token>{_TOKEN_RE})"),
     "status": re.compile(r"status"),
     "apply": re.compile(rf"apply target=(?P<target>{_HOST}) tcp=(?P<tcp>{_PORTS}) udp=(?P<udp>{_PORTS})"),
     "update": re.compile(r"update"),
     "uninstall": re.compile(r"uninstall"),
+    "input-confirm": re.compile(r"input-confirm"),
+    "jump": re.compile(
+        rf"jump key=(?P<key>{_ED25519_BLOB}) open=(?P<open>{_OPEN}(?:,{_OPEN}){{0,{MAX_JUMP_OPEN - 1}}})"
+    ),
+    "jump-off": re.compile(r"jump-off"),
 }
 _LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
 
@@ -185,6 +240,47 @@ def parse_ports(raw: str) -> list[int]:
             raise Refused(f"ports: {item} twice")
         ports.append(int(item))
     return sorted(ports)
+
+
+def valid_ipv4(value: str) -> bool:
+    """A dotted-quad IPv4 that can be a relay's sshd (no loopback, 0/8, link-local,
+    multicast or broadcast)."""
+    parts = value.split(".")
+    if len(parts) != 4 or not all(re.fullmatch(r"0|[1-9][0-9]{0,2}", p) and int(p) <= 255 for p in parts):
+        return False
+    first, second = int(parts[0]), int(parts[1])
+    return first not in (0, 127, 255) and first < 224 and not (first == 169 and second == 254)
+
+
+def parse_opens(raw: str) -> list[tuple[str, int]]:
+    """The relays a jump line opens: host:port entries, each host a DNS name or an
+    IPv4, each port 1..65535, unique, at most MAX_JUMP_OPEN — sorted."""
+    items = raw.split(",")
+    if not raw or len(items) > MAX_JUMP_OPEN:
+        raise Refused(f"open: 1..{MAX_JUMP_OPEN} host:port entries")
+    seen: list[tuple[str, int]] = []
+    for item in items:
+        host, sep, port = item.rpartition(":")
+        host = host.lower()
+        if not sep or not (valid_dns_name(host) or valid_ipv4(host)):
+            raise Refused(f"open: {item!r} is not <dns name or ipv4>:<port>")
+        if not re.fullmatch(r"[1-9][0-9]{0,4}", port) or int(port) > 65535:
+            raise Refused(f"open: {item!r} — the port is not in 1..65535")
+        if (host, int(port)) in seen:
+            raise Refused(f"open: {host}:{port} twice")
+        seen.append((host, int(port)))
+    return sorted(seen)
+
+
+def ed25519_blob(blob: str) -> str:
+    """*blob* when it decodes to an ssh-ed25519 public key (type + 32 bytes), else Refused."""
+    try:
+        raw = base64.b64decode(blob, validate=True)
+    except (ValueError, binascii.Error):
+        raise Refused("key: not base64") from None
+    if len(raw) != 51 or not raw.startswith(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"):
+        raise Refused("key: not an ssh-ed25519 public key")
+    return blob
 
 
 def parse_request(raw: str | None) -> tuple[str, dict[str, str]]:
@@ -279,9 +375,10 @@ def write_json(path: Path, data: dict[str, Any], mode: int = 0o600) -> None:
 
 
 @contextlib.contextmanager
-def exclusive() -> Iterator[None]:
-    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+def exclusive(lock: Path | None = None) -> Iterator[None]:
+    path = LOCK_FILE if lock is None else lock
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -452,6 +549,14 @@ def egress(target: str | None) -> dict[str, str]:
     return {"src": src.group(1) if src else "", "dev": dev.group(1) if dev else ""}
 
 
+def input_status() -> str:
+    """`vpn-relay-apply input-status` — one line (off | OK … | PENDING CONFIRM … — why |
+    ABSENT …), "" when it could not tell."""
+    out = run([APPLY_HELPER, "input-status"], timeout=20)
+    lines = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+    return lines[-1][:600] if out.returncode == 0 and lines else ""
+
+
 def checkout_ref() -> dict[str, str]:
     head = run(["git", "-C", str(APP_DIR), "rev-parse", "HEAD"], timeout=15).stdout.strip()
     tag = run(["git", "-C", str(APP_DIR), "describe", "--tags", "--always"], timeout=15).stdout.strip()
@@ -479,7 +584,11 @@ def facts(*, with_check: bool) -> dict[str, Any]:
         "egress": egress(target),
         "checkout": checkout_ref(),
         "update": read_json(UPDATE_FILE) or {},
+        "input_status": input_status(),
     }
+    jump = jump_state()
+    if jump is not None:
+        data["jump"] = jump
     if with_check:
         out = run([APPLY_HELPER, "check"], timeout=90)
         data["check"] = {
@@ -635,12 +744,151 @@ def cmd_uninstall(_: dict[str, str]) -> dict[str, Any]:
     return {"uninstall": result}
 
 
+def cmd_input_confirm(_: dict[str, str]) -> dict[str, Any]:
+    require_paired()
+    # A direct child, never systemd-run: this ssh session must be among the helper's
+    # ancestors — it is the proof. No agent lock (see the module docstring).
+    done = run([APPLY_HELPER, "input-confirm"], timeout=60)
+    lines = [ln for ln in (done.stdout + done.stderr).splitlines() if ln.strip()][-12:]
+    if done.returncode != 0:
+        raise Failed(f"vpn-relay-apply input-confirm exit {done.returncode}: {tail(done.stdout + done.stderr, 3)}")
+    return {"input_confirm": {"rc": done.returncode, "lines": lines}, "input_status": input_status()}
+
+
+# --------------------------------------------------------------------------- #
+# The jump line (a hub)
+# --------------------------------------------------------------------------- #
+def authorized_keys_path() -> Path:
+    """root's authorized_keys as install.sh found it (install.json), else the default."""
+    value = (installer_relay() or {}).get("authorized_keys")
+    return Path(_ROOT + value) if isinstance(value, str) and value.startswith("/") else P(DEFAULT_AUTHORIZED_KEYS)
+
+
+def is_jump_line(line: str) -> bool:
+    text = line.strip()
+    return text.startswith(JUMP_PREFIX) and text.endswith(f" {JUMP_COMMENT}")
+
+
+def jump_line(blob: str, opens: Sequence[tuple[str, int]]) -> str:
+    permits = ",".join(f'permitopen="{host}:{port}"' for host, port in opens)
+    return f"{JUMP_PREFIX}{permits},{JUMP_COMMAND} ssh-ed25519 {blob} {JUMP_COMMENT}"
+
+
+def key_sha256(blob: str) -> str:
+    """OpenSSH's fingerprint of a public key blob: SHA256:<base64, no padding>."""
+    digest = hashlib.sha256(base64.b64decode(blob)).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
+def jump_state() -> dict[str, Any] | None:
+    """The jump line as it is in the file: the relays it opens and its key's
+    fingerprint; None without one."""
+    try:
+        text = authorized_keys_path().read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if is_jump_line(line):
+            fields = line.split()
+            opens = re.findall(r'permitopen="([^"]+)"', fields[0])
+            blob = fields[2] if len(fields) >= 3 else ""
+            try:
+                fp = key_sha256(blob)
+            except (ValueError, binascii.Error):
+                fp = ""
+            return {"open": opens, "key_sha256": fp}
+    return None
+
+
+def write_jump_line(path: Path, line: str | None, blob: str | None) -> bool:
+    """Put *line* (None: no line) where the jump line is, every other line byte-
+    identical. True when the file changed."""
+    try:
+        original = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if line is None:
+            return False
+        raise Failed(f"{path} does not exist — not a relay this agent was installed on") from None
+    lines = original.splitlines(keepends=True)
+    if blob is not None and any(blob in old and not is_jump_line(old) for old in lines):
+        raise Refused("this key already has another line in authorized_keys — refusing to make it a jump key")
+    kept: list[str] = []
+    placed = line is None
+    for old in lines:
+        if not is_jump_line(old):
+            kept.append(old)
+        elif not placed:
+            kept.append(f"{line}\n" if old.endswith("\n") else str(line))
+            placed = True
+    if not placed:
+        if kept and not kept[-1].endswith("\n"):
+            kept[-1] += "\n"
+        kept.append(f"{line}\n")
+    text = "".join(kept)
+    if text == original:
+        return False
+    st = path.stat()
+    write_atomic(path, text, st.st_mode & 0o777)
+    with contextlib.suppress(OSError):
+        os.chown(path, st.st_uid, st.st_gid)
+    return True
+
+
+def sshd_forwarding() -> dict[str, str]:
+    """The effective forwarding settings of this sshd (`sshd -T`), Failed when it cannot tell."""
+    out = run(["sshd", "-T"], timeout=20)
+    if out.returncode != 0:
+        raise Failed(f"sshd -T failed (exit {out.returncode}): {tail(out.stderr or out.stdout, 2)}")
+    found: dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        key, _, value = line.strip().partition(" ")
+        if key in ("allowtcpforwarding", "allowstreamlocalforwarding", "disableforwarding"):
+            found[key] = value.strip().lower()
+    return found
+
+
+def require_local_forwarding() -> None:
+    """A jump line only where sshd forwards local TCP and nothing else (see the docstring)."""
+    found = sshd_forwarding()
+    tcp = found.get("allowtcpforwarding", "?")
+    unix = found.get("allowstreamlocalforwarding", "?")
+    if found.get("disableforwarding") == "yes" or tcp == "no":
+        raise Failed(f"sshd forwards nothing here (allowtcpforwarding {tcp}, disableforwarding "
+                     f"{found.get('disableforwarding', '?')}) — the jump would not work")
+    if tcp != "local" or unix != "no":
+        raise Failed(f"sshd forwards more than local TCP here (allowtcpforwarding {tcp}, allowstreamlocalforwarding "
+                     f"{unix}): a jump key could open listeners on this host — deploy this relay first "
+                     "(scripts/deploy.sh installs /etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf)")
+
+
+def cmd_jump(args: dict[str, str]) -> dict[str, Any]:
+    blob = ed25519_blob(args["key"])
+    opens = parse_opens(args["open"])
+    require_paired()
+    require_local_forwarding()
+    with exclusive(JUMP_LOCK_FILE):
+        path = authorized_keys_path()
+        changed = write_jump_line(path, jump_line(blob, opens), blob)
+    return {"jump": {"open": [f"{host}:{port}" for host, port in opens], "key_sha256": key_sha256(blob),
+                     "changed": changed}}
+
+
+def cmd_jump_off(_: dict[str, str]) -> dict[str, Any]:
+    require_paired()
+    with exclusive(JUMP_LOCK_FILE):
+        changed = write_jump_line(authorized_keys_path(), None, None)
+    return {"jump": {"open": [], "changed": changed}}
+
+
 COMMANDS = {
     "hello": cmd_hello,
     "status": cmd_status,
     "apply": cmd_apply,
     "update": cmd_update,
     "uninstall": cmd_uninstall,
+    "input-confirm": cmd_input_confirm,
+    "jump": cmd_jump,
+    "jump-off": cmd_jump_off,
 }
 
 
@@ -757,13 +1005,14 @@ def internal_update() -> int:
 # Internal: uninstall (in its own transient unit)
 # --------------------------------------------------------------------------- #
 def strip_agent_keys(path: Path) -> int:
-    """Drop every authorized_keys line that runs this agent; the rest stays byte-identical."""
+    """Drop every authorized_keys line that runs this agent, and the jump line; the
+    rest stays byte-identical."""
     try:
         original = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return 0
     lines = original.splitlines(keepends=True)
-    kept = [line for line in lines if KEY_MARKER not in line]
+    kept = [line for line in lines if KEY_MARKER not in line and not is_jump_line(line)]
     if len(kept) != len(lines):
         st = path.stat()
         write_atomic(path, "".join(kept), st.st_mode & 0o777)
@@ -823,8 +1072,8 @@ def internal_uninstall() -> int:
     before = str(install.get("ip_forward_before", "0"))
     run(["sysctl", "-q", "-w", f"net.ipv4.ip_forward={'1' if before == '1' else '0'}"], timeout=10)
     steps.append(f"sysctl file removed, ip_forward={before}")
-    keys = Path(_ROOT + str(install["authorized_keys"])) if isinstance(install.get("authorized_keys"), str) else P("/root/.ssh/authorized_keys")
-    steps.append(f"{strip_agent_keys(keys)} agent key line(s) removed from {keys}")
+    keys = authorized_keys_path()
+    steps.append(f"{strip_agent_keys(keys)} agent/jump key line(s) removed from {keys}")
     for path in (P(APPLY_HELPER), STATE_DIR, VAR_DIR):
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)

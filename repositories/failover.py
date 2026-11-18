@@ -21,14 +21,14 @@ from aiosqlite import Row
 from db.database import Database
 from models.dto import FailoverName
 from models.enums import VpnKeyStatus
-from repositories.relays import DIRECT_HOST_META_KEY
+from repositories.relays import DIRECT_HOST_META_KEY, FALLBACK_MODE_META_KEY
 
 _COLUMNS = "id, name, applied, applied_ipv4, applied_at, last_error, created_at, created_by"
 APPLIED_STATES = frozenset({"normal", "failover"})
 
 # schema_meta keys. MODE: "on" — the admin switched the fallback mode on (every
 # name should point at the hub); anything else, the key absent included — off.
-META_MODE = "failover_mode"
+META_MODE = FALLBACK_MODE_META_KEY
 # When and by whom the mode was last asked to change (shown on the screen).
 META_MODE_AT = "failover_mode_at"
 # The addresses the bot writes; absent — derived (services.fallback).
