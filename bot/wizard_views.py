@@ -10,8 +10,10 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.deploy_views import deploy_failure_text, deploy_warnings_text
+from bot.progress import STATES, Step, render_steps, steps_of
 from i18n import t
 from models.dto import WizardRun
+from services.deploy_result import DEPLOY_STEPS
 from services.wizard import Item, StatusSnapshot
 from services.wizard_modes import MODES
 from utils.formatting import h
@@ -56,7 +58,36 @@ def _steps_line(snap: StatusSnapshot) -> str:
     return " · ".join(parts)
 
 
+def deploy_steps_view(snap: StatusSnapshot | None, *, phase1_only: bool = False) -> list[Step]:
+    """«Обновить бота»: the deploy's steps (bot/progress.py) from the helper's last
+    ``deploy`` event — all ⚪ before it ran. The plan (CHECK=1) has the first four."""
+    names = DEPLOY_STEPS[:4] if phase1_only else DEPLOY_STEPS
+    steps = steps_of([(name, t(f"deploy_step_{name}")) for name in names])
+    progress = snap.deploy_progress if snap is not None else None
+    if isinstance(progress, dict):
+        states = progress.get("steps")
+        if isinstance(states, dict):
+            for step in steps:
+                state = states.get(step.key)
+                if state in STATES:
+                    step.state = str(state)
+        tests = progress.get("tests")
+        if isinstance(tests, dict):
+            for step in steps:
+                if step.key == "tests":
+                    done, total = tests.get("done"), tests.get("total")
+                    step.done = done if isinstance(done, int) else None
+                    step.total = total if isinstance(total, int) and total > 0 else None
+    return steps
+
+
 def progress_text(run: WizardRun, snap: StatusSnapshot) -> str:
+    if run.mode == "update" and snap.deploy_progress is not None:
+        # The deploy's own steps, the activity line moving with every new event.
+        body = render_steps(header(run), deploy_steps_view(snap, phase1_only=run.phase == "plan"), tick=snap.events)
+        if run.phase == "execute":
+            body += "\n\n" + t("wizard_update_restart_note")
+        return body
     lines = [header(run)]
     steps = _steps_line(snap)
     if steps:
@@ -71,7 +102,12 @@ def progress_text(run: WizardRun, snap: StatusSnapshot) -> str:
 
 def plan_text(run: WizardRun, snap: StatusSnapshot | None = None) -> str:
     body = (snap.plan_text if snap is not None and snap.plan_text else run.summary) or "—"
-    return "\n".join([header(run), "", t("wizard_plan_title"), _pre(body), t("wizard_plan_confirm_hint")])
+    lines = [header(run), "", t("wizard_plan_title"), _pre(body)]
+    if run.mode == "update":
+        # What «Применить» runs: the deploy's steps, all ⚪ (bot/progress.py).
+        lines.append(render_steps(t("wizard_update_steps_title"), deploy_steps_view(None)).strip())
+    lines.append(t("wizard_plan_confirm_hint"))
+    return "\n".join(lines)
 
 
 def item_text(item: Item) -> str:
@@ -114,6 +150,14 @@ def final_text(run: WizardRun, snap: StatusSnapshot) -> str:
         lines += ["", _pre(snap.result_text)]
     elif run.summary:
         lines += ["", _pre(run.summary)]
+    if run.mode == "update" and snap.deploy_progress is not None and run.phase == "execute":
+        # The steps as the deploy left them — closed with ✅ / ❌.
+        steps = deploy_steps_view(snap)
+        if run.state == "succeeded":
+            for step in steps:
+                if step.state in ("wait", "run"):
+                    step.state = "ok"
+        lines += ["", render_steps(t("wizard_update_steps_title"), steps).strip()]
     if run.mode == "update" and snap.deploy_warnings:
         lines += ["", deploy_warnings_text(snap.deploy_warnings)]
     if run.mode == "update" and run.state in ("failed", "rolled_back") and snap.deploy_failure is not None:

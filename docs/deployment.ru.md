@@ -436,6 +436,7 @@ Relay, который деплоит релиз старше отметки, з�
 |---|---|
 | `[deploy:step <i>/<n> <name>]` | начался шаг: `preflight`, `fetch`, `tests`, `checks`, `backup`, `install`, `restart`, `verify` (`CHECK=1`: первые четыре) |
 | `[deploy:skip <name>] <why>` | шаг пропущен (тесты — по отметке) |
+| `[deploy:tests total=<N>]` | сколько тестов собрал гейт (`pytest --collect-only`): читающие считают символы результатов pytest против этого числа — «N/M» и проценты в боте |
 | `[deploy:warn <code>] <text>` | находка успешного деплоя (`upstream_preexisting`: [relay.ru.md](relay.ru.md#что-делает-scriptsredeploysh-на-relay)) |
 | `[deploy:result ok]` / `[deploy:result noop]` | зелёный / нечего деплоить |
 | `[deploy:result failed step=<name> reason=<class>]` | почему остановился — на любом выходе: `FAIL`, ошибка под `set -e`, откат |

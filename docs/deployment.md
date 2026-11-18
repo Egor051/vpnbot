@@ -448,6 +448,7 @@ which knows no stamp: it tests, as before.
 |---|---|
 | `[deploy:step <i>/<n> <name>]` | a step begins: `preflight`, `fetch`, `tests`, `checks`, `backup`, `install`, `restart`, `verify` (`CHECK=1`: the first four) |
 | `[deploy:skip <name>] <why>` | a step is skipped (the tests, on a stamp) |
+| `[deploy:tests total=<N>]` | the tests the gate collected (`pytest --collect-only`): the readers count pytest's result characters against it — «N/M» and the percentage in the bot |
 | `[deploy:warn <code>] <text>` | a finding of a deploy that succeeded (`upstream_preexisting`: [relay.md](relay.md#what-scriptsredeploysh-does-on-a-relay)) |
 | `[deploy:result ok]` / `[deploy:result noop]` | green / nothing to deploy |
 | `[deploy:result failed step=<name> reason=<class>]` | why it stopped — on every way out: a `FAIL`, an error under `set -e`, a rollback |

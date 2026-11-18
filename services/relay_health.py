@@ -65,7 +65,7 @@ import os
 import socket
 import ssl
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -73,6 +73,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardMarkup
 
 from config.settings import Settings
 from i18n import t
@@ -303,11 +304,16 @@ class RelayHealthMonitor:
         return observed
 
 
-async def broadcast_to_admins(bot: Bot, admin_ids: AbstractSet[int], text: str) -> None:
+async def broadcast_to_admins(
+    bot: Bot, admin_ids: AbstractSet[int], text: str, reply_markup: InlineKeyboardMarkup | None = None
+) -> None:
     """Send *text* to every admin; one admin failing never stops the rest."""
     for admin_id in admin_ids:
         try:
-            await bot.send_message(admin_id, text)
+            if reply_markup is None:
+                await bot.send_message(admin_id, text)
+            else:
+                await bot.send_message(admin_id, text, reply_markup=reply_markup)
         except Exception:
             logger.warning("Failed to send relay alert to admin %d", admin_id, exc_info=True)
 
@@ -423,6 +429,9 @@ class RelayHealthSupervisor:
         # bot.app): is this relay one the main server cannot reach directly right
         # now? None — no fallback mode in this process.
         self.behind_hub: Callable[[Relay], bool] | None = None
+        # Called after every pass with (relays, the last probe of each) — the fallback
+        # mode's automatic switch (services/fallback_auto.py), attached by bot.app.
+        self.pass_listeners: list[Callable[[Sequence[Relay], Mapping[int, ProbeResult]], Awaitable[None]]] = []
 
     @property
     def port(self) -> int:
@@ -556,6 +565,13 @@ class RelayHealthSupervisor:
                 raise
             except Exception:
                 logger.warning("Relay health check of %s failed", relay.name, exc_info=True)
+        for listener in self.pass_listeners:
+            try:
+                await listener(enabled, dict(self._last))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("A relay health pass listener failed", exc_info=True)
 
 
 def build_relay_health_supervisor(

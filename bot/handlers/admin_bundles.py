@@ -11,9 +11,10 @@ Two bulk operations, both :meth:`services.key_bundles.KeyBundleService.reconcile
 Each starts with a dry run over every active bundle and a plan screen; nothing
 is written before the confirmation. The run itself takes one Xray apply per
 VLESS key it creates or deletes, so it goes to a background task: the callback
-is answered at once, a progress message is edited at most once per
-:data:`PROGRESS_EDIT_INTERVAL_SECONDS`, and the final report replaces it. Only
-one run per process at a time.
+is answered at once, and the progress message (bot/progress.py) lists the steps —
+the dry run ✅, «Применение» with N of M subscriptions and its percentage, the report —
+edited at most once per :data:`PROGRESS_EDIT_INTERVAL_SECONDS`; the report closes it.
+Only one run per process at a time.
 
 Superadmin only, and inert while ``SUBSCRIPTION_ENABLED`` is false — every
 handler checks both itself, so a replayed callback is refused, not just hidden.
@@ -32,7 +33,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, InaccessibleMessage, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from bot.bundles import require_subscription_ui
 from bot.container import Services
@@ -47,6 +48,8 @@ from bot.keyboards.admin_bundles import (
 )
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
+from bot.progress import PROGRESS_EDIT_INTERVAL_SECONDS as PROGRESS_INTERVAL
+from bot.progress import ProgressMessage, steps_of
 from i18n import t
 from models.enums import KeyBundleKind
 from services.key_bundles import ReconcileOutcome, ReconcileResult, ReconcileSummary
@@ -55,9 +58,8 @@ from utils.formatting import h
 router = Router()
 logger = logging.getLogger(__name__)
 
-# The progress message is edited no more often than this (Telegram throttles
-# edits of one message, and a bundle can take well under a second).
-PROGRESS_EDIT_INTERVAL_SECONDS = 3.0
+# bot/progress.py's interval (one edit per message per 3 s), kept importable here.
+PROGRESS_EDIT_INTERVAL_SECONDS = PROGRESS_INTERVAL
 # Entries per skipped/failed list in a plan or report; the rest are counted.
 _LIST_LIMIT = 15
 # How long bot shutdown waits for a run to finish the bundle it is on. One bundle
@@ -209,7 +211,12 @@ async def admin_bundles_run(callback: CallbackQuery, services: Services) -> None
 
 
 class ProgressReporter:
-    """Edits the progress message, at most once per *interval* seconds."""
+    """A reconcile's progress message (bot/progress.py): «Проверка (dry run)» ✅,
+    «Применение» with N of M subscriptions (and its percentage), «Отчёт».
+
+    Called with (done, total) after every bundle; edits at most once per *interval*
+    (the animation between bundles too, through :meth:`run`).
+    """
 
     def __init__(
         self,
@@ -219,30 +226,40 @@ class ProgressReporter:
         interval: float = PROGRESS_EDIT_INTERVAL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._message = message
-        self._title = title
-        self._interval = interval
-        self._clock = clock
-        self._last: float | None = None
-        self.edits = 0
+        self.view = ProgressMessage(
+            message, f"<b>{h(title)}</b>",
+            steps_of(reconcile_steps(), plan="ok"), interval=interval, clock=clock,
+        )
+
+    @property
+    def edits(self) -> int:
+        return self.view.edits
 
     async def start(self) -> None:
-        await safe_edit_message_text(self._message, t("aio_run_started", title=self._title))
-        self._last = self._clock()
-        self.edits += 1
+        self.view.start("apply")
+        await self.view.push(force=True)
 
     async def __call__(self, done: int, total: int) -> None:
-        # The final report replaces the message right after the last bundle.
-        if done >= total:
-            return
-        now = self._clock()
-        if self._last is not None and now - self._last < self._interval:
-            return
-        self._last = now
-        self.edits += 1
-        await safe_edit_message_text(
-            self._message, t("aio_run_progress", title=self._title, done=done, total=total)
-        )
+        self.view.set("apply", "run", done=done, total=total)
+        await self.view.push()
+
+    async def finish(self, report: str, markup: InlineKeyboardMarkup | None, *, ok: bool = True) -> None:
+        if ok:
+            self.view.complete()
+        else:
+            self.view.fail_running()
+        await self.view.finish(report, markup)
+
+
+def reconcile_steps() -> list[tuple[str, str]]:
+    return [("plan", t("aio_step_plan")), ("apply", t("aio_step_apply")), ("report", t("aio_step_report"))]
+
+
+def reconcile_plan_steps_text() -> str:
+    """The steps under a plan screen (all ⚪): what «Выполнить» will run."""
+    from bot.progress import render_steps
+
+    return render_steps(t("aio_steps_title"), steps_of(reconcile_steps(), plan="ok"))
 
 
 async def run_reconcile(
@@ -260,24 +277,20 @@ async def run_reconcile(
     «exception was never retrieved» log line; the admin gets the error instead.
     """
     title = _mode_title(mode)
+    progress = ProgressReporter(message, title, clock=clock)
     try:
-        progress = ProgressReporter(message, title, clock=clock)
         await progress.start()
-        summary = await services.key_bundles.reconcile_all(
+        summary = await progress.view.run(services.key_bundles.reconcile_all(
             actor_user_id=actor_user_id,
             target_kind=_target_kind(mode),
             on_progress=progress,
             should_stop=should_stop,
-        )
-        await safe_edit_message_text(
-            message, aio_report_text(mode, summary), reply_markup=admin_bundles_back_keyboard()
-        )
+        ))
+        await progress.finish(aio_report_text(mode, summary), admin_bundles_back_keyboard())
     except Exception as exc:
         logger.exception("All-in-one bulk reconcile failed")
-        await safe_edit_message_text(
-            message,
-            t("aio_failed", title=title, error=h(service_error_text(exc))),
-            reply_markup=admin_bundles_back_keyboard(),
+        await progress.finish(
+            t("aio_failed", title=title, error=h(service_error_text(exc))), admin_bundles_back_keyboard(), ok=False
         )
 
 
@@ -304,6 +317,7 @@ def aio_plan_text(mode: str, summary: ReconcileSummary) -> str:
     parts.extend(reconcile_issue_blocks(summary))
     if planned:
         parts.append(t(f"aio_plan_note_{mode}"))
+        parts.append(reconcile_plan_steps_text())
     else:
         parts.append(t("aio_plan_nothing"))
     return "\n\n".join(parts)

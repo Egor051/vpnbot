@@ -27,6 +27,7 @@ screen, never to an error.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -34,13 +35,18 @@ from typing import Any, cast
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.container import Services
 from bot.deploy_views import deploy_failure_text, deploy_warnings_text
 from bot.fsm.states import AdminFallbackStates, AdminRelayStates
 from bot.guards import require_superadmin
-from bot.handlers.admin_bundles import ProgressReporter, reconcile_issue_blocks, reconcile_report_text
+from bot.handlers.admin_bundles import (
+    ProgressReporter,
+    reconcile_issue_blocks,
+    reconcile_plan_steps_text,
+    reconcile_report_text,
+)
 from bot.handlers.admin_bundles import runner as bundle_runner
 from bot.handlers.common import answer_callback_error, answer_message_error, service_error_text
 from bot.keyboards.admin_relays import (
@@ -64,13 +70,14 @@ from bot.keyboards.admin_relays import (
 )
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
+from bot.progress import STATES, ProgressMessage, steps_of
 from bot.fallback import fallback_state_line
 from bot.relays import outcome_text, pairing_text, relay_card_text, relay_delete_text, relays_list_text
 from bot.totp_gate import require_totp
 from config.validators import format_ipv4_networks, ipv4_address
 from i18n import t
 from models.dto import Relay, RelayPairing
-from services.deploy_result import deploy_warnings_from
+from services.deploy_result import DEPLOY_STEPS, deploy_warnings_from
 from services.errors import AccessDenied, InvalidOperation, NotFound, ServiceError
 from services.key_bundles import ReconcileOutcome, ReconcileSummary, RelayMembersAction
 from services.relay_health import LEVEL_ICONS
@@ -429,6 +436,7 @@ def relay_subs_plan_text(relay: Relay, action: str, summary: ReconcileSummary) -
         parts.append(t("relay_subs_plan_cleanup", count=summary.keys_to_delete))
     parts.extend(reconcile_issue_blocks(summary))
     parts.append(t(f"relay_subs_plan_note_{action}", label=h(relay.label)))
+    parts.append(reconcile_plan_steps_text())
     return "\n\n".join(parts)
 
 
@@ -584,28 +592,25 @@ async def run_relay_members(
     «exception was never retrieved» log line; the admin gets the error instead.
     """
     title = _subs_title(relay, action)
+    progress = ProgressReporter(message, title, clock=clock)
     try:
-        progress = ProgressReporter(message, title, clock=clock)
         await progress.start()
-        summary = await services.key_bundles.reconcile_relay_members(
+        summary = await progress.view.run(services.key_bundles.reconcile_relay_members(
             relay.name,
             _SUBS_ACTIONS[action],
             actor_user_id=actor_user_id,
             on_progress=progress,
             should_stop=should_stop,
-        )
+        ))
         retry = bool(summary.with_outcome(ReconcileOutcome.FAILED, ReconcileOutcome.PARTIAL) or summary.remaining)
-        await safe_edit_message_text(
-            message,
-            reconcile_report_text(title, summary),
-            reply_markup=relay_subs_report_keyboard(relay.id, action, retry=retry),
+        await progress.finish(
+            reconcile_report_text(title, summary), relay_subs_report_keyboard(relay.id, action, retry=retry)
         )
     except Exception as exc:
         logger.exception("Relay subscription run failed: relay=%s action=%s", relay.name, action)
-        await safe_edit_message_text(
-            message,
+        await progress.finish(
             t("aio_failed", title=title, error=h(service_error_text(exc))),
-            reply_markup=relay_subs_report_keyboard(relay.id, action, retry=True),
+            relay_subs_report_keyboard(relay.id, action, retry=True), ok=False,
         )
 
 
@@ -1145,8 +1150,48 @@ async def relay_attach_target(message: Message, state: FSMContext, services: Ser
         await answer_message_error(message, exc)
 
 
+# ── «⬆️ Обновить агент»: the plan, then the deploy with its progress (D) ───────
+
+# How often the bot asks a running update where it is (`update-status`, a second ssh
+# session — through the hub too): the animation runs locally in between.
+UPDATE_POLL_SECONDS = 10.0
+
+
+def deploy_step_titles() -> list[tuple[str, str]]:
+    return [(step, t(f"deploy_step_{step}")) for step in DEPLOY_STEPS]
+
+
+def apply_deploy_progress(view: ProgressMessage, progress: object) -> None:
+    """The agent's ``progress`` (deploy_progress of the deploy's output so far) onto
+    the message's steps; junk is ignored."""
+    if not isinstance(progress, dict):
+        return
+    steps = progress.get("steps")
+    if isinstance(steps, dict):
+        for key, state in steps.items():
+            if key in DEPLOY_STEPS and state in STATES:
+                view.set(str(key), str(state))
+    tests = progress.get("tests")
+    if isinstance(tests, dict):
+        done, total = tests.get("done"), tests.get("total")
+        view.set("tests", view.step("tests").state,
+                 done=done if isinstance(done, int) and done >= 0 else None,
+                 total=total if isinstance(total, int) and total > 0 else None)
+
+
+async def _progress_edit(message: object, text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> bool:
+    """bot/progress.py's edit through this module's ``safe_edit_message_text``."""
+    return await safe_edit_message_text(message, text, reply_markup=reply_markup)  # type: ignore[arg-type]
+
+
+def _update_view(callback: CallbackQuery, relay: Relay) -> ProgressMessage:
+    return ProgressMessage(callback.message, t("relay_update_title", name=h(relay.name)),
+                           steps_of(deploy_step_titles()), edit=_progress_edit)
+
+
 @router.callback_query(F.data.regexp(_RELAY_ACTION + r":ag:up$"))
 async def relay_agent_update(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """The plan: every step of the relay's deploy ⚪, and «✅ Подтвердить»."""
     try:
         if not await _guard(callback, services):
             return
@@ -1154,11 +1199,61 @@ async def relay_agent_update(callback: CallbackQuery, state: FSMContext, service
         relay_id = _relay_id(callback.data)
         if not await require_totp(callback, state, services, action="relay_update"):
             return
+        relay = await services.relays.get(callback.from_user.id, relay_id)
+        await safe_callback_answer(callback)
+        view = _update_view(callback, relay)
+        view.footer = t("relay_update_plan_note")
+        await view.show_plan(InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_relay_update_confirm"), callback_data=f"admin:relay:{relay_id}:ag:up:ok")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data=f"admin:relay:{relay_id}")],
+        ]))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(_RELAY_ACTION + r":ag:up:ok$"))
+async def relay_agent_update_run(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """The update itself: the long agent call, and next to it ``update-status`` every
+    :data:`UPDATE_POLL_SECONDS`; the result closes the steps (✅, or ❌ with the cause)."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        relay_id = _relay_id(callback.data)
+        if not await require_totp(callback, state, services, action="relay_update"):
+            return
+        actor = callback.from_user.id
+        relay = await services.relays.get(actor, relay_id)
         await safe_callback_answer(callback, t("relay_agent_updating"))
+        view = _update_view(callback, relay)
+        view.start("preflight")
+        await view.push(force=True)
+        stop = asyncio.Event()
+
+        async def poll() -> None:
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=UPDATE_POLL_SECONDS)
+                    return
+                except TimeoutError:
+                    pass
+                try:
+                    update = await services.relays.update_progress(actor, relay_id)
+                except ServiceError:
+                    continue
+                apply_deploy_progress(view, update.get("progress"))
+
+        poller = asyncio.create_task(poll())
         try:
-            reply = await services.relays.update_agent(callback.from_user.id, relay_id)
+            reply = await view.run(services.relays.update_agent(actor, relay_id))
             raw_update = reply.payload.get("update")
             update: dict[str, Any] = raw_update if isinstance(raw_update, dict) else {}
+            if update.get("state") == "noop":
+                for step in view.steps:
+                    if step.state in ("wait", "run"):
+                        step.state = "skip"
+            else:
+                view.complete()
             notice = t(
                 "relay_agent_updated", state=h(str(update.get("state", "?"))), message=h(str(update.get("message", "")))
             )
@@ -1169,10 +1264,19 @@ async def relay_agent_update(callback: CallbackQuery, state: FSMContext, service
             await _show_card(callback, services, relay_id)
             return
         except RelayUpdateFailed as exc:
+            if exc.failure.step in DEPLOY_STEPS:
+                view.set(exc.failure.step, "fail")
+            else:
+                view.fail_running()
             notice = t("relay_agent_update_failed_cause") + "\n" + deploy_failure_text(exc.failure)
         except ServiceError as exc:
+            view.fail_running()
             notice = t("relay_agent_update_failed", error=h(service_error_text(exc)))
-        await _show_card(callback, services, relay_id, notice)
+        finally:
+            stop.set()
+            await asyncio.gather(poller, return_exceptions=True)
+        steps = view.text(activity=False).split("\n", 2)[-1].strip()
+        await _show_card(callback, services, relay_id, f"{t('relay_update_title', name=h(relay.name))}\n{steps}\n\n{notice}")
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

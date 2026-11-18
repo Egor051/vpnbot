@@ -38,11 +38,15 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import contextlib
 import json
 import os
 import re
+import select
 import sqlite3
+import subprocess  # noqa: S404 — argv lists of fixed programs, never a shell
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -186,6 +190,50 @@ def deploy_verdict(output: str, rc: int) -> dict[str, Any]:
         ],
         "log": log.group("log") if log else "",
     }
+# deploy.sh's DEPLOY_STEPS, in order (the progress of a running deploy).
+DEPLOY_STEPS = ("preflight", "fetch", "tests", "checks", "backup", "install", "restart", "verify")
+_DV_STEP = re.compile(r"\[deploy:step [0-9]+/[0-9]+ ([a-z_]{1,32})\]")
+_DV_SKIP = re.compile(r"\[deploy:skip ([a-z_]{1,32})\]")
+_DV_TOTAL = re.compile(r"\[deploy:tests total=([0-9]{1,7})\]")
+# pytest -q: a line of result characters, "[ NN%]" at its end once it is full.
+_DV_PYTEST_LINE = re.compile(r"^([.FEsxX]+)\s*(?:\[\s*[0-9]{1,3}%\])?\s*$")
+
+
+def deploy_progress(output: str) -> dict[str, Any]:
+    """Where a RUNNING deploy is, from its output so far: every step of DEPLOY_STEPS
+    with its state (wait / run / ok / fail / skip), the current step, and the tests
+    (done of total: total from ``[deploy:tests total=N]``, done counted from pytest's
+    result characters). After a relay's handover the steps start over: the LAST step
+    line is the current one."""
+    steps = _DV_STEP.findall(output)
+    current = steps[-1] if steps else ""
+    skipped = set(_DV_SKIP.findall(output))
+    result = None
+    for match in _DV_RESULT.finditer(output):
+        result = match
+    states: dict[str, str] = {}
+    at = DEPLOY_STEPS.index(current) if current in DEPLOY_STEPS else -1
+    for i, name in enumerate(DEPLOY_STEPS):
+        if name in skipped and i <= max(at, 0):
+            states[name] = "skip"
+        elif i < at:
+            states[name] = "ok"
+        elif i == at:
+            states[name] = "run"
+        else:
+            states[name] = "wait"
+    if result is not None and current in states:
+        if result.group("reason") is not None:
+            states[current] = "fail"
+        else:
+            states = {k: ("ok" if v in ("run", "wait") and DEPLOY_STEPS.index(k) <= at else v)
+                      for k, v in states.items()}
+    totals = _DV_TOTAL.findall(output)
+    done = sum(len(m.group(1)) for line in output.splitlines() if (m := _DV_PYTEST_LINE.match(line.strip())))
+    tests: dict[str, int] = {}
+    if totals or done:
+        tests = {"done": done, **({"total": int(totals[-1])} if totals else {})}
+    return {"step": current, "steps": states, "tests": tests}
 # --- DEPLOY VERDICT (end) ---
 
 
@@ -217,6 +265,64 @@ def live_schema() -> str:
     return str(row[0]) if row else "?"
 
 
+PROGRESS_EVERY = 2.0
+
+
+def run_streaming(ctx: Any, argv: list[str], *, env: dict[str, str], timeout: int) -> tuple[int, str]:
+    """ctx.run for redeploy.sh, reading its output WHILE it runs: every PROGRESS_EVERY
+    seconds a ``deploy`` event carries deploy_progress of the output so far — the
+    steps and the tests the bot shows (bot/wizard_views.py). The same tool fence and
+    environment as the library's run_cmd; (exit code, output), 124 on a timeout."""
+    exe = lib.tool_allowed(argv[0])
+    if exe is None:
+        return 127, f"{argv[0]}: refused (VPN_BOT_WIZARD_SELFTEST: not a stub)"
+    run_env = {k: v for k, v in os.environ.items() if k not in ("LANGUAGE", "LC_MESSAGES")}
+    run_env["LC_ALL"] = "C"
+    run_env.update(env)
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — argv list, never a shell
+            [exe, *argv[1:]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=run_env,
+        )
+    except FileNotFoundError:
+        return 127, f"{argv[0]}: not found"
+    assert proc.stdout is not None
+    fd = proc.stdout.fileno()
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    told, last = 0.0, None
+    rc: int | None = None
+
+    def text() -> str:
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+    while rc is None:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            proc.kill()
+            proc.wait()
+            rc = 124
+            break
+        ready, _, _ = select.select([fd], [], [], min(left, PROGRESS_EVERY))
+        if ready:
+            data = os.read(fd, 65536)
+            if not data:
+                rc = proc.wait()
+                break
+            chunks.append(data)
+        if time.monotonic() - told >= PROGRESS_EVERY:
+            told = time.monotonic()
+            progress = deploy_progress(text())
+            if progress != last:
+                last = progress
+                with contextlib.suppress(Exception):
+                    ctx.event("deploy", progress=progress)
+    out = text() + (f"\n{argv[0]}: timed out after {timeout}s" if rc == 124 else "")
+    with contextlib.suppress(Exception):
+        ctx.event("deploy", progress=deploy_progress(out))
+    ctx.log.write(f"$ {' '.join(argv)}  (exit {rc})\n{out.rstrip()}")
+    return rc, out
+
+
 def redeploy(ctx: Any, *, check: bool, timeout: int) -> tuple[int, str]:
     env = {"REDEPLOY_ATTACH": "pipe"}
     if check:
@@ -224,7 +330,7 @@ def redeploy(ctx: Any, *, check: bool, timeout: int) -> tuple[int, str]:
     if ctx.params.get("force") == "1":
         env["FORCE"] = "1"
     ctx.say("CHECK=1 redeploy (Phase 1, read-only)" if check else "redeploy: deploy.sh restarts the bot; the run continues in its own unit")
-    return ctx.run(["bash", f"{app()}/scripts/redeploy.sh"], env=env, timeout=timeout)
+    return run_streaming(ctx, ["bash", f"{app()}/scripts/redeploy.sh"], env=env, timeout=timeout)
 
 
 def save(ctx: Any, name: str, text: str) -> None:

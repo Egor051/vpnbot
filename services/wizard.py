@@ -136,6 +136,9 @@ class StatusSnapshot:
     # findings of one that succeeded — services/deploy_result.py.
     deploy_failure: DeployFailure | None = None
     deploy_warnings: tuple[DeployWarning, ...] = ()
+    # «Обновить бота»: where the deploy is (the helper's ``deploy`` events — its
+    # steps and tests, read from the deploy's output while it runs).
+    deploy_progress: dict[str, Any] | None = None
 
     @property
     def finished(self) -> bool:
@@ -177,6 +180,10 @@ def parse_status(text: str) -> StatusSnapshot:
                 snap.failed_step_text = str(rec.get("text") or "")
         elif kind == "progress":
             snap.progress.append(str(rec.get("text") or ""))
+        elif kind == "deploy":
+            progress = rec.get("progress")
+            if isinstance(progress, dict):
+                snap.deploy_progress = progress
         elif kind == "plan":
             snap.plan_text = str(rec.get("text") or "")
             snap.plan_noop = bool(rec.get("noop"))

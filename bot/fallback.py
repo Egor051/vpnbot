@@ -12,7 +12,16 @@ from collections.abc import Sequence
 from adapters.cloudflare_dns import DohAnswer
 from i18n import t
 from models.dto import FailoverName
-from services.fallback import FAILOVER, FallbackOverview, NameResult, Preflight, PreflightItem, SwitchReport
+from services.fallback import (
+    FAILOVER,
+    SWITCH_STEPS,
+    Candidate,
+    FallbackOverview,
+    NameResult,
+    Preflight,
+    PreflightItem,
+    SwitchReport,
+)
 from utils.formatting import code, format_msk_datetime, h
 
 
@@ -133,3 +142,51 @@ def names_text(overview: FallbackOverview, candidates: Sequence[str]) -> str:
     if candidates:
         lines.extend(["", t("fb_names_candidates", names=", ".join(code(name) for name in candidates))])
     return "\n".join(lines)
+
+
+# ── the setup, the candidates, the switch's steps (C1, C4, D) ─────────────────
+
+
+def not_configured_text(overview: FallbackOverview, notice: str | None = None) -> str:
+    """The screen while the mode is not set up: what it is, what is missing."""
+    lines: list[str] = []
+    if notice:
+        lines.extend([notice, ""])
+    lines.extend([t("fb_title"), "", t("fb_intro"), "", t("fb_setup_needed")])
+    lines.append(("✅ " if overview.token_set else "⚪ ") + t("fb_setup_item_token"))
+    lines.append(("✅ " if overview.hub is not None else "⚪ ") + t("fb_setup_item_hub"))
+    lines.append(("✅ " if overview.names else "⚪ ") + t("fb_setup_item_names", count=len(overview.names)))
+    return "\n".join(lines)
+
+
+def candidates_text(title: str, candidates: Sequence[Candidate], unchecked: Sequence[str]) -> str:
+    """Every candidate with WHY it belongs in the set; ☑️ checked, ⬜ unchecked."""
+    from bot.keyboards.admin_fallback import name_tag
+
+    lines = [title, "", t("fb_cand_intro"), ""]
+    if not candidates:
+        lines.append(t("fb_cand_none"))
+    for candidate in candidates:
+        mark = "⬜" if name_tag(candidate.name) in unchecked else "☑️"
+        why = "; ".join(
+            t(reason, relays=h(", ".join(candidate.relays))) if reason == "fb_cand_why_relay" else t(reason)
+            for reason in candidate.reasons
+        )
+        lines.append(f"{mark} {code(candidate.name)} — {why}")
+    return "\n".join(lines)
+
+
+def setup_step_title(step: int) -> str:
+    return t("fb_setup_step", step=step, total=5)
+
+
+def switch_step_titles() -> list[tuple[str, str]]:
+    """The switch's steps for bot/progress.py (services.fallback.SWITCH_STEPS)."""
+    return [(key, t(f"fb_step_{key}")) for key in SWITCH_STEPS]
+
+
+def failure_keys(report: SwitchReport) -> list[str]:
+    """The i18n keys of what blocked a switch (the fix buttons are keyed by them)."""
+    if report.preflight is None:
+        return []
+    return [item.key for item in report.preflight.failures]

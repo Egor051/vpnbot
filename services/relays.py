@@ -1309,6 +1309,14 @@ class RelayService:
         await self._record_status(relay, reply)
         return reply
 
+    async def system_status(self, relay_id: int) -> AgentReply:
+        """``status`` asked by the bot itself (no actor: the fallback mode's automatic
+        switch, services/fallback_auto.py) — kept like any status answer."""
+        relay = await self._require_managed(relay_id)
+        reply = self._require_ok(await self._call(relay, "status"))
+        await self._record_status(relay, reply)
+        return reply
+
     async def poll_agent(self, relay: Relay) -> AgentCheck | None:
         """The health loop's question to a relay's agent (no actor: the bot itself).
 
@@ -1357,6 +1365,16 @@ class RelayService:
         except ServiceError:
             logger.info("Relay %s: status after update not received", relay.name)
         return reply
+
+    async def update_progress(self, actor_user_id: int, relay_id: int) -> dict[str, Any]:
+        """``update-status``: the relay's update.json as it is now — the progress of
+        a running ``update`` (its deploy's steps and tests). A light call, made next to
+        the long one; {} from an agent that does not know it."""
+        await self.users.require_superadmin(actor_user_id)
+        relay = await self._require_managed(relay_id)
+        reply = await self._call(relay, "update-status", timeout=30.0)
+        update = reply.payload.get("update") if reply.ok else None
+        return dict(update) if isinstance(update, Mapping) else {}
 
     async def change_forward(
         self, actor_user_id: int, relay_id: int, *, target_host: str, tcp: str, udp: str, allow_hub: bool = False
@@ -1431,7 +1449,10 @@ class RelayService:
 
     # ── the SSH port of a relay (docs/host-state.md#the-ssh-port) ──────────────
 
-    async def finish_ssh_port(self, actor_user_id: int, relay_id: int, *, port: int, since: int) -> AgentReply:
+    async def finish_ssh_port(
+        self, actor_user_id: int, relay_id: int, *, port: int, since: int,
+        on_progress: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> AgentReply:
         """«Подтвердить»: phase 2 of the relay's SSH port migration, proven by THIS call.
 
         The bot reaches the agent on the NEW port — directly, or through the hub with
@@ -1444,10 +1465,16 @@ class RelayService:
         await self.users.require_superadmin(actor_user_id)
         if not 1 <= port <= 65535 or since <= 0:
             raise InvalidOperation("плохой порт", key="relay_ssh_port_bad", params={"value": str(port)})
+
+        async def step(name: str, state: str) -> None:
+            if on_progress is not None:
+                await on_progress(name, state)
+
         relay = await self._claim(relay_id)
         agent = relay.agent
         assert agent is not None
         request = f"ssh-port-finish port={port} since={since}"
+        await step("probe", "run")
         try:
             client = self._require_client()
             via = None
@@ -1467,9 +1494,17 @@ class RelayService:
             {"name": relay.name, "from": agent.ssh_port, "to": port, "since": since, "ok": reply.ok,
              **({} if reply.ok else {"error": reply.error[:300]})},
         )
+        if not reply.ok:
+            await step("probe" if reply.returncode in (2, 255) else "phase2", "fail")
         self._require_ok(reply, relay)
+        await step("probe", "ok")
+        await step("phase2", "ok")
+        await step("jump", "run")
         await self.sync_hub_jump_quietly()
+        await step("jump", "ok")
+        await step("filter", "run")
         await self._status_after(actor_user_id, relay.id)
+        await step("filter", "ok")
         return reply
 
     async def keep_ssh_port(self, actor_user_id: int, relay_id: int, *, since: int, keep: bool = True) -> AgentReply:

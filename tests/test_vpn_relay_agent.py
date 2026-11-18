@@ -864,6 +864,12 @@ case "@MODE@" in
     printf '%s
 ' "===== DEPLOY OK (relay) =====" "[deploy:warn upstream_preexisting] upstream unreachable before and after (pre-existing): TCP connect 203.0.113.5:443" "[deploy:result ok]"
     exit 0 ;;
+  progress)
+    "${G[@]}" -c advice.detachedHead=false checkout -q --detach "${DEPLOY_REF}^{commit}"
+    printf '%s\n' "[deploy:step 1/8 preflight]" "[deploy:step 3/8 tests]" "[deploy:tests total=10]" "....."
+    sleep 3
+    printf '%s\n' "....." "[deploy:step 8/8 verify]" "===== DEPLOY OK (relay) =====" "[deploy:result ok]"
+    exit 0 ;;
   binary)
     # Not UTF-8: the agent must not crash on it (the bot would show a stale line).
     printf 'bad byte \xff\xfe here\n[deploy][FAIL] stopped\n' >&2
@@ -1195,3 +1201,24 @@ def test_set_refuses_a_forwarded_port(host: Host) -> None:
     rc, payload = host.run("ssh-port-set port=443")
     assert rc == 2 and "forwarded" in payload["error"]
     assert host.env_path.read_text(encoding="utf-8") == before
+
+
+
+def test_update_writes_its_progress_while_it_runs_and_update_status_reads_it(repo_host: tuple[Host, Path]) -> None:
+    """D: update.json carries the deploy's steps and tests while it runs (written at most
+    every 2 s); `update-status` answers it, with no lock, next to the running update."""
+    host, _ = repo_host
+    rc, payload = _run_update(host, "progress")
+    assert rc == 0 and payload["update"]["state"] == "succeeded"
+    rc, status = host.run("update-status")
+    assert rc == 0 and status["update"]["state"] == "succeeded"
+    # The running state seen mid-way is gone now; the progress the bot read then is
+    # what deploy_progress made of the output so far:
+    assert agent.deploy_progress("[deploy:step 3/8 tests]\n[deploy:tests total=10]\n.....\n")["tests"] == {
+        "done": 5, "total": 10}
+
+
+def test_update_status_needs_the_pairing(host: Host) -> None:
+    host.pair()
+    rc, payload = host.run("update-status")
+    assert rc == 3 and "not paired" in payload["error"]

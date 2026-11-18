@@ -220,6 +220,15 @@ A thin wrapper around the one supported redeploy path, `scripts/redeploy.sh`:
   runs (`rolled_back`). No report — deploy.sh stopped before Phase 2 (nothing changed)
   or never finished — is `failed`: read the log.
 
+**Progress.** The plan lists the deploy's steps ⚪ (preflight, fetch, tests, checks, backup,
+install, restart, verify) under «✅ Применить». While `CHECK=1` and the deploy run, the helper reads
+redeploy.sh's output as it comes and writes a `deploy` event into the status file every 2 s
+(`deploy_progress` of the [step markers](deployment.md#step-and-result-markers): each step's state
+and the tests — done of `[deploy:tests total=N]`); the bot's message shows ⚪ 🔄 ✅ ❌ ⏭, «N/M» and
+the percentage, edited at most every 3 s. The deploy restarts the bot: the message id is in
+`wizard_runs`, the new process reads the same status file — fed from the deploy's output — and
+edits the same message on, then closes it with the result (✅, or ❌ with the cause below).
+
 A failure — of the plan's `CHECK=1` or of the deploy — shows **its cause**, not just «failed»:
 the reason deploy.sh reported in its [result line](deployment.md#step-and-result-markers)
 (another deploy runs, `git fetch`, no ensurepip / test venv, the tests, a Phase 1 gate, a
