@@ -220,6 +220,15 @@ A thin wrapper around the one supported redeploy path, `scripts/redeploy.sh`:
   runs (`rolled_back`). No report — deploy.sh stopped before Phase 2 (nothing changed)
   or never finished — is `failed`: read the log.
 
+A failure — of the plan's `CHECK=1` or of the deploy — shows **its cause**, not just «failed»:
+the reason deploy.sh reported in its [result line](deployment.md#step-and-result-markers)
+(another deploy runs, `git fetch`, no ensurepip / test venv, the tests, a Phase 1 gate, a
+Phase 2 step that was rolled back, …) in plain words, the step it stopped in, the lines of the
+deploy log that tell it and the log's path on the server (`/root/deploy-<ts>.log`). The
+helper's events carry `reason`, `fail_step`, `excerpt` and `deploy_log`; the classifier is the
+DEPLOY VERDICT block it shares with the relay agent. A deploy that succeeded with a finding
+(`[deploy:warn …]`) shows it under the report.
+
 The wizard calls `redeploy.sh` with `REDEPLOY_ATTACH=pipe`: `systemd-run --wait --pipe`
 instead of `--pty` (there is no terminal) under `set -o pipefail`, so the wrapper waits
 and exits with deploy.sh's code. The verdict is still read from the report text, as an

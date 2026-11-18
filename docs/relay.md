@@ -369,7 +369,10 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   tags, pick the [revision to deploy](#which-revision-a-relay-deploys) — the newest release by
   default, forward only — and hand over to THAT revision's `deploy.sh`; the
   same ruff / compileall / pytest gate on it as on the main server (a test venv is
-  built under `/var/lib/vpn-bot-deploy/`, so the relay needs `python3-venv` and ~1 GiB free),
+  built under `/var/lib/vpn-bot-deploy/`, so the relay needs `python3-venv` — `deploy.sh` installs
+  `python3.X-venv` itself when `ensurepip` is missing ([deployment.md](deployment.md#ensurepip)) —
+  and ~1 GiB free; a fully green `CHECK=1` lets the deploy right after it skip the tests:
+  [the Phase 1 stamp](deployment.md#the-phase-1-stamp)),
   `vpn-relay-apply check --dry-run` from the checkout, the relay's pre-state (including the
   runtime `nf_conntrack_max` and `nf_conntrack_tcp_timeout_established`), every unit of the
   relay's [unit set](#the-units-a-relay-deploy-installs) compared with its `deploy/relay/` copy
@@ -394,7 +397,17 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   main's probe here), `start` a timer that is not active;
   verify with `vpn-relay-apply check` and **exactly one DNAT per forwarded port in the whole
   ruleset** (a second one in another table — `/etc/nftables.conf` at boot, say — would race the
-  relay's; the installer always checked it). Around the host files the [SSH port](host-state.md#the-ssh-port)
+  relay's; the installer always checked it). **An upstream that did not answer before the deploy
+  either does not roll it back**: when the only failures of the verify's `check` are the upstream
+  probe's (`FAIL: TCP connect …` / `FAIL: TLS handshake …`, exit 13/14 — the tables, the input
+  filter and the sysctls passed) and every one of them was among the failures of Phase 1's check
+  of the live relay (the same address and ports), the deploy is DEPLOY OK with a `WARN`
+  `upstream unreachable before and after (pre-existing)` and the marker
+  `[deploy:warn upstream_preexisting]` — the main server blocked on the relay's path (TSPU) is
+  something no deploy can cause or fix. Any other failure, an upstream that answered before, or
+  another address or port than Phase 1 saw rolls back as always (`reason=upstream` for the
+  upstream's). The verdict is read from the FAIL lines, like the agent's
+  `only_input_filter_failures`: `check` exits with its FIRST failure only. Around the host files the [SSH port](host-state.md#the-ssh-port)
   moves when `SSH_PORT` asks for it (phase 1: both ports; the reload of `vpn-relay` then lets
   them in and main's probe confirms them); right after DEPLOY OK `vpn-bot-ssh-port.service` looks
   for the proof once, so the relay usually finishes the migration in the same run.
@@ -799,7 +812,7 @@ line, extra words, an argv, an interactive login — is refused with exit 2 befo
 | `hello <token>` | Complete the pairing; answers the relay's facts. The only request before pairing. |
 | `status` | Facts: target, ports, the live DNAT target, what the name resolves to now, `ip_forward`, the units (`vpn-relay.service` and every timer of the set below), the ssh ports, the egress source address, the checkout, the last update, `vpn-relay-apply check`, `vpn-relay-apply input-status` (`input_status`) and, on a hub, its jump line (`jump`: the relays it opens, the key's fingerprint). |
 | `apply target=<dns name> tcp=<ports> udp=<ports>` | Re-point / re-port: refused for a name that is not a name or does not resolve on the relay, a port outside 1..65535, more than 8, a TCP port sshd listens on. Rewrites only `RELAY_UPSTREAM_HOST` / `RELAY_FORWARD_*`, applies, checks; puts `.env` back and re-applies when the ruleset or the check (table, sysctls, the upstream not answering) fails. |
-| `update` | In a transient unit (`systemd-run --wait`): fetch the release tags, pick the newest release ([the same rule as the deploy](#which-revision-a-relay-deploys)) — only forward, never backwards or sideways — and run the relay's deploy for it: `scripts/redeploy.sh` with `DEPLOY_REF=<tag>` (that tag's `deploy.sh`, in its own transient unit, log `/root/deploy-<ts>.log`): the pytest gate, helpers, units and host files, the reload of vpn-relay, the checks; `deploy.sh` rolls back by itself. The agent never checks anything out. The result (`running` / `noop` / `failed` / `succeeded`, `from_commit`, `to_commit`, `release`, `log`) is in `/var/lib/vpn-relay/update.json` and in `status`. Minutes: the agent waits up to 45 minutes. |
+| `update` | In a transient unit (`systemd-run --wait`): fetch the release tags, pick the newest release ([the same rule as the deploy](#which-revision-a-relay-deploys)) — only forward, never backwards or sideways — and run the relay's deploy for it: `scripts/redeploy.sh` with `DEPLOY_REF=<tag>` (that tag's `deploy.sh`, in its own transient unit, log `/root/deploy-<ts>.log`): the pytest gate, helpers, units and host files, the reload of vpn-relay, the checks; `deploy.sh` rolls back by itself. The agent never checks anything out. The result (`running` / `noop` / `failed` / `succeeded`, `from_commit`, `to_commit`, `release`, `log`; for a failure `reason`, `step`, `excerpt` — the cause deploy.sh reported in its [result line](deployment.md#step-and-result-markers), its step and the lines that tell it; for a success `warnings`) is in `/var/lib/vpn-relay/update.json` and in `status`; a failed `update` answers with the whole result, and the bot shows the cause, the step, those lines and the log path instead of «the relay refused». Minutes: the agent waits up to 45 minutes. |
 | `uninstall` | In a transient unit: the units of the set below stopped and removed (timers first, `vpn-relay.service` last), both tables deleted, the sysctl file removed and `ip_forward` back to what it was before the install, the helpers, `/etc/vpn-relay`, `/var/lib/vpn-relay`, the checkout (when the installer created it), the agent's key line and the jump line removed. The adoption backup stays. Refused on a host without the installer's `/etc/vpn-relay/install.json`. |
 | `input-confirm` | Runs `vpn-relay-apply input-confirm` as a direct child — the bot's ssh session (a new one) is among its ancestors, which is the proof that check wants ([dead-man](#keeping-access-the-dead-man-and-input-confirm)). Answers the helper's lines and the new `input-status`. Takes no agent lock: the filter waits for its confirmation exactly while `update` holds it. |
 | `jump key=<ed25519 blob> open=<host>:<port>[,…]` | A hub: write the bot's ONE jump line in root's authorized_keys (`restrict,port-forwarding,permitopen="<host>:<port>"[,…],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump`) — [below](#managing-the-ru-relays-through-the-hub). A DNS name or IPv4 (not loopback, link-local, multicast), port 1..65535, unique, at most 32; a key that already has another line in the file (the agent's own) is refused; refused while `sshd -T` allows remote forwarding (not `allowtcpforwarding local`). Every other line stays byte-identical. Its own lock, so a hub's `update` does not hold it up. |

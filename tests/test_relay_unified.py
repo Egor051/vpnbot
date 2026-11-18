@@ -1042,3 +1042,38 @@ async def test_the_repository_refuses_to_erase_the_uninstall_mark(env: Env) -> N
     assert not await env.repo.record_agent_status(relay.id, {"agent": "1", "check": {"rc": 0}}, now="t2", agent_version="1")
     stored = await env.relay(relay.id)
     assert stored.agent is not None and stored.agent.last_status == {"agent": "1", "uninstalled_at": "t1"}
+
+
+# ── «Обновить агент»: a failed deploy shows its cause, not «relay отказал» (A4) ──
+
+
+async def test_a_failed_update_shows_the_cause_step_lines_and_log(prod: Env) -> None:
+    issued = await prod.service.issue_attach(ADMIN, 1, target_host=TARGET)
+    await prod.service.complete(ADMIN, issued.pairing.id, RU1_IP)
+    prod.client.replies["update"] = AgentReply(4, {
+        "ok": False, "error": "the deploy of v9.1.0 stopped before any change (exit 1): …",
+        "update": {"state": "failed", "reason": "no_venv", "step": "tests",
+                   "excerpt": ["The virtual environment was not created successfully because ensurepip is not",
+                               "    apt install python3.12-venv"],
+                   "log": "/root/deploy-20261118T120000Z.log"},
+    })
+    cb = Callback("admin:relay:1:ag:up")
+    await ui.relay_agent_update(cb, fsm(), _services(prod))  # type: ignore[arg-type]
+    text = cb.message.edits[-1]
+    assert t("relay_agent_update_failed_cause") in text
+    assert t("deploy_reason_no_venv") in text and t("deploy_step_tests") in text
+    assert "apt install python3.12-venv" in text and "/root/deploy-20261118T120000Z.log" in text
+    assert t("relay_agent_refused", error="").split(":")[0] not in text
+
+
+async def test_a_successful_update_shows_the_deploys_warning(prod: Env) -> None:
+    issued = await prod.service.issue_attach(ADMIN, 1, target_host=TARGET)
+    await prod.service.complete(ADMIN, issued.pairing.id, RU1_IP)
+    prod.client.replies["update"] = AgentReply(0, {"ok": True, "update": {
+        "state": "succeeded", "message": "updated to v9.1.0",
+        "warnings": [{"code": "upstream_preexisting", "text": "TCP connect 203.0.113.5:443"}],
+    }})
+    cb = Callback("admin:relay:1:ag:up")
+    await ui.relay_agent_update(cb, fsm(), _services(prod))  # type: ignore[arg-type]
+    text = cb.message.edits[-1]
+    assert "updated to v9.1.0" in text and t("deploy_warn_upstream_preexisting") in text

@@ -18,6 +18,7 @@
 #   sudo ALLOW_BACKEND_CONFIG_DRIFT=1 bash scripts/redeploy.sh   # forward a deploy.sh knob
 #   sudo REDEPLOY_ATTACH=pipe bash scripts/redeploy.sh   # no terminal: wait, exit with deploy.sh's code
 #   sudo DEPLOY_REF=main bash scripts/redeploy.sh   # a relay: follow main instead of the newest release
+#   sudo FORCE_TESTS=1 bash scripts/redeploy.sh     # run the tests even when a CHECK=1 run just passed them
 #
 # deploy.sh's gate bypasses (ALLOW_*) and tuning timeouts go on the same command
 # line, AFTER `sudo` (sudo drops the caller's environment). Only the names in
@@ -67,6 +68,8 @@ REDEPLOY_ATTACH="${REDEPLOY_ATTACH:-pty}"
 #   * The tuning timeouts an operator actually sets.
 #   * DEPLOY_REF: which revision a relay deploys (deploy.sh refuses it on the main
 #     server unless it is `main`).
+#   * FORCE_TESTS / PHASE1_STAMP_TTL: the Phase 1 stamp (deploy.sh, «The Phase 1
+#     stamp»): FORCE_TESTS=1 runs the tests although a `CHECK=1` run just passed them.
 # An ALLOW_* that is set but NOT listed (a typo, or a new deploy.sh flag nobody
 # added here) used to be dropped silently, and deploy.sh then stopped on the very
 # gate it was meant to open. check_allow_env refuses to run instead.
@@ -79,6 +82,8 @@ DEPLOY_ENV_PASSTHROUGH=(
   SCHEMA_WAIT_TIMEOUT
   HY2_AUTH_BIND_TIMEOUT
   DEPLOY_REF
+  FORCE_TESTS
+  PHASE1_STAMP_TTL
 )
 deploy_env=()
 

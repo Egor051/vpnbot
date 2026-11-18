@@ -382,3 +382,85 @@ the list).
 > postflight** tool for the non-root privilege-helper model. In root+api mode it reports
 > `FAIL: User=root`, which is expected — skip it and use `systemctl status vpn-bot` plus the
 > bot's admin diagnostics instead. See [Operations → Healthcheck tool](operations.md).
+
+## `deploy.sh`: the test gate, the Phase 1 stamp and the step markers
+
+Both roles run the same gate in Phase 1 — ruff, compileall and the whole pytest suite of the
+revision being deployed, in a test venv under `/var/lib/vpn-bot-deploy/` (never the prod venv).
+
+### ensurepip
+
+`python3 -m venv` needs `ensurepip`, which Debian and Ubuntu ship apart from `python3`, in
+`python3.X-venv`. A fresh Ubuntu 24.04 relay stopped there («ensurepip is not available … apt
+install python3.12-venv»): `scripts/install.sh --relay` never installed `python3-venv` (its relay
+package list was `git ca-certificates curl nftables`; the main server's mode has always installed
+it). Now:
+
+- before the test venv is built, `deploy.sh` checks `python3 -m ensurepip --version`; when it is
+  missing it installs `python3.X-venv` for the `python3` it found (`apt-get -y`,
+  `DEBIAN_FRONTEND=noninteractive`, one `apt-get update` and a retry when the package index does
+  not know it) and checks again — `CHECK=1` included: the gate cannot run without it and nothing of
+  the deploy has changed yet. When it cannot be installed, the deploy stops right there with the
+  command to run (`apt install python3.12-venv`), `reason=no_venv`;
+- `install.sh --relay` installs `python3-venv` with the rest of the relay's packages.
+
+### The Phase 1 stamp
+
+On a relay with one vCPU the gate takes ~13 minutes, and the recommended flow ran it twice:
+`CHECK=1`, then the deploy. A **fully green** `CHECK=1` run — the tests passed and nothing a real
+deploy stops on was reported (unit or backend drift, host files, ssh, ufw, host invariants, …) —
+writes `/var/lib/vpn-bot-deploy/phase1-ok` (root, 0600, written atomically):
+
+```
+version=1
+sha=<the commit tested>
+constraints=<sha256 of constraints-hashed.txt + constraints-dev-hashed.txt>
+python=<python3 version>
+role=<main|relay>
+at=<epoch>
+```
+
+A real deploy of the same commit, constraints, `python3` and role within `PHASE1_STAMP_TTL`
+seconds (default 7200) skips ruff / compileall / pytest and says on which stamp:
+
+```
+[deploy:skip tests] Phase 1 stamp: commit 61f291aeda88, role relay, written 2026-11-18 10:02:11 UTC (4 min ago)
+[deploy] tests: SKIPPED — the Phase 1 stamp /var/lib/vpn-bot-deploy/phase1-ok vouches for them (…); FORCE_TESTS=1 runs them anyway
+```
+
+Every other Phase 1 gate runs again as always — the stamp vouches for the tests and nothing else.
+A stamp that is not a regular file of root with mode 0600 is ignored with a `WARN`.
+`FORCE_TESTS=1` always runs the tests; `PHASE1_STAMP_TTL=0` disables the stamp. Both are forwarded
+by `redeploy.sh`:
+
+```bash
+sudo FORCE_TESTS=1 bash scripts/redeploy.sh
+```
+
+A relay deploying a release older than the stamp runs that release's `deploy.sh` (the handover),
+which knows no stamp: it tests, as before.
+
+### Step and result markers
+
+`deploy.sh` prints machine-readable lines, never translated:
+
+| Line | When |
+|---|---|
+| `[deploy:step <i>/<n> <name>]` | a step begins: `preflight`, `fetch`, `tests`, `checks`, `backup`, `install`, `restart`, `verify` (`CHECK=1`: the first four) |
+| `[deploy:skip <name>] <why>` | a step is skipped (the tests, on a stamp) |
+| `[deploy:warn <code>] <text>` | a finding of a deploy that succeeded (`upstream_preexisting`: [relay.md](relay.md#what-scriptsredeploysh-does-on-a-relay)) |
+| `[deploy:result ok]` / `[deploy:result noop]` | green / nothing to deploy |
+| `[deploy:result failed step=<name> reason=<class>]` | why it stopped — on every way out: a `FAIL`, an error under `set -e`, a rollback |
+
+`<class>` is one of `busy` (another deploy holds the lock), `fetch`, `preflight` (a precondition
+before the tests), `no_venv` (no ensurepip / the test venv cannot be built), `tests`, `checks` (a
+Phase 1 gate), `upstream` (a relay: the upstream stopped answering after the restart), `rolled_back`,
+`failed`. A relay's handover starts the target's own `deploy.sh`, so the steps begin again: a reader
+takes the last step line as the current one.
+
+The bot reads them: «⬆️ Обновить агент» of a relay ([relay.md](relay.md#the-agent-vpn-relay-agent))
+and «⬆️ Обновить бота» of the main server ([wizard.md](wizard.md#️-обновить-бота)) show the cause in
+plain words, the step, the lines of the deploy log that tell it and where the full log is — not a bare
+«failed». Both readers carry ONE classifier (the DEPLOY VERDICT block of `scripts/vpn-relay-agent` and
+`scripts/wizard/vpn-bot-wizard-update`, pinned identical by `tests/test_deploy_verdict.py`); a
+`deploy.sh` that predates the markers is classified from its text.

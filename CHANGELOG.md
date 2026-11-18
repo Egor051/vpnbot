@@ -4,6 +4,66 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A relay whose upstream did not answer BEFORE the deploy no longer rolls the deploy back
+  (docs/relay.md#what-scriptsredeploysh-does-on-a-relay).** ru1, v3.2.0: the main server is blocked on the
+  relay's path (TSPU); Phase 1's `vpn-relay-apply check` of the live relay already exited 13 (TCP/TLS to
+  upstream:443 timed out), the deploy printed «fix that first», went into Phase 2, got the same 13 in the
+  verify and rolled back — a failure no deploy can cause or fix. The verify now reads the check's FAIL lines
+  (`check` exits with its FIRST failure only — the agent's `only_input_filter_failures` rule) and classifies
+  them (`upstream`, `input`, `table`, `forward`, `conntrack`, `other`): when the exit is 13/14, every FAIL
+  line is the upstream probe's and every such failure (`TCP connect <ip>:<port>` / `TLS handshake <ip>:443
+  sni=<name>`) was already among Phase 1's, the deploy is **DEPLOY OK** with a `WARN` «upstream unreachable
+  before and after (pre-existing)», the verify line says so and `[deploy:warn upstream_preexisting]` carries
+  it to the bot. A new failure, a failure of the tables / sysctls / input filter, or an upstream address or
+  port Phase 1 did not see (a target or port the deploy changed) rolls back as before (`reason=upstream` when
+  it is the upstream's). Phase 1's texts for exit 13/14 no longer promise a rollback.
+- **A fresh relay without `ensurepip` no longer stops in Phase 1 (docs/deployment.md#ensurepip).** he1
+  (Ubuntu 24.04): «ensurepip is not available … apt install python3.12-venv». `install.sh --relay` never
+  installed `python3-venv` (its relay list was `git ca-certificates curl nftables`; only the main server's
+  mode had it). `deploy.sh` now checks `python3 -m ensurepip --version` before building the test venv and
+  installs `python3.X-venv` for the `python3` it found (`apt-get -y`, noninteractive, one `apt-get update`
+  and a retry), or stops right there with the command to run (`reason=no_venv`) before anything changed;
+  `install.sh --relay` installs `python3-venv`.
+- **An update from the bot shows why it failed (docs/deployment.md#step-and-result-markers).** «⬆️ Обновить
+  агент» of a relay said «Relay отказал: <the last 3 lines, cut at 300 characters>» and «⬆️ Обновить бота»
+  «no ROLLBACK REPORT … read the run log». `deploy.sh` now prints machine-readable markers — `[deploy:step
+  i/n name]` (preflight, fetch, tests, checks, backup, install, restart, verify), `[deploy:skip …]`,
+  `[deploy:warn code] …`, and on every way out `[deploy:result ok|noop]` or `[deploy:result failed
+  step=<step> reason=<class>]` (`busy`, `fetch`, `preflight`, `no_venv`, `tests`, `checks`, `upstream`,
+  `rolled_back`, `failed`; a die, an errexit through the EXIT trap, both rollbacks). The relay agent's
+  `update` and the wizard's `update` read them with ONE classifier (the DEPLOY VERDICT block both carry
+  verbatim; text heuristics for a `deploy.sh` that predates the markers, `timeout` for a deploy that
+  outlived the wait) and hand the bot `reason`, `step`, `excerpt` (the rollback's reason, `FAIL` lines,
+  failed tests and pytest's summary, apt's hint), `log` and `warnings`; a failed `update` answers with that
+  whole result (`Failed(extra=)`), and the bot renders the cause in plain words, the step, those lines and
+  the log path (`RelayUpdateFailed`, `bot/deploy_views.py`, new `services/deploy_result.py` validating what
+  arrives). The agent decodes the deploy's output with `errors="replace"` (a non-UTF-8 byte crashed
+  `update`, and the bot showed the stale «deploying vX» line as the cause) and an update unit that ended
+  without a verdict says so.
+- **The bot's update path and `redeploy.sh` hand Phase 1 the same environment.** Reproduced by code: the
+  only input `deploy.sh` gets differently on the two paths is `DEPLOY_REF=<tag>` — the agent's `update`
+  sets it, an operator's `sudo bash scripts/redeploy.sh` does not — and with it `DEPLOY_HANDOVER_SHA` after a
+  relay's handover; both reached the Phase 1 pytest run, because `tests/conftest.py` stripped only
+  `PHASE1_ONLY`, `FORCE` and the `ALLOW_*` (the host-only class of #239/#246/#318). The scrub now covers
+  `DEPLOY_REF`, `DEPLOY_HANDOVER_SHA` and the new `FORCE_TESTS` / `PHASE1_STAMP` / `PHASE1_STAMP_TTL`, and
+  the parity test reads case-arm assignments too.
+
+### Added
+
+- **The Phase 1 stamp — a deploy right after a green `CHECK=1` skips the tests
+  (docs/deployment.md#the-phase-1-stamp).** On a one-vCPU relay the pytest gate takes ~13 minutes and ran
+  twice. A fully green `PHASE1_ONLY` run (tests passed, nothing a real deploy stops on reported —
+  `PHASE1_WOULD_STOP` collects every report-only stop) writes `/var/lib/vpn-bot-deploy/phase1-ok` (sha,
+  constraints hash, python version, role, time; atomic, root 0600); a real deploy of the same within
+  `PHASE1_STAMP_TTL` (default 7200 s) skips ruff / compileall / pytest and logs which stamp it relied on
+  (`[deploy:skip tests] …`). Every other Phase 1 gate still runs. `FORCE_TESTS=1` always tests;
+  `PHASE1_STAMP_TTL=0` disables the stamp; a stamp not owned by the deploy's uid with mode 0600, or a
+  symlink, is ignored. `redeploy.sh` forwards both knobs.
+
 ## [3.2.0](https://github.com/Egor051/vpnbot/releases/tag/v3.2.0) — 2026-11-18
 
 ### Changed

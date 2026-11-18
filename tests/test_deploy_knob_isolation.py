@@ -49,8 +49,12 @@ CHILD_TIMEOUT = 75
 # Same pattern as tests/test_redeploy_env_passthrough.py (digits allowed, so a
 # future ALLOW_V2_FOO is not truncated into a different name).
 ALLOW_RE = re.compile(r"\bALLOW_[A-Z0-9_]+")
-# The run-mode knobs, read the way deploy.sh reads every knob: NAME="${NAME:-...}".
-RUN_MODE_KNOBS = ("PHASE1_ONLY", "FORCE")
+# The run-mode knobs, read the way deploy.sh reads every knob: NAME="${NAME:-...}" —
+# DEPLOY_REF / DEPLOY_HANDOVER_SHA (the relay's revision; the agent's `update` sets the
+# first, a relay's handover the second) and the Phase 1 stamp's knobs among them.
+RUN_MODE_KNOBS = (
+    "PHASE1_ONLY", "FORCE", "FORCE_TESTS", "PHASE1_STAMP", "PHASE1_STAMP_TTL", "DEPLOY_REF", "DEPLOY_HANDOVER_SHA",
+)
 
 # Set in the child's environment, the probe below writes the names it sees there.
 PROBE_OUT = "VPNBOT_TEST_ENV_PROBE_OUT"
@@ -62,7 +66,8 @@ PRISTINE_FAIL = "tests/test_deploy_pristine.py::test_a_key_no_repo_file_carries_
 
 
 def _read_env_assignment(text: str, name: str) -> bool:
-    return re.search(rf'^\s*{name}="\$\{{{name}:-', text, re.MULTILINE) is not None
+    # A plain assignment, or one inside a `case` arm (`  1) NAME="${NAME:-...}" ;;`).
+    return re.search(rf'^\s*(?:\S+\)\s+)?{name}="\$\{{{name}:-', text, re.MULTILINE) is not None
 
 
 def _child_pytest(tmp_path: Path, node: str, **env: str) -> subprocess.CompletedProcess[str]:

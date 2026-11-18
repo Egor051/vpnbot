@@ -988,3 +988,44 @@ async def test_an_interrupted_delete_can_be_resumed_without_a_second_uninstall(w
     assert second.deleted and second.uninstalled
     assert sum(1 for c in world.client.calls if c["request"] == "uninstall") == uninstalls, "no second uninstall"
     assert await world.relay_repo.get_by_id(relay_id) is None
+
+
+# ── `update`: the cause of a failed deploy reaches the bot (A4) ───────────────
+
+
+async def test_a_failed_update_raises_its_cause_not_a_refusal(world: World) -> None:
+    from services.relays import RelayUpdateFailed
+
+    relay_id = await _paired(world)
+    world.client.replies["update"] = AgentReply(4, {
+        "ok": False, "error": "the deploy of v9.1.0 failed and rolled back (exit 1): …",
+        "update": {"state": "failed", "reason": "upstream", "step": "verify",
+                   "excerpt": ["[deploy][WARN] vpn-relay-apply check failed after the restart (exit 13: …)"],
+                   "log": "/root/deploy-20261118T120000Z.log", "message": "the deploy of v9.1.0 failed"},
+    })
+    with pytest.raises(RelayUpdateFailed) as caught:
+        await world.service.update_agent(ADMIN, relay_id)
+    failure = caught.value.failure
+    assert (failure.reason, failure.step, failure.log) == ("upstream", "verify", "/root/deploy-20261118T120000Z.log")
+    assert failure.excerpt and "exit 13" in failure.excerpt[0]
+    assert relay_id not in world.service._busy
+
+
+async def test_an_old_agents_failed_update_is_still_a_deploy_failure(world: World) -> None:
+    """An agent from before the cause fields answers exit 4 with its message only."""
+    from services.relays import RelayUpdateFailed
+
+    relay_id = await _paired(world)
+    world.client.replies["update"] = AgentReply(4, {"ok": False, "error": "the deploy of v9.1.0 stopped before any change"})
+    with pytest.raises(RelayUpdateFailed) as caught:
+        await world.service.update_agent(ADMIN, relay_id)
+    assert caught.value.failure.reason == "failed"
+    assert caught.value.failure.message == "the deploy of v9.1.0 stopped before any change"
+
+
+async def test_a_refused_update_stays_a_refusal(world: World) -> None:
+    relay_id = await _paired(world)
+    world.client.replies["update"] = AgentReply(5, {"ok": False, "error": "another agent call is running"})
+    with pytest.raises(RelayAgentError) as caught:
+        await world.service.update_agent(ADMIN, relay_id)
+    assert caught.value.key == "relay_agent_refused" and not hasattr(caught.value, "failure")

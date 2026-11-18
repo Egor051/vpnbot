@@ -163,7 +163,11 @@ readonly RELAY_AGENT_COMMAND="/usr/local/sbin/vpn-relay-agent"
 RELAY_MIN_FREE_MB=300
 # Accepted clock skew between the main server and the relay for the code's expiry.
 RELAY_CODE_SKEW=300
-APT_RELAY_PACKAGES=(git ca-certificates curl nftables)
+# python3-venv: a relay's deploy.sh (Phase 1) builds its test venv with `python3 -m
+# venv`, which needs ensurepip — Debian/Ubuntu ship it apart, in python3.X-venv, and a
+# fresh Ubuntu 24.04 relay stopped there ("ensurepip is not available"). deploy.sh
+# installs it itself on a relay this installer predates (ensure_python_venv).
+APT_RELAY_PACKAGES=(git ca-certificates curl nftables python3-venv)
 
 APT_PACKAGES=(git python3-venv ca-certificates curl)
 APT_OPTIONAL_PACKAGES=(qrencode)

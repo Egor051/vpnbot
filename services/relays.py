@@ -87,6 +87,7 @@ from models.dto import Relay, RelayAgent, RelayPairing
 from models.enums import AuditEntityType, VpnKeyType
 from repositories.relays import AGENT_UNINSTALLED_KEY, RelayRepository, RelayUsage
 from services.audit import AuditService
+from services.deploy_result import DeployFailure, deploy_failure_from
 from services.errors import InvalidOperation, NotFound, ServiceError
 from services.notes import MAX_NOTE_LENGTH, normalize_note
 from services.relay import RelayCatalog, RelaySnapshot, basic_has_visible_server, select_hub
@@ -379,6 +380,18 @@ def warn_legacy_relay_env(settings: Settings) -> bool:
 
 class RelayAgentError(ServiceError):
     """The agent on the relay refused or failed a request (its reason in params)."""
+
+
+class RelayUpdateFailed(RelayAgentError):
+    """``update`` failed on the relay: :attr:`failure` says why (the cause deploy.sh
+    reported, the step, the lines that tell it, the deploy log on the relay)."""
+
+    def __init__(self, failure: DeployFailure) -> None:
+        super().__init__(
+            f"relay update: {failure.reason}: {failure.message}", key="relay_agent_refused",
+            params={"error": failure.message[:300] or failure.reason},
+        )
+        self.failure = failure
 
 
 @dataclass(frozen=True, slots=True)
@@ -1321,6 +1334,14 @@ class RelayService:
             self._busy.discard(relay.id)
         await self._audit(actor_user_id, "relay_agent_update", relay.id,
                           {"name": relay.name, "ok": reply.ok, "result": reply.payload.get("update") or reply.error})
+        if not reply.ok:
+            update = reply.payload.get("update")
+            if reply.returncode == 4 or isinstance(update, Mapping):
+                # The deploy itself failed: the cause it reported, not "the relay refused".
+                # An agent older than the cause fields says only its message.
+                raise RelayUpdateFailed(
+                    deploy_failure_from(update if isinstance(update, Mapping) else None, message=reply.error)
+                )
         self._require_ok(reply)
         try:
             status = await self._call(relay, "status")

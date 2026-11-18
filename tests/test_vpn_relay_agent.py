@@ -842,6 +842,30 @@ case "@MODE@" in
     printf '%s
 ' "[deploy] INFO: the checkout (0123) is ahead of latest release ${DEPLOY_REF} (abc) — a relay never goes backwards: nothing to deploy"
     exit 0 ;;
+  venv)
+    # A deploy.sh that predates the result markers, stopping on errexit in its venv build.
+    printf '%s
+' "[deploy] building test venv /var/lib/vpn-bot-deploy/.venv-test (constraints changed or venv absent)" \
+      "The virtual environment was not created successfully because ensurepip is not" \
+      "available.  On Debian/Ubuntu systems, you need to install the python3-venv" \
+      "    apt install python3.12-venv" "Failing command: /var/lib/vpn-bot-deploy/.venv-test/bin/python3" >&2
+    exit 1 ;;
+  tests)
+    printf '%s
+' "[deploy:step 3/8 tests]" "FAILED tests/test_x.py::test_y - assert 0 == 1" \
+      "=========== 1 failed, 5600 passed in 780.12s (0:13:00) ===========" \
+      "[deploy][FAIL] Phase 1 gate: pytest failed on tag v1.1.0 (above) — nothing was changed" \
+      "[deploy:result failed step=tests reason=tests]" >&2
+    exit 1 ;;
+  warn)
+    "${G[@]}" -c advice.detachedHead=false checkout -q --detach "${DEPLOY_REF}^{commit}"
+    printf '%s
+' "===== DEPLOY OK (relay) =====" "[deploy:warn upstream_preexisting] upstream unreachable before and after (pre-existing): TCP connect 203.0.113.5:443" "[deploy:result ok]"
+    exit 0 ;;
+  binary)
+    # Not UTF-8: the agent must not crash on it (the bot would show a stale line).
+    printf 'bad byte \xff\xfe here\n[deploy][FAIL] stopped\n' >&2
+    exit 1 ;;
 esac
 exit 99
 """
@@ -994,3 +1018,55 @@ def test_update_unit_and_bot_wait_long_enough_for_a_deploy() -> None:
     assert "timeout=UPDATE_TIMEOUT - 120" in text
     assert agent.UPDATE_TIMEOUT >= 2400
     assert AGENT_UPDATE_TIMEOUT == agent.UPDATE_TIMEOUT + 60
+
+
+# --------------------------------------------------------------------------- #
+# update: the cause, for the bot (DEPLOY VERDICT — tests/test_deploy_verdict.py)
+# --------------------------------------------------------------------------- #
+def test_a_failed_update_carries_its_cause_in_the_answer(repo_host: tuple[Host, Path]) -> None:
+    """The bot shows the cause, the step and the lines that tell it — not a bare refusal."""
+    host, _ = repo_host
+    rc, payload = _run_update(host, "tests")
+    assert rc == 4
+    update = payload["update"]
+    assert update["state"] == "failed" and update["reason"] == "tests" and update["step"] == "tests"
+    assert "FAILED tests/test_x.py::test_y - assert 0 == 1" in update["excerpt"]
+    assert any("1 failed, 5600 passed" in line for line in update["excerpt"])
+    assert update["log"] == "/root/deploy-20261116T000000Z.log"
+    assert _update_state(host) == update
+
+
+def test_a_deploy_without_markers_is_classified_from_its_text(repo_host: tuple[Host, Path]) -> None:
+    """A target whose deploy.sh predates the markers (a relay updating to an older
+    release): the venv failure still reads as «no venv», with apt's hint."""
+    host, _ = repo_host
+    rc, payload = _run_update(host, "venv")
+    assert rc == 4
+    update = payload["update"]
+    assert update["reason"] == "no_venv" and update["step"] == ""
+    assert any("apt install python3.12-venv" in line for line in update["excerpt"])
+
+
+def test_a_rollback_on_the_upstream_reads_as_upstream(repo_host: tuple[Host, Path]) -> None:
+    host, _ = repo_host
+    rc, payload = _run_update(host, "rollback")
+    assert rc == 4 and payload["update"]["reason"] == "upstream"
+    assert any("vpn-relay-apply check failed after the restart" in line for line in payload["update"]["excerpt"])
+
+
+def test_a_successful_update_carries_the_deploys_warnings(repo_host: tuple[Host, Path]) -> None:
+    host, _ = repo_host
+    rc, payload = _run_update(host, "warn")
+    assert rc == 0 and payload["update"]["state"] == "succeeded"
+    assert payload["update"]["warnings"] == [{
+        "code": "upstream_preexisting",
+        "text": "upstream unreachable before and after (pre-existing): TCP connect 203.0.113.5:443",
+    }]
+
+
+def test_output_that_is_not_utf8_does_not_crash_update(repo_host: tuple[Host, Path]) -> None:
+    host, _ = repo_host
+    rc, payload = _run_update(host, "binary")
+    assert rc == 4
+    assert payload["update"]["state"] == "failed" and payload["update"]["reason"] == "checks"
+    assert "deploying v1.1.0" not in payload["error"], "never the stale running line"

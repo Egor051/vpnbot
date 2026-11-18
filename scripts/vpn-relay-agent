@@ -159,7 +159,7 @@ SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 UPDATE_TIMEOUT = 2700
 # What redeploy.sh prints when it starts deploy.sh, and the reports deploy.sh ends with.
 REDEPLOY = "scripts/redeploy.sh"
-_REDEPLOY_LOG_RE = re.compile(r"^redeploy: launching \S+ \(log: (?P<log>/\S+)\)$", re.MULTILINE)
+# (redeploy.sh's "launching ... (log: <path>)" line: _DV_LOG of the DEPLOY VERDICT block.)
 DEPLOY_OK = "===== DEPLOY OK (relay) ====="
 ROLLBACK_REPORT = "===== ROLLBACK REPORT (relay) ====="
 # RELEASE TAG RULE (scripts/deploy.sh relay_latest_release is the same rule):
@@ -208,7 +208,14 @@ class Denied(Exception):
 
 
 class Failed(Exception):
-    """The operation failed; whatever it changed was put back (exit 4)."""
+    """The operation failed; whatever it changed was put back (exit 4).
+
+    *extra* goes into the answer next to ``error`` (``update``: the whole result, so
+    the bot can show the cause, the failing step and the lines that tell it)."""
+
+    def __init__(self, message: str, extra: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.extra = dict(extra or {})
 
 
 class Busy(Exception):
@@ -323,6 +330,9 @@ def run(
             list(args),
             capture_output=True,
             text=True,
+            # A byte that is not UTF-8 in a deploy's output must not crash `update`
+            # (the bot would show its stale "running" line as the error).
+            errors="replace",
             timeout=timeout,
             env=command_env(env),
             check=False,
@@ -728,7 +738,13 @@ def cmd_update(_: dict[str, str]) -> dict[str, Any]:
         done = _transient("vpn-relay-update", "--internal-update", UPDATE_TIMEOUT)
     result = read_json(UPDATE_FILE) or {}
     if done.returncode != 0 or result.get("state") == "failed":
-        raise Failed(str(result.get("message") or tail(done.stderr) or f"update unit exit {done.returncode}"))
+        if result.get("state") != "failed":
+            # The unit ended without writing its verdict (killed, crashed): say so,
+            # never the stale "running" line as if it were the cause.
+            result = {**result, "state": "failed", "reason": "failed",
+                      "message": f"the update unit ended without a result (exit {done.returncode}): "
+                                 f"{tail(done.stderr, 3) or 'see journalctl -u vpn-relay-update'}"}
+        raise Failed(str(result.get("message") or f"update unit exit {done.returncode}"), extra={"update": result})
     return {"update": result}
 
 
@@ -910,6 +926,116 @@ def latest_release(listing: str) -> str | None:
     return max(tags, key=_release_key) if tags else None
 
 
+# --------------------------------------------------------------------------- #
+# DEPLOY VERDICT — one rule, carried VERBATIM by scripts/vpn-relay-agent (`update`)
+# and scripts/wizard/vpn-bot-wizard-update (the main server's «Обновить бота»);
+# tests/test_deploy_verdict.py pins the two blocks byte-identical, the reasons
+# against deploy.sh's DEPLOY_FAIL_REASONS and the bot's i18n.
+# --------------------------------------------------------------------------- #
+# deploy.sh's reason=<class> (its DEPLOY_FAIL_REASONS), plus the waiter's own:
+# "timeout" — the deploy did not finish while the caller waited for it.
+DEPLOY_REASONS = (
+    "busy", "fetch", "preflight", "no_venv", "tests", "checks", "upstream", "rolled_back", "failed", "timeout",
+)
+_DV_RESULT = re.compile(
+    r"\[deploy:result (?:ok|noop|failed step=(?P<step>[a-z_]{1,32}) reason=(?P<reason>[a-z_]{1,32}))\]"
+)
+_DV_WARN = re.compile(r"^\[deploy:warn (?P<code>[a-z_]{1,48})\] ?(?P<text>.*)$", re.MULTILINE)
+_DV_LOG = re.compile(r"^redeploy: launching \S+ \(log: (?P<log>/\S+)\)$", re.MULTILINE)
+_DV_PYTEST_SUMMARY = re.compile(r"^=+ .*\b[0-9]+ (?:failed|errors?)\b.* in [0-9.]+s.*=+$")
+_DV_PYTEST_NODE = re.compile(r"^(?:FAILED|ERROR) tests/")
+DV_EXCERPT_LINES = 8
+DV_EXCERPT_CHARS = 300
+
+
+def _dv_guess(lines: list[str], rc: int) -> str:
+    """The reason of a deploy.sh that printed no result line (one that predates the
+    markers), read from its text the way an operator reads it."""
+    text = "\n".join(lines)
+    if rc == 124:
+        return "timeout"
+    if "another deploy already holds" in text:
+        return "busy"
+    if "ensurepip is not available" in text or re.search(r"\bpython3\.[0-9]+-venv\b", text):
+        return "no_venv"
+    if "===== ROLLBACK REPORT" in text:
+        if re.search(r"vpn-relay-apply check failed after the restart \(exit 1[34]\b", text):
+            return "upstream"
+        return "rolled_back"
+    if any(_DV_PYTEST_SUMMARY.match(ln) or _DV_PYTEST_NODE.match(ln) for ln in lines):
+        return "tests"
+    fails = [ln for ln in lines if "[deploy][FAIL] " in ln]
+    if fails:
+        return "fetch" if "git fetch" in fails[-1] else "checks"
+    return "failed"
+
+
+def _dv_excerpt(lines: list[str]) -> list[str]:
+    """The lines an operator looks at first: the rollback's reason, deploy.sh's FAIL
+    lines, the relay check's FAIL lines, the failed tests and pytest's summary, the
+    ensurepip hint — the last DV_EXCERPT_LINES of them, each capped."""
+    picked: list[str] = []
+    for i, line in enumerate(lines):
+        rollback_reason = (
+            "[deploy][WARN] " in line and i + 1 < len(lines) and "[deploy][WARN] ROLLBACK" in lines[i + 1]
+        )
+        if (
+            rollback_reason
+            or "[deploy][FAIL] " in line
+            or "FAIL: " in line
+            or _DV_PYTEST_NODE.match(line)
+            or _DV_PYTEST_SUMMARY.match(line)
+            or "ensurepip is not available" in line
+            or re.search(r"\bapt install python3\.[0-9]+-venv\b", line)
+        ):
+            text = line.strip()[:DV_EXCERPT_CHARS]
+            if text not in picked:
+                picked.append(text)
+    return picked[-DV_EXCERPT_LINES:]
+
+
+def deploy_verdict(output: str, rc: int) -> dict[str, Any]:
+    """Why a deploy (redeploy.sh -> deploy.sh) ended as it did, for the bot.
+
+    ``{"reason", "step", "excerpt", "warnings", "log"}``: reason is one of
+    DEPLOY_REASONS, or "" when the deploy did not fail (ok, noop); step is deploy.sh's
+    step it failed in ("" when unknown); excerpt the significant lines; warnings the
+    ``[deploy:warn]`` findings of a deploy that succeeded ({"code", "text"}); log the
+    deploy log redeploy.sh named. deploy.sh's own result line decides when there is
+    one; without it the text does (a deploy.sh that predates the markers).
+    """
+    lines = [ln.rstrip() for ln in output.splitlines() if ln.strip()]
+    found = None
+    for match in _DV_RESULT.finditer(output):
+        found = match
+    reason = step = ""
+    if rc == 124:
+        reason = "timeout"
+    elif found is not None:
+        if found.group("reason") is not None:
+            reason = found.group("reason") if found.group("reason") in DEPLOY_REASONS else "failed"
+            step = found.group("step") or ""
+        elif rc != 0:
+            reason = "failed"
+    elif rc != 0:
+        reason = _dv_guess(lines, rc)
+    if not step:
+        steps = re.findall(r"\[deploy:step [0-9]+/[0-9]+ ([a-z_]{1,32})\]", output)
+        step = steps[-1] if reason and steps else ""
+    log = _DV_LOG.search(output)
+    return {
+        "reason": reason,
+        "step": step,
+        "excerpt": _dv_excerpt(lines) if reason else [],
+        "warnings": [
+            {"code": m.group("code"), "text": m.group("text").strip()[:DV_EXCERPT_CHARS]}
+            for m in _DV_WARN.finditer(output)
+        ],
+        "log": log.group("log") if log else "",
+    }
+# --- DEPLOY VERDICT (end) ---
+
+
 def _deploy_reason(output: str) -> str:
     """Why deploy.sh ended as it did, in its own words (one line, capped).
 
@@ -938,17 +1064,18 @@ def internal_update() -> int:
                                  "finished_at": int(time.time()) if state != "running" else None, **extra}, 0o644)
 
     if installer_relay() is None:
-        note("failed", "this is not a relay installed by install.sh — refusing")
+        note("failed", "this is not a relay installed by install.sh — refusing", reason="preflight")
         return 1
     note("running", "fetching release tags")
     git = ["git", "-C", str(APP_DIR)]
     old = run([*git, "rev-parse", "HEAD"], timeout=15).stdout.strip()
     if not re.fullmatch(r"[0-9a-f]{40}", old):
-        note("failed", f"{APP_DIR} is not a git checkout")
+        note("failed", f"{APP_DIR} is not a git checkout", reason="preflight")
         return 1
     fetched = run([*git, "fetch", "--quiet", "--tags", "--force", "origin"], timeout=180)
     if fetched.returncode != 0:
-        note("failed", f"git fetch failed: {tail(fetched.stderr)}", from_commit=old)
+        note("failed", f"git fetch failed: {tail(fetched.stderr)}", from_commit=old, reason="fetch",
+             excerpt=tail(fetched.stderr, 4).splitlines())
         return 1
     latest = latest_release(run([*git, *TAG_LIST], timeout=15).stdout)
     if latest is None:
@@ -959,7 +1086,8 @@ def internal_update() -> int:
         note("noop", f"already at or past {latest}", from_commit=old, release=latest)
         return 0
     if run([*git, "merge-base", "--is-ancestor", old, target], timeout=15).returncode != 0:
-        note("failed", f"{old[:12]} is not an ancestor of {latest} — not moving sideways", from_commit=old, release=latest)
+        note("failed", f"{old[:12]} is not an ancestor of {latest} — not moving sideways", from_commit=old,
+             release=latest, reason="preflight")
         return 1
     redeploy = APP_DIR / REDEPLOY
     try:
@@ -969,7 +1097,7 @@ def internal_update() -> int:
     if not knows_ref:
         note("failed", f"{redeploy} of this checkout cannot deploy a release (no DEPLOY_REF) — "
              "deploy the relay once by hand: sudo DEPLOY_REF=main bash scripts/redeploy.sh",
-             from_commit=old, release=latest)
+             from_commit=old, release=latest, reason="preflight")
         return 1
     note("running", f"deploying {latest} (scripts/redeploy.sh, DEPLOY_REF={latest})", from_commit=old, release=latest)
     # The deploy an operator runs, unattended: redeploy.sh starts the tag's deploy.sh
@@ -978,8 +1106,10 @@ def internal_update() -> int:
     done = run(["bash", str(redeploy)], env={"DEPLOY_REF": latest, "REDEPLOY_ATTACH": "pipe"},
                timeout=UPDATE_TIMEOUT - 120)
     output = done.stdout + done.stderr
-    found = _REDEPLOY_LOG_RE.search(output)
-    where = {"log": found["log"]} if found else {}
+    verdict_of = deploy_verdict(output, done.returncode)
+    where = {"log": verdict_of["log"]} if verdict_of["log"] else {}
+    if verdict_of["warnings"]:
+        where["warnings"] = verdict_of["warnings"]
     now = run([*git, "rev-parse", "HEAD"], timeout=15).stdout.strip()
     if done.returncode == 0 and now == target:
         note("succeeded", f"updated to {latest}", from_commit=old, to_commit=target, release=latest, **where)
@@ -997,7 +1127,9 @@ def internal_update() -> int:
     else:
         verdict = f"stopped before any change (exit {done.returncode})"
     note("failed", f"the deploy of {latest} {verdict}: {_deploy_reason(output)}",
-         from_commit=old, release=latest, **({"now_commit": now} if now != old else {}), **where)
+         from_commit=old, release=latest, **({"now_commit": now} if now != old else {}), **where,
+         reason=verdict_of["reason"] or "failed", step=verdict_of["step"],
+         excerpt=verdict_of["excerpt"] or tail(output, 4).splitlines())
     return 1
 
 
@@ -1121,7 +1253,7 @@ def main(argv: Sequence[str]) -> int:
     except Busy as exc:
         rc, payload = E_BUSY, {"ok": False, "error": str(exc)}
     except Failed as exc:
-        rc, payload = E_FAILED, {"ok": False, "error": str(exc)}
+        rc, payload = E_FAILED, {**exc.extra, "ok": False, "error": str(exc)}
     except Exception as exc:  # the bot gets a reason, never a traceback
         rc, payload = E_FAILED, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     else:

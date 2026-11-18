@@ -265,6 +265,18 @@ ALLOW_BACKEND_CONFIG_DRIFT="${ALLOW_BACKEND_CONFIG_DRIFT:-0}"
 ALLOW_SCHEMA_DOWNGRADE="${ALLOW_SCHEMA_DOWNGRADE:-0}"
 FORCE="${FORCE:-0}"
 PHASE1_ONLY="${PHASE1_ONLY:-0}"   # 1 = run all of Phase 1, print report, exit 0 (no mutations)
+# The Phase 1 stamp (run_checkout_tests, docs/deployment.md «The Phase 1 stamp»): a
+# fully green PHASE1_ONLY run writes it; a real deploy of the same commit, constraints,
+# python and role within PHASE1_STAMP_TTL seconds skips the test gate. FORCE_TESTS=1
+# always runs it.
+# Test fence: under DEPLOY_SELFTEST=1 an unset path never exists (the suite runs as
+# root on the host, next to the real stamp); a suite sets its own.
+FORCE_TESTS="${FORCE_TESTS:-0}"
+case "${DEPLOY_SELFTEST:-0}" in
+  1) PHASE1_STAMP="${PHASE1_STAMP:-/nonexistent/vpn-bot-selftest/phase1-ok}" ;;
+  *) PHASE1_STAMP="${PHASE1_STAMP:-/var/lib/vpn-bot-deploy/phase1-ok}" ;;
+esac
+PHASE1_STAMP_TTL="${PHASE1_STAMP_TTL:-7200}"
 
 ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
 XRAY_CONF="${XRAY_CONF:-/usr/local/etc/xray/config.json}"
@@ -862,7 +874,74 @@ CRASH_JOURNAL_LINES="${CRASH_JOURNAL_LINES:-40}"
 # --------------------------------------------------------------------------- #
 log()  { printf '[deploy] %s\n' "$*"; }
 warn() { printf '[deploy][WARN] %s\n' "$*" >&2; }
-die()  { printf '[deploy][FAIL] %s\n' "$*" >&2; exit 1; }
+die()  { printf '[deploy][FAIL] %s\n' "$*" >&2; deploy_result_failed >&2; exit 1; }
+
+# --------------------------------------------------------------------------- #
+# Step and result markers (docs/deployment.md «Step and result markers»)
+# --------------------------------------------------------------------------- #
+# Machine-readable lines, never translated, one per event:
+#   [deploy:step <i>/<n> <name>]                         a step begins
+#   [deploy:skip <name>] <why>                           a step is skipped (tests: a stamp)
+#   [deploy:warn <code>] <text>                          DEPLOY OK with a finding to show
+#   [deploy:result ok|noop]                              green / nothing to deploy
+#   [deploy:result failed step=<name> reason=<class>]    why it stopped
+# Readers: the relay agent's `update` (scripts/vpn-relay-agent) and the setup wizard's
+# `update` (scripts/wizard/vpn-bot-wizard-update) take the CAUSE they report to the bot
+# from the result line, and the bot's progress view the step lines. A target whose
+# deploy.sh predates them prints none: the readers fall back to the text.
+# The step after a relay's handover starts over (the target's own copy runs): a reader
+# takes the LAST step line as the current one.
+DEPLOY_STEPS=(preflight fetch tests checks backup install restart verify)
+# PHASE1_ONLY=1 runs the first four only.
+DEPLOY_PHASE1_STEPS=4
+# reason=<class>, the closed set the readers map to a message (tests pin it):
+#   busy        another deploy holds the lock         fetch     git fetch failed
+#   preflight   a precondition before the tests       no_venv   no ensurepip / test venv
+#   tests       ruff / compileall / pytest failed     checks    a Phase 1 gate stopped it
+#   upstream    relay: the upstream stopped answering after the restart (rolled back)
+#   rolled_back a Phase 2 step failed, rolled back    failed    anything else
+# shellcheck disable=SC2034  # read by the tests and the readers' parity check, not here
+DEPLOY_FAIL_REASONS=(busy fetch preflight no_venv tests checks upstream rolled_back failed)
+DEPLOY_STEP=""
+# Set right before a die/rollback_now whose cause the step alone does not tell.
+DEPLOY_FAIL_REASON=""
+DEPLOY_RESULT_DONE=0
+
+step() {
+  local name="$1" i n=${#DEPLOY_STEPS[@]} at=0
+  [[ "${PHASE1_ONLY:-0}" == "1" ]] && n=$DEPLOY_PHASE1_STEPS
+  for i in "${!DEPLOY_STEPS[@]}"; do
+    if [[ "${DEPLOY_STEPS[$i]}" == "$name" ]]; then at=$(( i + 1 )); break; fi
+  done
+  DEPLOY_STEP="$name"
+  printf '[deploy:step %d/%d %s]\n' "$at" "$n" "$name"
+}
+step_skip() { printf '[deploy:skip %s] %s\n' "$1" "$2"; }
+deploy_warn_marker() { printf '[deploy:warn %s] %s\n' "$1" "$2"; }
+
+# The reason=<class> of a failure now: an explicit DEPLOY_FAIL_REASON, else a failure
+# while the rollback is armed (Phase 2), else the step (a die in `fetch` after the
+# fetch itself worked is a precondition: the fetch sets its own reason).
+deploy_fail_reason() {
+  if [[ -n "$DEPLOY_FAIL_REASON" ]]; then printf '%s' "$DEPLOY_FAIL_REASON"; return 0; fi
+  if [[ "${PHASE:-}" == "armed" ]]; then printf 'rolled_back'; return 0; fi
+  case "$DEPLOY_STEP" in
+    ""|preflight|fetch) printf 'preflight' ;;
+    tests|checks) printf '%s' "$DEPLOY_STEP" ;;
+    *) printf 'failed' ;;
+  esac
+}
+
+deploy_result_failed() {
+  (( DEPLOY_RESULT_DONE == 0 )) || return 0
+  DEPLOY_RESULT_DONE=1
+  printf '[deploy:result failed step=%s reason=%s]\n' "${DEPLOY_STEP:-preflight}" "$(deploy_fail_reason)"
+}
+
+deploy_result_ok() {   # $1: ok (default) | noop
+  DEPLOY_RESULT_DONE=1
+  printf '[deploy:result %s]\n' "${1:-ok}"
+}
 
 # HY2_AUTH_BIND_TIMEOUT feeds bash arithmetic, where a non-number is an error and a
 # leading zero means octal. It only tunes an informational check, so a bad value
@@ -870,6 +949,11 @@ die()  { printf '[deploy][FAIL] %s\n' "$*" >&2; exit 1; }
 if ! [[ "$HY2_AUTH_BIND_TIMEOUT" =~ ^(0|[1-9][0-9]*)$ ]]; then
   warn "HY2_AUTH_BIND_TIMEOUT='${HY2_AUTH_BIND_TIMEOUT}' is not a whole number of seconds — using the default 20"
   HY2_AUTH_BIND_TIMEOUT=20
+fi
+# The same for the stamp's lifetime (0 = never use a stamp).
+if ! [[ "$PHASE1_STAMP_TTL" =~ ^(0|[1-9][0-9]{0,6})$ ]]; then
+  warn "PHASE1_STAMP_TTL='${PHASE1_STAMP_TTL}' is not a whole number of seconds — using the default 7200"
+  PHASE1_STAMP_TTL=7200
 fi
 
 # --------------------------------------------------------------------------- #
@@ -971,7 +1055,11 @@ declare -a PROTO_LABEL=() PROTO_GATE=() PROTO_ON=() PROTO_UNIT=()
 # EXIT cleanup (worktree, stage, venv-snapshot safety net)
 # --------------------------------------------------------------------------- #
 cleanup() {
+  local rc=$?
   set +e
+  # A run that ends non-zero without a die/rollback (errexit in Phase 1, a signal)
+  # still says why, for the readers of the result line.
+  (( rc == 0 )) || deploy_result_failed >&2
   # Guard against a SIGKILL between `cp -a $VENV $VENV_PREV` and the pip install:
   # if the live venv vanished but the snapshot survived, put it back.
   if [[ ! -x "${VENV}/bin/python" && -x "${VENV_PREV}/bin/python" ]]; then
@@ -1000,6 +1088,7 @@ on_interim() {
   set +e
   warn "failure before the backup was verified — restarting vpn-bot (nothing else changed)"
   systemctl start "$BOT_UNIT"
+  deploy_result_failed >&2
   exit 1
 }
 arm_interim()  { PHASE="interim"; trap 'on_interim' ERR INT TERM HUP; }
@@ -2097,7 +2186,7 @@ managed_host_phase1() {
         fi ;;
       gate-unit-mismatch) fail+=("${dst}: ${detail}") ;;
       cannot-render|mask-conflict)
-        if [[ "$PHASE1_ONLY" != "1" ]]; then fail+=("${dst}: ${detail}"); fi ;;
+        if [[ "$PHASE1_ONLY" != "1" ]]; then fail+=("${dst}: ${detail}"); else phase1_would_stop "host file ${dst}"; fi ;;
       legacy-drift)
         legacy_bad+=("$dst")
         t="$(mh_opt "$(mh_entry_opts "$dst")" legacy)"
@@ -2138,6 +2227,7 @@ managed_host_phase1() {
     if [[ "$ALLOW_UNIT_DRIFT" == "1" ]]; then
       warn "ALLOW_UNIT_DRIFT=1: continuing — those entries are left exactly as they are"
     elif [[ "$PHASE1_ONLY" == "1" ]]; then
+      phase1_would_stop "host file legacy drift"
       warn "PHASE1_ONLY=1: reported, not fatal in inspection mode"
     else
       die "host file legacy drift (set ALLOW_UNIT_DRIFT=1 to deploy anyway and leave it as it is)"
@@ -2149,6 +2239,7 @@ managed_host_phase1() {
       warn "ALLOW_SSH_CHANGE=1: Phase 2 WILL change the ssh configuration: ${ssh_drift[*]}"
       warn "  keep a SECOND ssh session open until the deploy reports OK (lockout risk)"
     elif [[ "$PHASE1_ONLY" == "1" ]]; then
+      phase1_would_stop "ssh configuration drift"
       warn "ssh configuration differs from the repo (diff above): ${ssh_drift[*]}"
       warn "  a real deploy refuses this without ALLOW_SSH_CHANGE=1 (not fatal in inspection mode)"
     else
@@ -2415,6 +2506,7 @@ ssh_port_phase1() {
     SSH_PLAN_ACTION="refused"; SSH_PLAN_LISTEN=""
     SSH_PLAN_STATUS="ssh port: REFUSED — ${SSH_PLAN_ERROR:-the helper exited ${rc} (see above)}"
     if [[ "$PHASE1_ONLY" == "1" ]]; then
+      phase1_would_stop "ssh port"
       warn "${SSH_PLAN_STATUS} — a real deploy stops here (PHASE1_ONLY=1: not fatal)"
       return 0
     fi
@@ -2620,6 +2712,7 @@ ufw_phase1() {
   (( ${#fail[@]} > 0 )) || return 0
   for line in "${fail[@]}"; do warn "  ${line}"; done
   if [[ "$PHASE1_ONLY" == "1" ]]; then
+    phase1_would_stop "ufw"
     warn "PHASE1_ONLY=1: a real deploy stops here (not fatal in inspection mode)"
     return 0
   fi
@@ -3358,6 +3451,7 @@ host_invariants_phase1() {
   host_invariants_run "$1" phase1
   if (( HC_RC >= 2 )); then
     if [[ "$PHASE1_ONLY" == "1" ]]; then
+      phase1_would_stop "host invariants (not run)"
       warn "host invariants: the check could not run (exit ${HC_RC}) — a real deploy stops here (PHASE1_ONLY=1: not fatal)"
       return 0
     fi
@@ -3388,6 +3482,7 @@ host_invariants_phase1() {
   warn "  a repo value that is not in effect is not deployed: fix the host (or the repo) and re-run;"
   warn "  a LATENT that is meant to stay goes into deploy/host/accepted-overrides.list (there is no knob)"
   if [[ "$PHASE1_ONLY" == "1" ]]; then
+    phase1_would_stop "host invariants"
     warn "PHASE1_ONLY=1: reported, not fatal in inspection mode — a real deploy stops here"
   else
     die "host invariants: ${n_fail} fatal finding(s) — nothing was changed"
@@ -4310,6 +4405,7 @@ hy2_auth_unit_phase1() {
   if [[ -L "$HY2_AUTH_UNIT_DST" ]]; then
     # A mask (-> /dev/null) or a link elsewhere is a decision somebody made by hand.
     if [[ "$PHASE1_ONLY" == "1" ]]; then
+      phase1_would_stop "hy2-auth unit"
       warn "hy2-auth unit ${HY2_AUTH_UNIT_DST} is a symlink (-> $(readlink "$HY2_AUTH_UNIT_DST")) — a real deploy stops here"
       HY2_AUTH_UNIT_STATE="symlink"; return 0
     fi
@@ -4326,6 +4422,7 @@ hy2_auth_unit_phase1() {
   if (( rc != 0 )); then
     [[ "$PHASE1_ONLY" == "1" ]] \
       || die "systemd-analyze verify refuses ${HY2_AUTH_UNIT_SRC} (above) — the hy2-auth unit is not installed; nothing was changed"
+    phase1_would_stop "hy2-auth unit"
     warn "systemd-analyze verify refuses ${HY2_AUTH_UNIT_SRC} (above) — a real deploy stops here"
   fi
   return 0
@@ -4490,6 +4587,7 @@ rollback() {
   printf '  data-plane restarted: %s | WARP reapplied: %s | WARP check: %s\n' \
     "$dp_restarted" "$warp_reapplied" "$warp_check" >&2
   printf '===========================\n' >&2
+  deploy_result_failed >&2
   exit 1
 }
 
@@ -5207,7 +5305,7 @@ merged_branches_summary() {
 # stand inline (a relay fetches its target in relay_fetch_target).
 fetch_origin_main() {
   log "fetching origin/main"
-  git fetch origin main
+  git fetch origin main || { DEPLOY_FAIL_REASON=fetch; die "git fetch origin main failed (above) — nothing was changed"; }
   TAG="$(git rev-parse --short origin/main)"
   deploy_branch_phase1
 
@@ -5217,6 +5315,7 @@ fetch_origin_main() {
     elif [[ "$FORCE" != "1" ]]; then
       log "HEAD already at origin/main (${TAG}); nothing to deploy. Set FORCE=1 to redeploy anyway."
       noop_pin_branch
+      deploy_result_ok noop
       exit 0
     else
       warn "FORCE=1: redeploying although HEAD already equals origin/main"
@@ -5228,6 +5327,7 @@ fetch_origin_main() {
   # Phase 2 checks the tree out as local main, which is wrong while another worktree has
   # main (branch_blocker). A real deploy stops here, before any mutation; PHASE1_ONLY
   # reports it.
+  [[ -z "$BRANCH_BLOCKER" ]] || phase1_would_stop "branch ${DEPLOY_BRANCH}"
   if [[ -n "$BRANCH_BLOCKER" && "$PHASE1_ONLY" != "1" ]]; then
     die "local ${DEPLOY_BRANCH} is checked out in another worktree (${BRANCH_BLOCKER}) — Phase 2 could not put the live tree on it; remove that worktree first"
   fi
@@ -5244,26 +5344,172 @@ refuse_dirty_tree() {
   fi
 }
 
+# --------------------------------------------------------------------------- #
+# ensurepip — the test venv's precondition (python3.X-venv on Debian/Ubuntu)
+# --------------------------------------------------------------------------- #
+# Debian and Ubuntu ship `ensurepip` apart from python3, in python3.X-venv; without it
+# `python3 -m venv` stops with "ensurepip is not available" (a fresh Ubuntu 24.04 relay
+# did exactly that: install.sh's relay mode never installed python3-venv, the main
+# server's mode did). So before the test venv is built: is ensurepip there? If not,
+# python3.X-venv for THIS python3 is installed (apt-get, noninteractive) and checked
+# again. The one system package Phase 1 may install, PHASE1_ONLY included: the test
+# gate cannot run without it, and nothing of the deploy itself has changed yet. When it
+# cannot be installed the deploy stops here, with the command to run by hand.
+ensure_python_venv() {
+  local ver pkg out
+  python3 -m ensurepip --version >/dev/null 2>&1 && return 0
+  ver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+  DEPLOY_FAIL_REASON=no_venv
+  [[ "$ver" =~ ^3\.[0-9]{1,2}$ ]] \
+    || die "python3 -m ensurepip is not available and the python3 version cannot be read ('${ver}') — install python3-venv by hand; nothing was changed"
+  pkg="python${ver}-venv"
+  command -v apt-get >/dev/null 2>&1 \
+    || die "python3 -m ensurepip is not available (Debian/Ubuntu ship it in ${pkg}) and there is no apt-get here — install ${pkg} by hand; nothing was changed"
+  log "python3 ${ver} has no ensurepip (Debian/Ubuntu ship it in ${pkg}) — installing ${pkg} (apt-get, noninteractive) for the test venv"
+  if ! out="$(DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends "$pkg" 2>&1)"; then
+    # A host whose package index never had it (no `apt-get update` since the image).
+    log "apt-get install ${pkg} failed — refreshing the package index once and retrying"
+    out="$( { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update -qq \
+              && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends "$pkg"; } 2>&1)" || {
+      printf '%s\n' "$out" | tail -n 8 | sed 's/^/    /' >&2
+      die "python3 -m ensurepip is not available and apt-get could not install ${pkg} (above) — run: apt install ${pkg}; nothing was changed"
+    }
+  fi
+  python3 -m ensurepip --version >/dev/null 2>&1 \
+    || die "${pkg} is installed but python3 -m ensurepip still fails — the test venv cannot be built; nothing was changed"
+  DEPLOY_FAIL_REASON=""
+  log "ensurepip available (${pkg} installed)"
+}
+
+# --------------------------------------------------------------------------- #
+# The Phase 1 stamp — a real deploy of a commit an inspection just tested skips the tests
+# --------------------------------------------------------------------------- #
+# On a relay with one vCPU the gate takes ~13 minutes, and the recommended flow runs it
+# twice: `CHECK=1 redeploy` (PHASE1_ONLY), then the deploy. A FULLY green PHASE1_ONLY
+# run — the tests passed and nothing a real deploy stops on was reported
+# (PHASE1_WOULD_STOP is empty) — writes PHASE1_STAMP (root, 0600, written atomically):
+#   version=1 · sha=<the commit tested> · constraints=<constraints_stamp> ·
+#   python=<python3 version> · role=<main|relay> · at=<epoch>
+# A real deploy (not PHASE1_ONLY, not FORCE_TESTS=1) whose commit, constraints, python
+# and role are the stamp's, within PHASE1_STAMP_TTL seconds (default 7200), skips ruff /
+# compileall / pytest and says which stamp it relied on ([deploy:skip tests] + a log
+# line). Every OTHER Phase 1 gate runs again as always: the stamp vouches for the tests
+# and nothing else. A stamp not owned by this deploy's uid, not 0600, or a symlink is
+# ignored with a WARN. A relay deploying a release older than this block runs that
+# release's deploy.sh (relay_handover), which knows no stamp: it tests, as before.
+TESTS_RAN=0          # this run ran the gate and it passed
+PHASE1_STAMP_USED="" # what the gate was skipped on (the log line, DEPLOY OK)
+declare -a PHASE1_WOULD_STOP=()   # what a real deploy stops on that PHASE1_ONLY reported
+
+# PHASE1_ONLY: a gate a real deploy would stop on was reported instead ($1: what).
+phase1_would_stop() { PHASE1_WOULD_STOP+=("$1"); }
+
+# The stamp's fields for the checkout under test ($WT), in a fixed order.
+phase1_stamp_fields() {
+  local sha py
+  sha="$(git -C "$WT" rev-parse HEAD 2>/dev/null)" || return 1
+  [[ "$sha" =~ ^[0-9a-f]{40,64}$ ]] || return 1
+  py="$(python3 -c 'import sys; print(sys.version.split()[0])' 2>/dev/null)" || return 1
+  printf 'version=1\nsha=%s\nconstraints=%s\npython=%s\nrole=%s\n' \
+    "$sha" "$(constraints_stamp "$WT")" "$py" "${NODE_ROLE:-main}"
+}
+
+# 0 when the stamp vouches for the checkout under test (sets PHASE1_STAMP_USED).
+phase1_stamp_usable() {
+  local have want at now age owner mode sha
+  PHASE1_STAMP_USED=""
+  [[ "$PHASE1_ONLY" != "1" ]] || return 1   # an inspection always tests (and stamps)
+  if [[ "$FORCE_TESTS" == "1" ]]; then
+    log "tests: FORCE_TESTS=1 — running them whatever the Phase 1 stamp says"
+    return 1
+  fi
+  (( PHASE1_STAMP_TTL > 0 )) || return 1
+  [[ -e "$PHASE1_STAMP" || -L "$PHASE1_STAMP" ]] || return 1
+  owner="$(stat -c %u "$PHASE1_STAMP" 2>/dev/null || true)"
+  mode="$(stat -c %a "$PHASE1_STAMP" 2>/dev/null || true)"
+  if [[ -L "$PHASE1_STAMP" || ! -f "$PHASE1_STAMP" || "$owner" != "$(id -u)" || "$mode" != "600" ]]; then
+    warn "tests: ignoring the Phase 1 stamp ${PHASE1_STAMP} — not a regular file of uid $(id -u) with mode 0600 (uid ${owner:-?}, mode ${mode:-?})"
+    return 1
+  fi
+  have="$(cat "$PHASE1_STAMP" 2>/dev/null)" || return 1
+  want="$(phase1_stamp_fields)" || return 1
+  at="$(sed -n 's/^at=\([0-9]\{1,12\}\)$/\1/p' <<< "$have")"
+  if [[ -z "$at" || "$(grep -v '^at=' <<< "$have")" != "$want" ]]; then
+    log "tests: the Phase 1 stamp ${PHASE1_STAMP} is for another commit, constraints, python or role — running them"
+    return 1
+  fi
+  now="$(date +%s)"
+  age=$(( now - at ))
+  if (( age < 0 || age > PHASE1_STAMP_TTL )); then
+    log "tests: the Phase 1 stamp ${PHASE1_STAMP} is $(( age / 60 )) min old (PHASE1_STAMP_TTL=${PHASE1_STAMP_TTL}s) — running them"
+    return 1
+  fi
+  sha="$(sed -n 's/^sha=//p' <<< "$have")"
+  PHASE1_STAMP_USED="commit ${sha:0:12}, role ${NODE_ROLE:-main}, written $(date -u -d "@${at}" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || printf '@%s' "$at") ($(( age / 60 )) min ago)"
+  return 0
+}
+
+# PHASE1_ONLY, at its very end: the stamp, when Phase 1 was fully green. Never fatal.
+phase1_stamp_write() {
+  local fields dir tmp
+  [[ "$PHASE1_ONLY" == "1" && "$TESTS_RAN" == "1" ]] || return 0
+  if (( ${#PHASE1_WOULD_STOP[@]} > 0 )); then
+    log "Phase 1 stamp: not written — a real deploy would stop on: ${PHASE1_WOULD_STOP[*]}"
+    return 0
+  fi
+  if ! fields="$(phase1_stamp_fields)"; then
+    warn "Phase 1 stamp: the fields cannot be read — not written (the deploy runs the tests again)"
+    return 0
+  fi
+  dir="$(dirname "$PHASE1_STAMP")"
+  if ! tmp="$(mktemp "${dir}/.phase1-ok.XXXXXX" 2>/dev/null)"; then
+    warn "Phase 1 stamp: cannot create a file in ${dir} — not written (the deploy runs the tests again)"
+    return 0
+  fi
+  if chmod 0600 "$tmp" && printf '%s\nat=%s\n' "$fields" "$(date +%s)" > "$tmp" && mv -f "$tmp" "$PHASE1_STAMP"; then
+    log "Phase 1 stamp written: ${PHASE1_STAMP} — a real deploy of $(sed -n 's/^sha=//p' <<< "$fields" | cut -c1-12) within $(( PHASE1_STAMP_TTL / 60 )) min skips the tests (FORCE_TESTS=1 runs them)"
+  else
+    rm -f "$tmp"
+    warn "Phase 1 stamp: could not be written to ${PHASE1_STAMP} (the deploy runs the tests again)"
+  fi
+  return 0
+}
+
 # Tests in an isolated worktree + a separate test venv (never the prod venv).
 # Sets WT (global: the EXIT trap removes it). Shared by both host roles: a relay
 # runs the SAME gate on the checkout it is about to deploy — DEPLOY_TARGET, which is
 # origin/main on the main server and the relay's target (relay_resolve_target).
+# A usable Phase 1 stamp skips the gate (above); every failure here dies with
+# reason=tests or reason=no_venv (the result line).
 run_checkout_tests() {
   local want_stamp have_stamp
   WT="$(mktemp -d)"
   git worktree add --detach "$WT" "$DEPLOY_TARGET" >/dev/null
   log "worktree at ${WT} (${DEPLOY_TARGET_LABEL} ${TAG})"
 
+  if phase1_stamp_usable; then
+    step_skip tests "Phase 1 stamp: ${PHASE1_STAMP_USED}"
+    log "tests: SKIPPED — the Phase 1 stamp ${PHASE1_STAMP} vouches for them (${PHASE1_STAMP_USED}); FORCE_TESTS=1 runs them anyway"
+    return 0
+  fi
+
   want_stamp="$(constraints_stamp "$WT")"
   have_stamp="$(cat "${TEST_VENV}/.constraints-stamp" 2>/dev/null || true)"
   if [[ ! -x "${TEST_VENV}/bin/python" || "$have_stamp" != "$want_stamp" ]]; then
     log "building test venv ${TEST_VENV} (constraints changed or venv absent)"
+    ensure_python_venv
     rm -rf "$TEST_VENV"
     install -d "$(dirname "$TEST_VENV")"
-    python3 -m venv "$TEST_VENV"
-    "${TEST_VENV}/bin/pip" install --quiet --upgrade pip
-    "${TEST_VENV}/bin/pip" install --require-hashes -r "$WT/constraints-hashed.txt"
-    "${TEST_VENV}/bin/pip" install --require-hashes -r "$WT/constraints-dev-hashed.txt"
+    DEPLOY_FAIL_REASON=no_venv
+    python3 -m venv "$TEST_VENV" \
+      || die "python3 -m venv ${TEST_VENV} failed (above) — the test venv cannot be built; nothing was changed"
+    "${TEST_VENV}/bin/pip" install --quiet --upgrade pip \
+      || die "the test venv's pip cannot upgrade itself (above: PyPI unreachable?) — nothing was changed"
+    "${TEST_VENV}/bin/pip" install --require-hashes -r "$WT/constraints-hashed.txt" \
+      || die "pip install -r constraints-hashed.txt into the test venv failed (above: PyPI unreachable?) — nothing was changed"
+    "${TEST_VENV}/bin/pip" install --require-hashes -r "$WT/constraints-dev-hashed.txt" \
+      || die "pip install -r constraints-dev-hashed.txt into the test venv failed (above: PyPI unreachable?) — nothing was changed"
+    DEPLOY_FAIL_REASON=""
     printf '%s' "$want_stamp" > "${TEST_VENV}/.constraints-stamp"
   else
     log "reusing test venv ${TEST_VENV}"
@@ -5280,8 +5526,11 @@ run_checkout_tests() {
   # deploy, turning a PyPI reachability blip into a failed deploy gate for no gain
   # in isolation. If this line ever stops using TEST_VENV, it must move to
   # `make lint` rather than back to a bare `ruff`.
-  ( cd "$WT" && "${TEST_VENV}/bin/python" -m ruff check . )
-  ( cd "$WT" && "${TEST_VENV}/bin/python" -m compileall -q . )
+  DEPLOY_FAIL_REASON=tests
+  ( cd "$WT" && "${TEST_VENV}/bin/python" -m ruff check . ) \
+    || die "Phase 1 gate: ruff check failed on ${DEPLOY_TARGET_LABEL} (above) — nothing was changed"
+  ( cd "$WT" && "${TEST_VENV}/bin/python" -m compileall -q . ) \
+    || die "Phase 1 gate: compileall failed on ${DEPLOY_TARGET_LABEL} (above) — nothing was changed"
   # INVARIANT: this test phase is DETERMINISTIC and reproduces CI 1:1, so Phase 1
   # is a real gate — a flaky pass here would silently green-light a broken deploy.
   #   * `-p no:cacheprovider`: never read/write a .pytest_cache. From this detached
@@ -5299,7 +5548,10 @@ run_checkout_tests() {
   #     invariant above holds; what it buys HERE is that a hung test fails this gate
   #     with a traceback instead of holding the deploy open indefinitely — which is
   #     precisely how an unbounded `journalctl` read once blocked a production run.
-  ( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider )
+  ( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider ) \
+    || die "Phase 1 gate: pytest failed on ${DEPLOY_TARGET_LABEL} (above) — nothing was changed"
+  DEPLOY_FAIL_REASON=""
+  TESTS_RAN=1
 }
 
 # =========================================================================== #
@@ -5434,8 +5686,8 @@ relay_resolve_target() {
 relay_fetch_target() {
   local head rc
   log "fetching origin/main and the release tags"
-  git fetch --quiet origin main
-  git fetch --quiet --tags --force origin
+  { git fetch --quiet origin main && git fetch --quiet --tags --force origin; } \
+    || { DEPLOY_FAIL_REASON=fetch; die "relay: git fetch failed (above) — nothing was changed"; }
   relay_resolve_target
   if [[ -n "$DEPLOY_HANDOVER_SHA" && "$DEPLOY_HANDOVER_SHA" != "$RELAY_TARGET_SHA" ]]; then
     die "relay: $(relay_target_text) moved during the handover (${DEPLOY_HANDOVER_SHA:0:12} -> ${RELAY_TARGET_SHA:0:12}) — run the deploy again; nothing was changed"
@@ -5450,6 +5702,7 @@ relay_fetch_target() {
       log "HEAD already at $(relay_target_text) (${TAG}); PHASE1_ONLY=1: running Phase 1 checks anyway (no deploy)."
     elif [[ "$FORCE" != "1" ]]; then
       log "HEAD already at $(relay_target_text) (${TAG}); nothing to deploy. Set FORCE=1 to redeploy anyway."
+      deploy_result_ok noop
       exit 0
     else
       warn "FORCE=1: redeploying although HEAD already equals $(relay_target_text) (${TAG})"
@@ -5458,6 +5711,7 @@ relay_fetch_target() {
     git merge-base --is-ancestor "$RELAY_TARGET_SHA" "$head" && rc=0 || rc=$?
     if (( rc == 0 )); then
       log "INFO: the checkout (${head:0:12}) is ahead of $(relay_target_text) (${TAG}) — a relay never goes backwards: nothing to deploy$( [[ "$RELAY_TARGET_KIND" != "main" ]] && printf '; DEPLOY_REF=main to follow main')"
+      deploy_result_ok noop
       exit 0
     fi
     (( rc == 1 )) || die "relay: git merge-base failed (exit ${rc}) comparing ${head:0:12} with ${TAG}; nothing was changed"
@@ -5640,14 +5894,113 @@ relay_unit_before() {
     "${RELAY_PRE_UNIT_ACTIVE[$u]:-unknown}" "${RELAY_PRE_UNIT_ENABLED[$u]:-<none>}"
 }
 
+# --------------------------------------------------------------------------- #
+# The verify's check and an upstream that did not answer BEFORE the deploy either
+# --------------------------------------------------------------------------- #
+# `vpn-relay-apply check` runs every step and prints one FAIL line per failure, but
+# exits with the code of the FIRST one — so, like the agent's
+# only_input_filter_failures (scripts/vpn-relay-agent), the verdict is read from the
+# FAIL lines. Their classes (relay_check_fail_class):
+#   upstream   FAIL: TCP connect <ip>:<port> … / FAIL: TLS handshake <ip>:443 sni=… (13/14)
+#   input      table inet vpnrelay_input …, … listening but filtered        (16-18)
+#   table      table ip vpnrelay …                                          (10/11)
+#   forward    net.ipv4.ip_forward …                                        (12)
+#   conntrack  net.netfilter.nf_conntrack_* …                               (15)
+#   other      anything else
+# A relay whose main server is blocked on its path (TSPU) cannot pass the upstream
+# probe, before or after a deploy — and no deploy can fix that. So after the restart
+# the deploy does NOT roll back when ALL of these hold (relay_upstream_preexisting):
+#   * the check's exit is 13 or 14 and EVERY FAIL line is of class upstream (the
+#     tables, the input filter and the sysctls passed);
+#   * Phase 1's check of the live relay (RELAY_LIVE_OUT, the same helper version and
+#     .env) failed too, and every upstream key of the verify — "TCP connect
+#     <ip>:<port>" / "TLS handshake <ip>:443 sni=<name>" — was already among ITS
+#     failures: the same address, the same ports. A key Phase 1 did not have — a new
+#     failure, or a target/port the deploy changed — rolls back as before.
+# Then DEPLOY OK says so (WARN, the [deploy:warn upstream_preexisting] marker).
+relay_check_fail_class() {
+  case "$1" in
+    *"FAIL: TCP connect "*|*"FAIL: TLS handshake "*) echo upstream ;;
+    *vpnrelay_input*|*"listening but filtered"*)      echo input ;;
+    *"table ip ${RELAY_TABLE} "*)                      echo table ;;
+    *net.ipv4.ip_forward*)                             echo forward ;;
+    *nf_conntrack*)                                    echo conntrack ;;
+    *)                                                 echo other ;;
+  esac
+}
+
+# The FAIL lines of a check output, one per line.
+relay_check_fail_lines() { grep -F 'FAIL: ' <<< "$1" | grep -v -F 'check FAILED' || true; }
+
+# The classes of the FAIL lines of $1, sorted, unique.
+relay_check_fail_classes() {
+  local line
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && relay_check_fail_class "$line"
+  done < <(relay_check_fail_lines "$1") | sort -u
+}
+
+# "TCP connect <ip>:<port>" / "TLS handshake <ip>:443 sni=<name>" of every upstream
+# FAIL line of $1 (the reason after "failed:" left out: a timeout and a reset are the
+# same unreachable upstream), sorted, unique.
+relay_upstream_fail_keys() {
+  relay_check_fail_lines "$1" \
+    | sed -nE 's/.*FAIL: (TCP connect [^ ]+|TLS handshake [^ ]+ sni=[^ ]*) failed.*/\1/p' \
+    | sort -u
+}
+
+# 0 when the verify's failure ($1 output, $2 exit) is exactly a pre-existing upstream
+# failure (the block above). Reads RELAY_LIVE_OUT / RELAY_LIVE_RC from Phase 1.
+relay_upstream_preexisting() {
+  local post="$1" rc="$2" classes post_keys pre_keys key
+  [[ "$rc" == "13" || "$rc" == "14" ]] || return 1
+  classes="$(relay_check_fail_classes "$post")"
+  [[ "$classes" == "upstream" ]] || return 1
+  [[ "${RELAY_LIVE_RC:-0}" =~ ^[0-9]+$ ]] && (( RELAY_LIVE_RC != 0 && RELAY_LIVE_RC != 5 )) || return 1
+  post_keys="$(relay_upstream_fail_keys "$post")"
+  pre_keys="$(relay_upstream_fail_keys "${RELAY_LIVE_OUT:-}")"
+  [[ -n "$post_keys" && -n "$pre_keys" ]] || return 1
+  while IFS= read -r key; do
+    grep -qxF -- "$key" <<< "$pre_keys" || return 1
+  done <<< "$post_keys"
+  return 0
+}
+
+# Why the verify did not take the pre-existing path, for the rollback reason (empty
+# when the failure has nothing to do with the upstream).
+relay_upstream_verdict_text() {
+  local post="$1" rc="$2" classes
+  [[ "$rc" == "13" || "$rc" == "14" ]] || return 0
+  classes="$(relay_check_fail_classes "$post" | paste -sd ',' -)"
+  if [[ "$classes" != "upstream" ]]; then
+    printf ' — not only the upstream failed (%s)' "$classes"
+  elif [[ "${RELAY_LIVE_RC:-0}" == "0" ]]; then
+    printf ' — the upstream answered before the deploy: a new failure'
+  else
+    printf ' — not the failure Phase 1 saw (before: %s)' \
+      "$(relay_upstream_fail_keys "${RELAY_LIVE_OUT:-}" | paste -sd ';' - | sed 's/;/; /g;s/^$/none/')"
+  fi
+}
+
+# DEPLOY OK's verify line.
+relay_verify_ok_text() {
+  if [[ -n "${RELAY_UPSTREAM_PREEXISTING:-}" ]]; then
+    printf 'vpn-relay-apply check: tables, input filter, sysctls OK; upstream unreachable before and after (pre-existing): %s' \
+      "$RELAY_UPSTREAM_PREEXISTING"
+  else
+    printf 'vpn-relay-apply check OK'
+  fi
+}
+RELAY_UPSTREAM_PREEXISTING=""
+
 relay_live_rc_text() {
   case "$1" in
     0)  echo "PASS — the live relay already equals the render from .env (first transition: the repo reproduces the hand-made ruleset 1:1)" ;;
     10) echo "table ip ${RELAY_TABLE} absent — Phase 2 creates it" ;;
     11) echo "live table differs from the render (diff above) — Phase 2 replaces it atomically" ;;
     12) echo "net.ipv4.ip_forward is off — Phase 2 turns it on" ;;
-    13) echo "the upstream does not answer on a forwarded TCP port — Phase 2's verify runs the same probe and would ROLL BACK; fix that first" ;;
-    14) echo "TLS handshake to the upstream failed — Phase 2's verify would ROLL BACK; fix that (or RELAY_CHECK_SNI) first" ;;
+    13) echo "the upstream does not answer on a forwarded TCP port — not caused by a deploy: Phase 2's verify accepts this same failure (WARN, DEPLOY OK) when everything else passes, and rolls back on a new one" ;;
+    14) echo "TLS handshake to the upstream failed — not caused by a deploy: Phase 2's verify accepts this same failure (WARN, DEPLOY OK) when everything else passes, and rolls back on a new one (check RELAY_CHECK_SNI)" ;;
     15) echo "the table and ip_forward match; the conntrack sysctls differ from .env (RELAY_CONNTRACK_*) — Phase 2 sets them" ;;
     16) echo "table inet ${RELAY_INPUT_TABLE} absent (or present with RELAY_INPUT_FILTER=off) — Phase 2 applies the input filter; a TCP set not confirmed yet arms the 5-minute dead-man, then main's probe confirms it (or input-confirm from a NEW ssh session)" ;;
     17) echo "table inet ${RELAY_INPUT_TABLE} differs from the render (diff above) — Phase 2 replaces it; a changed TCP set needs a confirmation again (main's probe, or input-confirm)" ;;
@@ -5716,7 +6069,8 @@ relay_phase1() {
     # check exits with its FIRST failure; an unreachable upstream behind an absent
     # table must still be called out, because no apply fixes it.
     if printf '%s\n' "$RELAY_LIVE_OUT" | grep -E 'FAIL: (TCP connect|TLS handshake)' >/dev/null; then
-      warn "  the upstream probe failed — Phase 2's verify would roll back the deploy"
+      warn "  the upstream probe failed BEFORE the deploy: $(relay_upstream_fail_keys "$RELAY_LIVE_OUT" | paste -sd ';' - | sed 's/;/; /g')"
+      warn "  Phase 2 does not roll back on exactly this (pre-existing) failure — it does on a new one, or on any other failure of the check"
     fi
     if printf '%s\n' "$RELAY_LIVE_OUT" | grep -E 'FAIL: .* listening but filtered' >/dev/null; then
       warn "  a port listens on a public address but the input filter would close it — Phase 2's verify would roll back the deploy"
@@ -5960,6 +6314,7 @@ relay_rollback() {
   printf '\n===== ROLLBACK REPORT (relay) =====\n' >&2
   printf '  - %s\n' "${report[@]}" >&2
   printf '===================================\n' >&2
+  deploy_result_failed >&2
   exit 1
 }
 
@@ -6023,6 +6378,7 @@ relay_phase2() {
   # installs); without it there is nothing to back up or install against.
   [[ " ${RELAY_UNITS[*]} " == *" ${RELAY_UNIT} "* ]] \
     || die "relay: the unit set is not known (relay_snapshot_prestate did not run) — nothing was changed"
+  step backup
   PREV_SHA="$(git rev-parse HEAD)"
   log "PREV_SHA=${PREV_SHA} (relay)"
 
@@ -6073,6 +6429,7 @@ relay_phase2() {
   log "backup ${ARCHIVE} verified (${#manifest[@]} entries)"
 
   arm_relay_rollback          # from here every failure restores the backup
+  step install
 
   log "moving the working tree to $(relay_target_text) (${TAG}), detached"
   pin_tree_detached "$RELAY_TARGET_SHA" || rollback_now "git checkout -f --detach ${RELAY_TARGET_SHA} failed"
@@ -6108,6 +6465,7 @@ relay_phase2() {
   # swapped in one transaction and there is no moment without DNAT (what install.sh's
   # relay mode has always done; the hand-made unit too, once daemon-reload loaded
   # ours). A relay that is not running is started.
+  step restart
   log "reload-or-restart ${RELAY_UNIT} (vpn-relay-apply apply: table ip ${RELAY_TABLE} + table inet ${RELAY_INPUT_TABLE} from .env, conntrack sysctls, ip_forward=1; a TCP set not confirmed yet: dead-man, then main's probe)"
   systemctl reload-or-restart "$RELAY_UNIT" \
     || rollback_now "${RELAY_UNIT} reload-or-restart failed — vpn-relay-apply apply exited non-zero (see: journalctl -u ${RELAY_UNIT} -n 50 --no-pager)"
@@ -6128,10 +6486,20 @@ relay_phase2() {
     fi
   done
 
+  step verify
   log "verifying the relay: vpn-relay-apply check"
   out="$(RELAY_ENV="$ENV_FILE" "$RELAY_HELPER" check 2>&1)" && rc=0 || rc=$?
   printf '%s\n' "$out" | sed 's/^/    /'
-  (( rc == 0 )) || rollback_now "vpn-relay-apply check failed after the restart (exit ${rc}: $(relay_live_rc_text "$rc"))"
+  RELAY_UPSTREAM_PREEXISTING=""
+  if (( rc != 0 )); then
+    if relay_upstream_preexisting "$out" "$rc"; then
+      RELAY_UPSTREAM_PREEXISTING="$(relay_upstream_fail_keys "$out" | paste -sd ';' - | sed 's/;/; /g')"
+      warn "upstream unreachable before and after (pre-existing): ${RELAY_UPSTREAM_PREEXISTING} — the same failure as before the deploy, and nothing else of the check failed (tables, input filter, sysctls OK); a deploy can neither cause nor fix it, so it does not roll back"
+    else
+      (( rc == 13 || rc == 14 )) && DEPLOY_FAIL_REASON=upstream
+      rollback_now "vpn-relay-apply check failed after the restart (exit ${rc}: $(relay_live_rc_text "$rc"))$(relay_upstream_verdict_text "$out" "$rc")"
+    fi
+  fi
   dnat="$(relay_dnat_problems)"
   [[ -z "$dnat" ]] \
     || rollback_now "not exactly one DNAT per forwarded port in the whole ruleset — ${dnat//$'\n'/; } (a DNAT outside table ip ${RELAY_TABLE}, e.g. from /etc/nftables.conf, would race the relay's)"
@@ -6167,7 +6535,7 @@ relay_phase2() {
   deployed         : ${PREV_SHA} -> ${RELAY_TARGET_SHA} ($(relay_target_text), detached)
   backup           : ${ARCHIVE}
   unit             : ${RELAY_UNIT} active, enabled (before: active=${RELAY_PRE_ACTIVE:-unknown}, installed copy ${RELAY_UNIT_STATE:-unknown})${units_rows:+${nl}${units_rows}}
-  verify           : vpn-relay-apply check OK; one DNAT per forwarded port
+  verify           : $(relay_verify_ok_text); one DNAT per forwarded port
   input filter     : ${input_status:-unknown}
   host files       : $(host_files_summary)
   host invariants  : $(hc_summary_text)
@@ -6177,6 +6545,17 @@ relay_phase2() {
 EOF
   host_invariants_report_rows
   printf '=============================\n\n'
+  if [[ -n "$RELAY_UPSTREAM_PREEXISTING" ]]; then
+    deploy_warn_marker upstream_preexisting "upstream unreachable before and after (pre-existing): ${RELAY_UPSTREAM_PREEXISTING}"
+    cat <<EOF
+!! upstream unreachable before and after (pre-existing): ${RELAY_UPSTREAM_PREEXISTING}
+!! The relay forwards as configured, but the main server does not answer from here — it did
+!! not before the deploy either. Typically the main server's address is blocked on this
+!! relay's path (TSPU): check from the relay (vpn-relay-apply check), and consider the
+!! fallback mode (docs/relay.md «Режим фолбэка (hub)»).
+
+EOF
+  fi
   if [[ "$input_status" == "PENDING CONFIRM"* ]]; then
     cat <<EOF
 !! input filter ${input_status%% — *}: the INPUT drop policy is live, guarded by a dead-man.
@@ -6191,6 +6570,7 @@ EOF
 
 EOF
   fi
+  deploy_result_ok
 }
 
 # The whole relay deploy: Phase 1 (read-only), then Phase 2 unless PHASE1_ONLY.
@@ -6203,22 +6583,27 @@ relay_deploy() {
   rotate_backups
 
   exec {LOCK_FD}>"$LOCK" || die "cannot open lock ${LOCK}"
-  flock -n "$LOCK_FD" || die "another deploy already holds ${LOCK}"
+  flock -n "$LOCK_FD" || { DEPLOY_FAIL_REASON=busy; die "another deploy already holds ${LOCK}"; }
   log "host role: relay (NODE_ROLE=relay in ${ENV_FILE}) — vpn-bot, its sidecars, the DB, Xray, AmneziaWG and WARP are not part of this deploy"
 
   # The target (DEPLOY_REF, default the newest release; forward only), then the
   # target's own deploy.sh takes over — see "Which revision a relay deploys".
+  step fetch
   relay_fetch_target
   relay_handover
   avail="$(fs_avail_bytes "$APP_DIR")"
   (( avail > 1073741824 )) || die "insufficient space on ${APP_DIR} FS for the test venv: need >1024MiB, have $((avail/1024/1024))MiB"
 
+  step tests
   run_checkout_tests
+  step checks
   relay_phase1
 
   if [[ "$PHASE1_ONLY" == "1" ]]; then
     relay_phase1_report
+    phase1_stamp_write
     log "PHASE1_ONLY=1: Phase 1 complete; NOT entering Phase 2 (nothing installed, restarted or applied)."
+    deploy_result_ok
     return 0
   fi
   relay_phase2
@@ -6232,6 +6617,7 @@ relay_deploy() {
 # shellcheck disable=SC2317  # `exit` runs when the file is executed, `return` when sourced
 if [[ "${DEPLOY_SELFTEST:-0}" == "1" ]]; then return 0 2>/dev/null || exit 0; fi
 
+step preflight
 [[ "${EUID}" -eq 0 ]] || die "run as root (recommended entry point: sudo bash scripts/redeploy.sh)"
 
 # Host role — resolved and checked before ANY mutation of either role (HOST ROLE
@@ -6258,8 +6644,9 @@ rotate_backups   # also rotate at start so a series of failures does not pile up
 
 # Serialize against parallel deploys (lock lives outside the systemd RuntimeDirectory).
 exec {LOCK_FD}>"$LOCK" || die "cannot open lock ${LOCK}"
-flock -n "$LOCK_FD" || die "another deploy already holds ${LOCK}"
+flock -n "$LOCK_FD" || { DEPLOY_FAIL_REASON=busy; die "another deploy already holds ${LOCK}"; }
 
+step fetch
 fetch_origin_main
 
 [[ -x "${VENV}/bin/python" ]] || die "prod venv missing at ${VENV}"
@@ -6291,7 +6678,9 @@ LOG_DIR="$(env_val LOG_DIR)"; [[ -n "$LOG_DIR" ]] || LOG_DIR="/opt/vpn-service/l
 BOT_LOG="${LOG_DIR}/bot.log"
 
 # Tests in an isolated worktree + a separate test venv (never the prod venv) ---
+step tests
 run_checkout_tests
+step checks
 
 # Model detection -----------------------------------------------------------
 INCOMING_USER="$(unit_val "$WT/deploy/vpn-bot.service" User)"; [[ -n "$INCOMING_USER" ]] || INCOMING_USER="root"
@@ -6417,6 +6806,7 @@ if [[ ${#drift[@]} -gt 0 ]]; then
   if [[ "$ALLOW_UNIT_DRIFT" == "1" ]]; then
     warn "ALLOW_UNIT_DRIFT=1: continuing despite the drift above"
   elif [[ "$PHASE1_ONLY" == "1" ]]; then
+    phase1_would_stop "unit drift"
     warn "PHASE1_ONLY=1: drift reported (above and in the report) but not fatal in inspection mode"
   else
     die "unit drift detected (set ALLOW_UNIT_DRIFT=1 to deploy vpn-bot anyway and apply the rest by hand)"
@@ -6468,6 +6858,7 @@ if [[ -f "$WT/deploy/backend-config-sync.py" ]]; then
       if [[ "$ALLOW_BACKEND_CONFIG_DRIFT" == "1" ]]; then
         warn "ALLOW_BACKEND_CONFIG_DRIFT=1: continuing despite the drift above"
       elif [[ "$PHASE1_ONLY" == "1" ]]; then
+        phase1_would_stop "backend config drift"
         warn "PHASE1_ONLY=1: drift reported (above and in the report) but not fatal in inspection mode"
       else
         die "backend config drift detected (set ALLOW_BACKEND_CONFIG_DRIFT=1 to deploy anyway)"
@@ -6889,13 +7280,16 @@ phase1_report() {
 # --------------------------------------------------------------------------- #
 if [[ "$PHASE1_ONLY" == "1" ]]; then
   phase1_report
+  phase1_stamp_write
   log "PHASE1_ONLY=1: Phase 1 complete; NOT entering Phase 2 (no systemctl stop, no mutations)."
+  deploy_result_ok
   exit 0
 fi
 
 # =========================================================================== #
 # PHASE 2 — mutate (traps armed)
 # =========================================================================== #
+step backup
 PREV_SHA="$(git rev-parse HEAD)"
 SCHEMA_BEFORE="$(schema_version)"
 log "PREV_SHA=${PREV_SHA} schema_version(before)=${SCHEMA_BEFORE}"
@@ -6939,6 +7333,7 @@ done
 log "backup verified (${#manifest[@]} entries)"
 
 arm_rollback                # from here, any failure triggers full rollback()
+step install
 
 log "advancing working tree to origin/main (${TAG}) on local branch ${DEPLOY_BRANCH}"
 pin_tree_to_main origin/main
@@ -7000,6 +7395,7 @@ DEPLOY_START="$(date '+%Y-%m-%d %H:%M:%S')"
 # Byte offset of bot.log BEFORE start, so the post-deploy scan reads only what
 # the new process appends (see collect_bot_log_tail).
 LOG_OFFSET="$(file_size "$BOT_LOG")"
+step restart
 log "starting vpn-bot (bot.log offset=${LOG_OFFSET})"
 systemctl start "$BOT_UNIT"
 deadline=$(( SECONDS + HEALTH_TIMEOUT ))
@@ -7017,6 +7413,7 @@ nrestarts="$(systemctl show -p NRestarts --value "$BOT_UNIT")"
 log "vpn-bot active (NRestarts=0)"
 
 # Post-state regression for the rest of UNIT_SET ----------------------------
+step verify
 for u in "${UNIT_SET[@]}"; do
   [[ "$u" == "$BOT_UNIT" ]] && continue
   class="${U_CLASS[$u]:-}"; [[ -n "$class" ]] || continue   # skipped/not installed
@@ -7160,3 +7557,4 @@ host_invariants_report_rows
 # the list is per-host and variable-length.
 sidecar_report_block
 printf '=====================\n\n'
+deploy_result_ok
