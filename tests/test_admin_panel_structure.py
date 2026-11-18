@@ -55,6 +55,7 @@ from bot.handlers import (
     key_bundles,
     keys,
     proxy,
+    relay_hardening,
     security,
     ssh_port,
     start,
@@ -87,7 +88,8 @@ REPO = Path(__file__).resolve().parent.parent
 # Same order as bot/app.py (pinned by test_router_order_matches_app below).
 ROUTERS = [
     start, security, common, settings_handler, admin, admin_dashboard, admin_warp, admin_warp_split, admin_warp_split_ui,
-    admin_warp_split_sources, admin_modules, admin_fallback, admin_relays, admin_maintenance, ssh_port, ufw,
+    admin_warp_split_sources, admin_modules, admin_fallback, admin_relays, admin_maintenance, ssh_port, relay_hardening,
+    ufw,
     admin_wizard, admin_bundles, keys, key_bundles, proxy, callbacks,
 ]
 

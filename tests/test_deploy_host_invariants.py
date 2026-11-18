@@ -404,4 +404,12 @@ def test_the_host_like_ci_job_runs_the_whole_suite_from_a_worktree() -> None:
     deploy = DEPLOY_SH.read_text(encoding="utf-8")
     assert 'git worktree add --detach "$WT" "$DEPLOY_TARGET"' in deploy
     assert 'DEPLOY_TARGET="origin/main"' in deploy, "the main server tests origin/main (a relay: its target)"
-    assert '( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider )' in deploy
+    # The same invocation, plus the plugin that only RECORDS the failed node ids for the
+    # one re-run (docs/deployment.md#flaky-tests-in-phase-1): no path, no -k on the full run.
+    assert '"${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider -p "$PHASE1_PLUGIN_NAME" "$@" )' in deploy
+    assert 'phase1_pytest_run "$dir" "${dir}/failed" || rc=$?' in deploy, "the full run passes no test arguments"
+    plugin = deploy[deploy.index("PHASE1_FAILED_IDS_PLUGIN='"):]
+    plugin = plugin[: plugin.index("\n'\n") + 2]
+    assert re.findall(r"^def (\w+)", plugin, re.MULTILINE) == ["pytest_runtest_logreport"], (
+        "the plugin selects, skips or reorders nothing: one report hook"
+    )
