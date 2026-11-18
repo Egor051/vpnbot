@@ -88,9 +88,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `jump-off` keep ONE authorized_keys line
     `restrict,port-forwarding,permitopen="<ssh_host>:<ssh_port>"[,…],command="/bin/false" … vpn-bot-relay-jump`
     — exactly the relays with an agent behind the hub. `permitopen` limits only local forwarding,
-    so every relay's sshd now forwards **locally only** (new repo-managed
+    so every relay's sshd now forwards **local TCP only** (new repo-managed
     `/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf`: `AllowTcpForwarding local`,
-    `AllowStreamLocalForwarding local` — no `-R` on a relay, for anyone) and the hub's agent refuses
+    `AllowStreamLocalForwarding no` — no `-R` on a relay, for anyone) and the hub's agent refuses
     `jump` until `sshd -T` shows it. Values validated (the same regex in
     `services/relay_ssh.py` `_REQUEST` and the agent's whitelist, max request 4096 characters,
     at most 32 relays), a key with another line refused, every other line byte-identical,

@@ -1290,8 +1290,9 @@ bot ──ssh (jump key)──▶ hub sshd ──-W ru1:22──▶ ru1 sshd ─
   forwarding**: with port forwarding on, a key could also open listeners on the hub (`-R`: a TCP
   port on loopback, a root-owned Unix socket at a new path), and no authorized_keys option forbids
   that (`permitlisten` does not cover Unix sockets and has no `none`). So every relay's sshd forwards
-  **locally only**: `deploy.sh` installs `/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf`
-  (`AllowTcpForwarding local`, `AllowStreamLocalForwarding local`; `-R` is off for everyone on a
+  **local TCP only** (Unix-socket forwarding off in both directions — `permitopen` already refuses
+  socket paths it does not list, so that part is defense in depth): `deploy.sh` installs `/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf`
+  (`AllowTcpForwarding local`, `AllowStreamLocalForwarding no`; `-R` is off for everyone on a
   relay), the host check holds it in effect, and the hub's agent refuses `jump` until `sshd -T`
   shows it — a hub installed but not deployed since gets no jump line (update it first). `permitopen` lists **exactly** the
   relays with an agent that are behind the hub. The bot writes it (`jump key=… open=…`, or

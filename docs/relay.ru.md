@@ -1272,8 +1272,9 @@ source IPs. Оба можно переопределить кнопками «IP
   локальный проброс**: с включённым пробросом ключ мог бы ещё и открывать listener на hub (`-R`:
   TCP-порт на loopback, Unix-сокет от root по новому пути), а запретить это опцией authorized_keys
   нельзя (`permitlisten` не покрывает Unix-сокеты и не знает `none`). Поэтому sshd каждого relay
-  пробрасывает **только локально**: `deploy.sh` ставит `/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf`
-  (`AllowTcpForwarding local`, `AllowStreamLocalForwarding local`; `-R` на relay выключен для всех),
+  пробрасывает **только локальный TCP** (проброс Unix-сокетов выключен в обе стороны — `permitopen`
+  и так отклоняет не перечисленные в нём пути сокетов, так что это подстраховка): `deploy.sh` ставит `/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf`
+  (`AllowTcpForwarding local`, `AllowStreamLocalForwarding no`; `-R` на relay выключен для всех),
   проверка хоста следит, что он действует, а агент hub отказывает в `jump`, пока `sshd -T` этого не
   показывает, — hub, установленный, но с тех пор не деплоившийся, строку jump не получит (сначала
   обновите его). В `permitopen` **ровно** relay с

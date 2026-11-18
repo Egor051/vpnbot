@@ -53,8 +53,8 @@ so hosts are lower-cased here and the bot's -W is too), and /bin/false for any s
 no shell. The values are
 validated here (DNS name or IPv4, port 1..65535, at most 32, unique); a key that already
 has another line in the file (the agent's own key among them) is refused. And `jump` is
-refused until `sshd -T` shows forwarding LOCAL only (allowtcpforwarding local,
-allowstreamlocalforwarding local|no): port-forwarding in the key would otherwise also let
+refused until `sshd -T` shows forwarding LOCAL TCP only (allowtcpforwarding local,
+allowstreamlocalforwarding no): port-forwarding in the key would otherwise also let
 it open listeners here (ssh -R: TCP ports, root-owned Unix sockets), which no
 authorized_keys option forbids. scripts/deploy.sh installs that setting on every relay
 (deploy/host/ssh/00-vpnrelay-forwarding.conf). Every other
@@ -848,15 +848,15 @@ def sshd_forwarding() -> dict[str, str]:
 
 
 def require_local_forwarding() -> None:
-    """A jump line only where sshd forwards LOCALLY and nothing else (see the docstring)."""
+    """A jump line only where sshd forwards local TCP and nothing else (see the docstring)."""
     found = sshd_forwarding()
     tcp = found.get("allowtcpforwarding", "?")
     unix = found.get("allowstreamlocalforwarding", "?")
     if found.get("disableforwarding") == "yes" or tcp == "no":
         raise Failed(f"sshd forwards nothing here (allowtcpforwarding {tcp}, disableforwarding "
                      f"{found.get('disableforwarding', '?')}) — the jump would not work")
-    if tcp != "local" or unix not in ("local", "no"):
-        raise Failed(f"sshd allows remote forwarding here (allowtcpforwarding {tcp}, allowstreamlocalforwarding "
+    if tcp != "local" or unix != "no":
+        raise Failed(f"sshd forwards more than local TCP here (allowtcpforwarding {tcp}, allowstreamlocalforwarding "
                      f"{unix}): a jump key could open listeners on this host — deploy this relay first "
                      "(scripts/deploy.sh installs /etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf)")
 

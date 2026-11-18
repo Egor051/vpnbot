@@ -428,7 +428,7 @@ class Hub:
         self.confirm_rc = 0
         self.input_status = "PENDING CONFIRM (reverts at 2026-11-18 10:05:00 UTC) — main probe did not confirm it: x"
         # What `sshd -T` says about forwarding: local only, as deploy installs it.
-        self.sshd_t = "allowtcpforwarding local\nallowstreamlocalforwarding local\ndisableforwarding no\n"
+        self.sshd_t = "allowtcpforwarding local\nallowstreamlocalforwarding no\ndisableforwarding no\n"
         self.sshd_rc = 0
 
     def stub(self, name: str, body: str) -> None:
@@ -508,12 +508,14 @@ def test_the_hub_keeps_exactly_one_jump_line_and_nothing_else_moves(hub: Hub) ->
 @pytest.mark.parametrize(
     ("sshd_t", "why"),
     [
-        ("allowtcpforwarding yes\nallowstreamlocalforwarding yes\ndisableforwarding no\n", "allows remote forwarding"),
-        ("allowtcpforwarding remote\nallowstreamlocalforwarding local\ndisableforwarding no\n", "allows remote forwarding"),
-        ("allowtcpforwarding local\nallowstreamlocalforwarding all\ndisableforwarding no\n", "allows remote forwarding"),
+        ("allowtcpforwarding yes\nallowstreamlocalforwarding yes\ndisableforwarding no\n", "more than local TCP"),
+        ("allowtcpforwarding remote\nallowstreamlocalforwarding no\ndisableforwarding no\n", "more than local TCP"),
+        ("allowtcpforwarding local\nallowstreamlocalforwarding local\ndisableforwarding no\n", "more than local TCP"),
+        ("allowtcpforwarding local\nallowstreamlocalforwarding remote\ndisableforwarding no\n", "more than local TCP"),
+        ("allowtcpforwarding local\nallowstreamlocalforwarding all\ndisableforwarding no\n", "more than local TCP"),
         ("allowtcpforwarding no\nallowstreamlocalforwarding no\ndisableforwarding no\n", "forwards nothing"),
-        ("allowtcpforwarding local\nallowstreamlocalforwarding local\ndisableforwarding yes\n", "forwards nothing"),
-        ("", "allows remote forwarding"),
+        ("allowtcpforwarding local\nallowstreamlocalforwarding no\ndisableforwarding yes\n", "forwards nothing"),
+        ("", "more than local TCP"),
     ],
 )
 def test_no_jump_line_where_sshd_allows_remote_forwarding(hub: Hub, sshd_t: str, why: str) -> None:
@@ -543,7 +545,7 @@ def test_every_relay_gets_local_only_forwarding_from_the_deploy() -> None:
             '|0644|root:root|ssh|relay"') in text
     lines = [ln for ln in (ROOT / "deploy/host/ssh/00-vpnrelay-forwarding.conf").read_text(encoding="utf-8")
              .splitlines() if ln.strip() and not ln.startswith("#")]
-    assert lines == ["AllowTcpForwarding local", "AllowStreamLocalForwarding local"]
+    assert lines == ["AllowTcpForwarding local", "AllowStreamLocalForwarding no"]
 
 
 def test_the_jump_line_grants_forwarding_and_nothing_else() -> None:

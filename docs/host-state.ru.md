@@ -112,7 +112,7 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | Путь | Класс | Кто ставит | Заметки |
 |---|---|---|---|
 | `/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf` | repo-managed (`ssh`) | deploy.sh | вход только по ключу |
-| `/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf` | repo-managed (`ssh`) | deploy.sh | проброс только ЛОКАЛЬНЫЙ (`AllowTcpForwarding local`, `AllowStreamLocalForwarding local`): hub пробрасывает jump-ключ бота к relay за ним, а открыть listener (`-R`) нельзя никому — [relay.ru.md](relay.ru.md#управление-ru-relay-через-hub); без него агент отказывает в `jump` |
+| `/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf` | repo-managed (`ssh`) | deploy.sh | проброс: только локальный TCP (`AllowTcpForwarding local`, `AllowStreamLocalForwarding no`): hub пробрасывает jump-ключ бота к relay за ним, а открыть listener (`-R`) нельзя никому — [relay.ru.md](relay.ru.md#управление-ru-relay-через-hub); без него агент отказывает в `jump` |
 | `/etc/ssh/sshd_config` | дефолт пакета (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh возвращает шаблон | как на main |
 | `/usr/local/sbin/vpn-relay-apply` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | |
 | `/usr/local/sbin/vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | проверка инвариантов хоста |
