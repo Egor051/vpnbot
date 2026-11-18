@@ -2624,6 +2624,32 @@ async def test_hub_networks_are_cached_and_survive_a_failed_read(
         await harness.db.close()
 
 
+async def test_an_expired_hub_cache_is_refreshed_once_under_load(tmp_path: Path) -> None:
+    """Many requests hitting an expired cache at once: ONE table read, the others
+    wait for it (they would otherwise queue reads before the limiter could act)."""
+    import asyncio
+
+    from subscription_server.server import _HubNetworks
+
+    reads = 0
+    release = asyncio.Event()
+
+    class _Store:
+        async def load_relays(self) -> object:
+            nonlocal reads
+            reads += 1
+            await release.wait()
+            return SimpleNamespace(hub_networks=("hub",))
+
+    cache = _HubNetworks(ttl=30.0)
+    tasks = [asyncio.create_task(cache.get(_Store())) for _ in range(50)]  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(*tasks)
+    assert reads == 1
+    assert all(result == ("hub",) for result in results)
+
+
 @pytest.mark.parametrize("hub_enabled", [True, False])
 async def test_relay_probe_refuses_a_caller_inside_a_hubs_source_ips(tmp_path: Path, hub_enabled: bool) -> None:
     """SECURITY: a hub masquerades the subscription port. In the fallback mode an RU

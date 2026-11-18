@@ -272,9 +272,11 @@ class Fallback:
         )
         return self
 
-    def status_reply(self, *, lines: list[str] | None = None, rc: int = 0, live: str = MAIN) -> AgentReply:
+    def status_reply(
+        self, *, lines: list[str] | None = None, rc: int = 0, live: str = MAIN, target: str = ORIGIN
+    ) -> AgentReply:
         return AgentReply(0, {
-            "ok": True, "agent": "1", "live_target": live, "resolved": [live],
+            "ok": True, "agent": "1", "live_target": live, "resolved": [live], "target_host": target,
             "check": {"rc": rc, "lines": lines if lines is not None else [
                 f"vpn-relay-apply: ok: TCP connect {MAIN}:443", f"vpn-relay-apply: ok: TCP connect {MAIN}:2096",
                 "vpn-relay-apply: check OK",
@@ -369,6 +371,43 @@ async def test_assign_hub_refusals_leave_the_role_alone(fb: Fallback, case: str)
     assert not (await fb.relays_repo.get_by_id(relay.id)).is_hub  # type: ignore[union-attr]
     if case in ("not_resolving", "origin_in_set", "second_hub"):
         assert fb.client.calls == [], "the agent is never asked when the origin is not right"
+
+
+async def test_clear_hub_is_refused_while_a_name_still_points_at_the_hub(fb: Fallback) -> None:
+    """A switch-off that did not finish: the mode is off, but a record still points
+    at the hub — it keeps its role (and with it the subscription's hub rules)."""
+    await _ready(fb)
+    await fb.service.enable(ADMIN)
+    fb.cf.fail_writes.add("relay.example.net")
+    report = await fb.service.disable(ADMIN)
+    assert not report.complete and await fb.repo.mode_on() is False
+    hub = (await fb.relays_repo.list_hubs())[0]
+    with pytest.raises(InvalidOperation) as info:
+        await fb.service.clear_hub(ADMIN, hub.id)
+    assert info.value.key == "fb_err_hub_in_use"
+    fb.cf.fail_writes.clear()
+    assert (await fb.service.repeat(ADMIN)).complete
+    assert not (await fb.service.clear_hub(ADMIN, hub.id)).is_hub
+
+
+async def test_the_relay_card_cannot_delete_detach_or_repoint_a_hub(fb: Fallback) -> None:
+    hub = await fb.hub()
+    for call in (
+        fb.relay_service.delete(ADMIN, hub.id, with_keys=False),
+        fb.relay_service.delete(ADMIN, hub.id, with_keys=True, relay_side=False),
+        fb.relay_service.detach_agent(ADMIN, hub.id, uninstall=True),
+        fb.relay_service.change_forward(ADMIN, hub.id, target_host=ZONE, tcp="443", udp="443"),
+    ):
+        with pytest.raises(InvalidOperation) as info:
+            await call
+        assert info.value.key == "relay_is_hub"
+    assert [c["request"] for c in fb.client.calls] == [f"apply target={ORIGIN} tcp=443,2096 udp=443"], (
+        "nothing reached the hub's agent"
+    )
+    assert await fb.relays_repo.get_by_id(hub.id) is not None
+    # Once it is an ordinary relay again, the card works as before.
+    await fb.service.clear_hub(ADMIN, hub.id)
+    await fb.relay_service.change_forward(ADMIN, hub.id, target_host=ZONE, tcp="443", udp="443")
 
 
 async def test_clear_hub_is_refused_while_the_mode_is_on(fb: Fallback) -> None:
@@ -492,13 +531,14 @@ async def test_a_failed_preflight_touches_no_record_and_keeps_the_mode(fb: Fallb
 
 
 @pytest.mark.parametrize("breakage", ["loop_live", "origin_public", "origin_in_set", "token", "foreign", "count",
-                                      "agent", "forward", "no_hub"])
+                                      "agent", "forward", "no_hub", "upstream_by_hand", "ip_forward"])
 async def test_every_preflight_blocker(fb: Fallback, breakage: str) -> None:
     hub = await _ready(fb)
     expected = {
         "loop_live": "fb_pf_loop", "origin_public": "fb_pf_loop", "origin_in_set": "fb_pf_loop",
         "token": "fb_pf_token", "foreign": "fb_pf_record_foreign", "count": "fb_pf_record_count",
         "agent": "fb_pf_agent_failed", "forward": "fb_pf_forward", "no_hub": "fb_pf_hub",
+        "upstream_by_hand": "fb_pf_loop", "ip_forward": "fb_pf_reach",
     }[breakage]
     if breakage == "loop_live":
         fb.client.replies["status"] = fb.status_reply(live=HUB)
@@ -519,6 +559,18 @@ async def test_every_preflight_blocker(fb: Fallback, breakage: str) -> None:
         await fb.relays_repo.update_agent_forward(hub.id, target_host=ORIGIN, tcp_ports=(443,), udp_ports=(443,))
     elif breakage == "no_hub":
         await fb.relays_repo.update(hub.id, {"enabled": False}, now=NOW, updated_by=None)
+    elif breakage == "upstream_by_hand":
+        # Re-pointed on the relay by hand to a failover name: it resolves to main
+        # today, so every address agrees — only the reported NAME tells.
+        fb.client.replies["status"] = fb.status_reply(target=ZONE)
+    elif breakage == "ip_forward":
+        # The check's FIRST failure is the input filter's (rc 16), but forwarding is
+        # off too: the hub would accept the names and forward nothing.
+        fb.client.replies["status"] = fb.status_reply(rc=16, lines=[
+            "FAIL: table inet vpnrelay_input is absent although RELAY_INPUT_FILTER=on",
+            "FAIL: net.ipv4.ip_forward = 0, expected 1",
+            f"ok: TCP connect {MAIN}:443", f"ok: TCP connect {MAIN}:2096",
+        ])
     preflight = await fb.service.preflight(ADMIN)
     assert not preflight.passed
     assert expected in {item.key for item in preflight.failures}, preflight
@@ -677,6 +729,20 @@ async def test_single_direct_keys_are_counted_without_bundle_children(fb: Fallba
 
 
 # ── pure helpers ──────────────────────────────────────────────────────────────
+
+
+def test_check_reaches_accepts_16_to_18_only_when_every_failure_is_the_input_filters() -> None:
+    ok_tcp = [f"ok: TCP connect {MAIN}:443"]
+    only_filter = {"check": {"rc": 18, "lines": [
+        "FAIL: port 8080/tcp listens on 0.0.0.0 but is not in RELAY_INPUT_EXTRA_TCP (listening but filtered)",
+        *ok_tcp,
+    ]}}
+    assert check_reaches(only_filter, MAIN, (443,)) == (True, [])
+    forward_off = {"check": {"rc": 17, "lines": [
+        "FAIL: table inet vpnrelay_input differs from the one rendered",
+        "FAIL: net.ipv4.ip_forward = 0, expected 1", *ok_tcp,
+    ]}}
+    assert check_reaches(forward_off, MAIN, (443,))[0] is False
 
 
 def test_check_reaches_reads_the_agents_check_lines() -> None:

@@ -48,15 +48,23 @@ class _HubNetworks:
         self._clock = clock
         self._networks: tuple[ipaddress.IPv4Network, ...] = ()
         self._expires: float | None = None
+        # Single flight: when the cache expires under load, ONE request reads the
+        # table and the others wait for it instead of queueing reads of their own
+        # in front of the store's lock (each before the rate limit could refuse it).
+        self._refresh = asyncio.Lock()
+
+    def _stale(self) -> bool:
+        return self._expires is None or self._clock() >= self._expires
 
     async def get(self, store: ReadOnlyBundleStore) -> tuple[ipaddress.IPv4Network, ...]:
-        now = self._clock()
-        if self._expires is None or now >= self._expires:
-            try:
-                self._networks = (await store.load_relays()).hub_networks
-            except BundleStoreUnavailable:
-                pass
-            self._expires = now + self.ttl
+        if self._stale():
+            async with self._refresh:
+                if self._stale():
+                    try:
+                        self._networks = (await store.load_relays()).hub_networks
+                    except BundleStoreUnavailable:
+                        pass
+                    self._expires = self._clock() + self.ttl
         return self._networks
 
 

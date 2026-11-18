@@ -219,9 +219,22 @@ def _ipv4(value: str | None) -> str | None:
     return None if address is None else str(address)
 
 
+def only_input_filter_failures(lines: Iterable[str]) -> bool:
+    """Every ``FAIL:`` line of a ``vpn-relay-apply check`` is about the input filter.
+
+    The check exits with the code of its FIRST failure and runs the input filter's
+    steps before ip_forward, conntrack, TCP and TLS, so an exit 16-18 alone does
+    not say the forward is fine — the FAIL lines do. The agent's apply uses the
+    same rule (scripts/vpn-relay-agent: only_input_filter_failures).
+    """
+    fails = [line for line in lines if "FAIL: " in line]
+    return all("vpnrelay_input" in line or "listening but filtered" in line for line in fails)
+
+
 def check_reaches(status: Mapping[str, Any], address: str, ports: Iterable[int]) -> tuple[bool, list[int]]:
     """Whether the agent's own ``vpn-relay-apply check`` connected to *address* on
-    every port of *ports*. Returns (passed, the ports that did not)."""
+    every port of *ports* — and failed on nothing but the input filter. Returns
+    (passed, the ports that did not connect)."""
     check = status.get("check")
     lines = check.get("lines") if isinstance(check, dict) else None
     rc = check.get("rc") if isinstance(check, dict) else None
@@ -231,7 +244,8 @@ def check_reaches(status: Mapping[str, Any], address: str, ports: Iterable[int])
         if not any(f"ok: TCP connect {address}:{port}" in line for line in text)
         or any(f"FAIL: TCP connect {address}:{port}" in line for line in text)
     ]
-    return (isinstance(rc, int) and rc in _HUB_CHECK_OK and not missing), missing
+    healthy = isinstance(rc, int) and (rc == 0 or (rc in _HUB_CHECK_OK and only_input_filter_failures(text)))
+    return (healthy and not missing), missing
 
 
 # ── the service ───────────────────────────────────────────────────────────────
@@ -566,7 +580,8 @@ class FallbackService:
                 )
             tcp, udp = self.hub_ports()
             reply = await self.relays.change_forward(
-                actor_user_id, relay.id, target_host=name, tcp=format_ports(tcp), udp=format_ports(udp)
+                actor_user_id, relay.id, target_host=name, tcp=format_ports(tcp), udp=format_ports(udp),
+                allow_hub=True,
             )
             live = reply.payload.get("live_target")
             resolved = reply.payload.get("resolved")
@@ -587,16 +602,24 @@ class FallbackService:
         await self.refresh_state()
         return HubOutcome(relay=after, origin=name, main_ipv4=main, created_record=created)
 
+    async def hub_in_use(self) -> bool:
+        """Failover names point — or may point — at the hub: the mode is on, or a
+        name's last successful write put the hub there (a switch-off that did not
+        finish). While this holds the hub must stay a hub and stay installed."""
+        if await self.repo.mode_on():
+            return True
+        return any(name.applied == FAILOVER for name in await self.repo.list_names())
+
     async def clear_hub(self, actor_user_id: int, relay_id: int) -> Relay:
-        """Back to an ordinary relay (its forward stays as it is). Refused while the
-        mode is on: the failover names point at it."""
+        """Back to an ordinary relay (its forward stays as it is). Refused while any
+        failover name may still point at it (:meth:`hub_in_use`)."""
         await self.users.require_superadmin(actor_user_id)
         async with self._lock:
             relay = await self._require_relay(relay_id)
             if not relay.is_hub:
                 return relay
-            if await self.repo.mode_on():
-                raise InvalidOperation("режим включён", key="fb_err_mode_on")
+            if await self.hub_in_use():
+                raise InvalidOperation("имена указывают на hub", key="fb_err_hub_in_use", params={"name": relay.name})
             await self.relays_repo.set_role(relay.id, RELAY_ROLE_EDGE, now=self.clock.now(), updated_by=actor_user_id)
             await self.relays.refresh_catalog()
             after = await self._require_relay(relay.id)
@@ -776,14 +799,20 @@ class FallbackService:
             ))
         # The loop: the hub's upstream is outside the set and IS the main server —
         # by the DNS API's record, by public resolvers and by the hub's own view.
+        # The upstream NAME is the one the hub reports now, not the bot's stored
+        # copy: a hub re-pointed by hand to a failover name resolves to main today
+        # (so every address check agrees) and would DNAT into itself after the switch.
         live = payload.get("live_target") if payload else None
         resolved = payload.get("resolved") if payload else None
+        reported = str(payload.get("target_host") or "").lower() if payload else ""
         hub_view = live == main and (not isinstance(resolved, list) or set(map(str, resolved)) <= {main})
         answers = await self._doh(origin)
         public = NameResult(name=origin, ok=True, ipv4=main, doh=tuple(answers)).propagated
+        same_upstream = reported == origin.lower()
         items.append(PreflightItem(
-            "fb_pf_loop", origin not in names and hub_view and public,
-            {"origin": origin, "main": main, "hub_view": str(live or "—"), "seen": _seen(answers)},
+            "fb_pf_loop",
+            origin not in names and reported not in names and same_upstream and hub_view and public,
+            {"origin": origin, "main": main, "hub_view": f"{reported or '—'} → {live or '—'}", "seen": _seen(answers)},
         ))
         return items
 

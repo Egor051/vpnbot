@@ -314,6 +314,10 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 | Relay: change a relay's ports / target | «⚙️ Порты / цель» (the typed step checks the elevation again) |
 | Relay: disconnect the agent | «🔌 Отключить агент» |
 | Relay: uninstall on the relay (delete of a relay with an agent, «🧹 Отключить и снять с relay») | the final button |
+| Fallback mode: switch on / off / repeat ([docs/relay.md](relay.md#fallback-mode-hub)) | «✅ Да, …» of the confirmation, «🔁 Повторить» |
+| Fallback mode: the hub role | «🛟 Сделать hub» (the typed origin checks the elevation again), «🛟 Снять роль hub» |
+| Fallback mode: the DNS API token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |
+| Fallback mode: names, addresses, direct links' host, `fallback-url` | each button; a typed value checks the elevation again |
 
 A correct code **elevates** the user for 5 minutes: inside that window nothing is asked
 again. Elevations live in the bot process only — a restart drops them. The prompt
