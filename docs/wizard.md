@@ -220,6 +220,15 @@ A thin wrapper around the one supported redeploy path, `scripts/redeploy.sh`:
   runs (`rolled_back`). No report — deploy.sh stopped before Phase 2 (nothing changed)
   or never finished — is `failed`: read the log.
 
+**Progress.** The plan lists the deploy's steps ⚪ (preflight, fetch, tests, checks, backup,
+install, restart, verify) under «✅ Применить». While `CHECK=1` and the deploy run, the helper reads
+redeploy.sh's output as it comes and writes a `deploy` event into the status file every 2 s
+(`deploy_progress` of the [step markers](deployment.md#step-and-result-markers): each step's state
+and the tests — done of `[deploy:tests total=N]`); the bot's message shows ⚪ 🔄 ✅ ❌ ⏭, «N/M» and
+the percentage, edited at most every 3 s. The deploy restarts the bot: the message id is in
+`wizard_runs`, the new process reads the same status file — fed from the deploy's output — and
+edits the same message on, then closes it with the result (✅, or ❌ with the cause below).
+
 A failure — of the plan's `CHECK=1` or of the deploy — shows **its cause**, not just «failed»:
 the reason deploy.sh reported in its [result line](deployment.md#step-and-result-markers)
 (another deploy runs, `git fetch`, no ensurepip / test venv, the tests, a Phase 1 gate, a
@@ -238,6 +247,13 @@ operator reads it. Parameter `force` (`0`/`1`) is `FORCE=1`.
 
 Not a mode: the wizard's «🛰 Relay» opens the admin panel's ONE relay screen — see
 [relay.md → Managing relays in the admin panel](relay.md#managing-relays-in-the-admin-panel).
+
+### 🔑 SSH-порт relay
+
+Not a mode either: every relay with an agent, its SSH port and its move to `SSH_PORT`. Per relay
+«✅ Подтвердить закрытие …» / «Оставить …» (phase 1), «↩️ Вернуться к переезду» (held) and
+«✏️ Сменить порт» (phase 1 to a new port at once, no deploy). All behind TOTP — see
+[host-state.md → A relay's migration from the bot](host-state.md#a-relays-migration-from-the-bot).
 
 ## The helpers' library
 
@@ -323,6 +339,7 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 | Relay: change a relay's ports / target | «⚙️ Порты / цель» (the typed step checks the elevation again) |
 | Relay: disconnect the agent | «🔌 Отключить агент» |
 | Relay: uninstall on the relay (delete of a relay with an agent, «🧹 Отключить и снять с relay») | the final button |
+| Relay: the SSH port — close the old port, keep it, resume, change the port ([host-state.md](host-state.md#a-relays-migration-from-the-bot)) | «✅ Подтвердить закрытие …», «Оставить …», «↩️ Вернуться к переезду», «✏️ Сменить порт» (the typed port checks the elevation again) |
 | Fallback mode: switch on / off / repeat ([docs/relay.md](relay.md#fallback-mode-hub)) | «✅ Да, …» of the confirmation, «🔁 Повторить» |
 | Fallback mode: the hub role | «🛟 Сделать hub» (the typed origin checks the elevation again), «🛟 Снять роль hub» |
 | Fallback mode: the DNS API token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |

@@ -20,8 +20,15 @@ This module is the bot's part of it, on the main server:
   vpn-bot-ssh-port.service, which closes the old port. The port and the start time
   travel in the button, so a button of an older migration is refused by the helper.
 
-A relay runs no bot: its migration is proven by main's probe or by its sshd log, and
-its state is in its own deploy report and journal.
+A RELAY runs no bot; its agent's ``status`` carries the migration (``ssh_migration``:
+the keys of ``vpn-bot-ssh-port plan``). The same monitor reads it from every status the
+bot keeps (:meth:`SshPortMonitor.relay_status`, a listener of services/relays.py) and
+tells the superadmins ONCE per migration, in bold: «relay X слушает SSH на 22 и 54321 —
+подтвердите закрытие 22», with «Подтвердить» / «Оставить 22». «Подтвердить» is
+:meth:`services.relays.RelayService.finish_ssh_port` — the bot's agent call on the NEW
+port is the proof, and phase 2 runs in it; «Оставить» holds phase 1 on the relay
+(``ssh-port-keep``), and nothing asks again. The relay id, the port and the start travel
+in the button, so a button of an older migration is refused by the relay's helper.
 """
 
 from __future__ import annotations
@@ -29,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -53,6 +60,10 @@ HELPER_PATH = Path("/usr/local/sbin/vpn-bot-ssh-port")
 # schema_meta key: what was told, as JSON {"started": <since>, "done": <since>, ...}.
 META_KEY = "ssh_port_alerted"
 CALLBACK_PREFIX = "sshport:ok:"
+# Relays: schema_meta {"<relay id>": <since told>}; buttons
+# sshport:r:ok:<relay id>:<port>:<since> / sshport:r:keep:<relay id>:<since>.
+RELAY_META_KEY = "relay_ssh_port_alerted"
+RELAY_CALLBACK_PREFIX = "sshport:r:"
 CONFIRM_TIMEOUT_SECONDS = 60.0
 
 
@@ -117,6 +128,58 @@ def parse_state(raw: str) -> Migration:
         proof_kind=kind,
         proof_detail=detail,
     )
+
+
+def migration_from_plan(plan: object) -> tuple[Migration, bool] | None:
+    """A relay's ``ssh_migration`` (``vpn-bot-ssh-port plan`` keys) as a
+    :class:`Migration` and whether it is held — None when it is not a migration
+    (steady, refused, a plan an older agent did not send)."""
+    if not isinstance(plan, dict):
+        return None
+    state, action = str(plan.get("state") or ""), str(plan.get("action") or "")
+    try:
+        from_ports = tuple(int(p) for p in str(plan.get("from") or "").split(",") if p.strip())
+        to = int(str(plan.get("to") or "0"))
+        since = int(str(plan.get("since") or "0"))
+    except ValueError:
+        return None
+    if not from_ports or not 1 <= to <= 65535 or since <= 0 or not all(1 <= p <= 65535 for p in from_ports):
+        return None
+    if state != "phase1" or action not in ("wait", "finish"):
+        return None
+    m = Migration(from_ports=from_ports, to=to, phase=1, since=since, done_iso="", proof_kind="", proof_detail="")
+    return m, str(plan.get("hold") or "0") == "1"
+
+
+def relay_callback_data(verb: str, relay_id: int, m: Migration) -> str:
+    if verb == "ok":
+        return f"{RELAY_CALLBACK_PREFIX}ok:{relay_id}:{m.to}:{m.since}"
+    return f"{RELAY_CALLBACK_PREFIX}{verb}:{relay_id}:{m.since}"
+
+
+def parse_relay_callback(data: str) -> tuple[str, int, int, int] | None:
+    """(verb, relay id, port — 0 for keep/resume, since) of a relay's SSH port button."""
+    if not data.startswith(RELAY_CALLBACK_PREFIX):
+        return None
+    parts = data[len(RELAY_CALLBACK_PREFIX):].split(":")
+    if not all(p.isdigit() and len(p) <= 12 for p in parts[1:]):
+        return None
+    if len(parts) == 4 and parts[0] == "ok" and 1 <= int(parts[2]) <= 65535:
+        return "ok", int(parts[1]), int(parts[2]), int(parts[3])
+    if len(parts) == 3 and parts[0] in ("keep", "resume"):
+        return parts[0], int(parts[1]), 0, int(parts[2])
+    return None
+
+
+def relay_confirm_keyboard(relay_id: int, m: Migration) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t("btn_relay_ssh_port_confirm", old=m.old), callback_data=relay_callback_data("ok", relay_id, m))],
+        [InlineKeyboardButton(text=t("btn_relay_ssh_port_keep", old=m.old), callback_data=relay_callback_data("keep", relay_id, m))],
+    ])
+
+
+def render_relay_started(name: str, m: Migration) -> str:
+    return t("ssh_port_relay_started", name=h(name), old=h(m.old), new=m.to, since=h(m.since_text))
 
 
 def confirm_callback_data(m: Migration) -> str:
@@ -252,6 +315,34 @@ class SshPortMonitor:
             now["cancelled"] = m.since
         if now != told:
             await self._store.set_meta(META_KEY, json.dumps(now, sort_keys=True))
+
+    async def _relay_told(self) -> dict[str, int]:
+        raw = await self._store.get_meta(RELAY_META_KEY)
+        try:
+            data = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, int)}
+
+    async def relay_status(self, relay: object, payload: Mapping[str, object]) -> None:
+        """A relay's kept status (a listener of services/relays.py): when it is in phase 1
+        of a migration that is not held and was not told yet, ask the superadmins —
+        once per migration; «Оставить» holds it on the relay, so it is not asked again."""
+        if self.bot is None and self._send_override is None:
+            return
+        relay_id, name = getattr(relay, "id", None), getattr(relay, "name", "")
+        found = migration_from_plan(payload.get("ssh_migration"))
+        if not isinstance(relay_id, int) or found is None:
+            return
+        m, held = found
+        told = await self._relay_told()
+        if held or told.get(str(relay_id)) == m.since:
+            return
+        await self._send(render_relay_started(str(name), m), relay_confirm_keyboard(relay_id, m))
+        told[str(relay_id)] = m.since
+        await self._store.set_meta(RELAY_META_KEY, json.dumps(told, sort_keys=True))
 
     async def confirm(self, admin_id: int, port: int, since: int) -> str:
         """Proof (c): the superadmin connected on the new port. Returns the helper's line."""

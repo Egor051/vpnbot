@@ -19,6 +19,8 @@ everything else is refused with exit 2 before anything is read or changed:
     update                                deploy the newest release tag (never backwards
                                           or sideways) with scripts/deploy.sh — the
                                           relay's one update engine
+    update-status                         update.json as it is now (the progress of a
+                                          running update: its steps and tests), read-only
     uninstall                             remove everything scripts/install.sh installed
     input-confirm                         run `vpn-relay-apply input-confirm` from THIS
                                           ssh session (a new one: the bot's own proof
@@ -26,6 +28,23 @@ everything else is refused with exit 2 before anything is read or changed:
     jump key=<ed25519 blob> open=<host>:<port>[,<host>:<port>...]
                                           a hub: write the bot's ONE jump line (below)
     jump-off                              a hub: remove that line
+    ssh-port-finish port=<port> since=<epoch>
+                                          the SSH port migration, phase 2: only from a
+                                          session that came in on <port> (below)
+    ssh-port-keep since=<epoch>           keep the old port: no phase 2 until resumed
+    ssh-port-resume since=<epoch>         go on with the migration (waits for proof)
+    ssh-port-set port=<port>              SSH_PORT=<port> in .env and phase 1 now (both
+                                          ports listen) — without a deploy
+
+THE SSH PORT (docs/host-state.md#the-ssh-port). A deploy moves ssh to SSH_PORT in two
+phases; phase 2 closes the old port only on a proof that the new one works from
+outside. `ssh-port-finish` IS that proof for a relay: the bot calls it on the NEW port
+(directly, or through the hub with the new port opened in the jump line), so this
+session's own SSH_CONNECTION shows the port sshd accepted it on — refused unless it is
+<port>. Then `vpn-bot-ssh-port confirm-session` writes the proof and runs phase 2 at
+once, under the deploy lock. A confirmation that never reaches the relay over the new
+port closes nothing (the dead-man principle of the input filter). `status` carries the
+migration (`ssh_migration`, from `vpn-bot-ssh-port plan`), so the bot can ask.
 
 Before a successful `hello` only `hello` is accepted. `hello` compares sha256(token)
 with the hash scripts/install.sh stored from the pairing code (constant time), within
@@ -98,6 +117,7 @@ import hmac
 import json
 import os
 import re
+import select
 import shutil
 import subprocess  # noqa: S404 — fixed argv lists of system tools, never a shell
 import sys
@@ -107,9 +127,11 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
-# 2: input-confirm, jump, jump-off; input_status and jump in the facts. The protocol
+# 2: input-confirm, jump, jump-off; input_status and jump in the facts.
+# 3: ssh-port-finish / -keep / -resume / -set; ssh_migration in the facts; update-status
+# and update.json's `progress`. The protocol
 # (what `hello` answers) is unchanged.
-AGENT_VERSION = "2"
+AGENT_VERSION = "3"
 PROTOCOL = 1
 # A `jump` list is the longest request (up to 32 host:port entries).
 MAX_REQUEST = 4096
@@ -143,6 +165,9 @@ JUMP_LOCK_FILE = P("/run/vpn-relay-agent.jump.lock")
 DEFAULT_AUTHORIZED_KEYS = "/root/.ssh/authorized_keys"
 UNINSTALL_RESULT = P("/run/vpn-relay-uninstall.json")
 APPLY_HELPER = "/usr/local/sbin/vpn-relay-apply"
+SSH_PORT_HELPER = "/usr/local/sbin/vpn-bot-ssh-port"
+# The keys of `vpn-bot-ssh-port plan` that `status` hands the bot (ssh_migration).
+SSH_PLAN_KEYS = ("ssh_port", "current", "state", "action", "from", "to", "since", "hold", "proof", "status", "last_error")
 AGENT_PATH = "/usr/local/sbin/vpn-relay-agent"
 UNIT_DIR = P("/etc/systemd/system")
 SYSCTL_FILE = P("/etc/sysctl.d/90-vpn-relay.conf")
@@ -189,12 +214,17 @@ WHITELIST: dict[str, re.Pattern[str]] = {
     "status": re.compile(r"status"),
     "apply": re.compile(rf"apply target=(?P<target>{_HOST}) tcp=(?P<tcp>{_PORTS}) udp=(?P<udp>{_PORTS})"),
     "update": re.compile(r"update"),
+    "update-status": re.compile(r"update-status"),
     "uninstall": re.compile(r"uninstall"),
     "input-confirm": re.compile(r"input-confirm"),
     "jump": re.compile(
         rf"jump key=(?P<key>{_ED25519_BLOB}) open=(?P<open>{_OPEN}(?:,{_OPEN}){{0,{MAX_JUMP_OPEN - 1}}})"
     ),
     "jump-off": re.compile(r"jump-off"),
+    "ssh-port-finish": re.compile(r"ssh-port-finish port=(?P<port>[0-9]{1,5}) since=(?P<since>[0-9]{1,12})"),
+    "ssh-port-keep": re.compile(r"ssh-port-keep since=(?P<since>[0-9]{1,12})"),
+    "ssh-port-resume": re.compile(r"ssh-port-resume since=(?P<since>[0-9]{1,12})"),
+    "ssh-port-set": re.compile(r"ssh-port-set port=(?P<port>[0-9]{1,5})"),
 }
 _LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
 
@@ -345,6 +375,54 @@ def run(
     if check and result.returncode != 0:
         raise Failed(f"{Path(args[0]).name} exit {result.returncode}: {tail(result.stderr or result.stdout)}")
     return result
+
+
+def run_streaming(
+    args: Sequence[str], *, timeout: float, env: dict[str, str] | None = None,
+    on_output: Any = None, every: float = 2.0,
+) -> subprocess.CompletedProcess[str]:
+    """:func:`run` for a long command whose output is read WHILE it runs: stdout and
+    stderr as one stream, *on_output(text_so_far)* at most every *every* seconds
+    (the progress of `update`). 124 on a timeout (the process is killed)."""
+    if _BIN:
+        exe = Path(_BIN) / Path(args[0]).name
+        if not exe.exists():
+            return subprocess.CompletedProcess(list(args), 127, "", f"selftest: no stub for {args[0]}")
+        args = [str(exe), *args[1:]]
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — argv only, fixed programs, never a shell
+            list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            env=command_env(env),
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(list(args), 127, "", f"{args[0]}: not found")
+    assert proc.stdout is not None
+    fd = proc.stdout.fileno()
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    told = 0.0
+
+    def text() -> str:
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            proc.kill()
+            proc.wait()
+            return subprocess.CompletedProcess(list(args), 124, text(), f"{args[0]}: timeout after {timeout}s")
+        ready, _, _ = select.select([fd], [], [], min(left, every))
+        if ready:
+            data = os.read(fd, 65536)
+            if not data:
+                break
+            chunks.append(data)
+        if on_output is not None and time.monotonic() - told >= every:
+            told = time.monotonic()
+            with contextlib.suppress(Exception):
+                on_output(text())
+    proc.wait()
+    return subprocess.CompletedProcess(list(args), proc.returncode, text(), "")
 
 
 def tail(text: str, lines: int = 12) -> str:
@@ -567,6 +645,20 @@ def input_status() -> str:
     return lines[-1][:600] if out.returncode == 0 and lines else ""
 
 
+def ssh_migration() -> dict[str, str]:
+    """`vpn-bot-ssh-port plan`, the keys the bot reads (SSH_PLAN_KEYS); {} when it
+    cannot tell (a helper from before this, a refused plan)."""
+    out = run([SSH_PORT_HELPER, "plan"], timeout=150)
+    data: dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key in SSH_PLAN_KEYS:
+            data[key] = value.strip()[:400]
+    if out.returncode != 0:
+        data.setdefault("action", "refused")
+    return data
+
+
 def checkout_ref() -> dict[str, str]:
     head = run(["git", "-C", str(APP_DIR), "rev-parse", "HEAD"], timeout=15).stdout.strip()
     tag = run(["git", "-C", str(APP_DIR), "describe", "--tags", "--always"], timeout=15).stdout.strip()
@@ -595,6 +687,7 @@ def facts(*, with_check: bool) -> dict[str, Any]:
         "checkout": checkout_ref(),
         "update": read_json(UPDATE_FILE) or {},
         "input_status": input_status(),
+        "ssh_migration": ssh_migration(),
     }
     jump = jump_state()
     if jump is not None:
@@ -748,6 +841,12 @@ def cmd_update(_: dict[str, str]) -> dict[str, Any]:
     return {"update": result}
 
 
+def cmd_update_status(_: dict[str, str]) -> dict[str, Any]:
+    """update.json as it is now — no lock (it runs next to `update`), nothing else."""
+    require_paired()
+    return {"update": read_json(UPDATE_FILE) or {}}
+
+
 def cmd_uninstall(_: dict[str, str]) -> dict[str, Any]:
     with exclusive():
         require_paired()
@@ -896,15 +995,113 @@ def cmd_jump_off(_: dict[str, str]) -> dict[str, Any]:
     return {"jump": {"open": [], "changed": changed}}
 
 
+def _port(raw: str) -> int:
+    if not re.fullmatch(r"[1-9][0-9]{0,4}", raw) or int(raw) > 65535:
+        raise Refused(f"port: {raw!r} is not in 1..65535")
+    return int(raw)
+
+
+def _since(raw: str) -> int:
+    if not re.fullmatch(r"[1-9][0-9]{0,11}", raw):
+        raise Refused(f"since: {raw!r} is not a migration start")
+    return int(raw)
+
+
+def _ssh_port_helper(args: list[str], timeout: int = 180) -> subprocess.CompletedProcess[str]:
+    return run([SSH_PORT_HELPER, *args], timeout=timeout)
+
+
+def _helper_lines(done: subprocess.CompletedProcess[str]) -> list[str]:
+    return [ln for ln in (done.stdout + done.stderr).splitlines() if ln.strip()][-12:]
+
+
+def _session() -> tuple[str, int] | None:
+    """(client address, local port) of the ssh session that runs this request, or None.
+
+    The seam is off in an ssh session (SSH_CONNECTION set): tests hand the facts in
+    VPN_RELAY_AGENT_SELFTEST_CONN instead."""
+    raw_conn = os.environ.get("VPN_RELAY_AGENT_SELFTEST_CONN") if SELFTEST else os.environ.get("SSH_CONNECTION")
+    conn = (raw_conn or "").split()
+    if len(conn) != 4 or not conn[3].isdigit():
+        return None
+    return conn[0], int(conn[3])
+
+
+def cmd_ssh_port_finish(args: dict[str, str]) -> dict[str, Any]:
+    """Phase 2 of the SSH port migration — only from a session that came in on the new port."""
+    port, since = _port(args["port"]), _since(args["since"])
+    require_paired()
+    session = _session()
+    if session is None:
+        raise Refused("not an ssh session: there is no port it came in on")
+    addr, local_port = session
+    if local_port != port:
+        raise Refused(f"this session came in on {local_port}, not on {port}: call it on the new port")
+    with exclusive():
+        done = _ssh_port_helper(["confirm-session", "--port", str(port), "--since", str(since),
+                                 "--local-port", str(local_port), "--addr", addr])
+    lines = _helper_lines(done)
+    if done.returncode != 0:
+        raise Failed(f"vpn-bot-ssh-port confirm-session exit {done.returncode}: {tail(done.stdout + done.stderr, 3)}",
+                     extra={"ssh_port": {"rc": done.returncode, "lines": lines}})
+    return {"ssh_port": {"rc": 0, "lines": lines}, **facts(with_check=False)}
+
+
+def _cmd_ssh_port_hold(args: dict[str, str], *, hold: bool) -> dict[str, Any]:
+    since = _since(args["since"])
+    require_paired()
+    with exclusive():
+        done = _ssh_port_helper(["hold" if hold else "unhold", "--since", str(since)], timeout=60)
+    if done.returncode != 0:
+        raise Failed(f"vpn-bot-ssh-port {'hold' if hold else 'unhold'} exit {done.returncode}: "
+                     f"{tail(done.stdout + done.stderr, 3)}")
+    return {"ssh_port": {"rc": 0, "lines": _helper_lines(done)}, "ssh_migration": ssh_migration()}
+
+
+def cmd_ssh_port_keep(args: dict[str, str]) -> dict[str, Any]:
+    return _cmd_ssh_port_hold(args, hold=True)
+
+
+def cmd_ssh_port_resume(args: dict[str, str]) -> dict[str, Any]:
+    return _cmd_ssh_port_hold(args, hold=False)
+
+
+def cmd_ssh_port_set(args: dict[str, str]) -> dict[str, Any]:
+    """SSH_PORT=<port> in the relay's .env, then phase 1 now (`begin`) — rolled back to
+    the old .env when `begin` fails. The helper refuses a port a forward or a listener
+    of this relay holds."""
+    port = _port(args["port"])
+    require_paired()
+    with exclusive():
+        before = read_env()
+        if port in ports_of(env_value(before, "RELAY_FORWARD_TCP_PORTS")):
+            raise Refused(f"tcp {port} is forwarded by this relay — it cannot be the SSH port")
+        write_atomic(ENV_FILE, env_with(before, {"SSH_PORT": str(port)}))
+        # The port this session came in on stays open: the bot manages the relay
+        # through it until it has proved the new one.
+        session = _session()
+        done = _ssh_port_helper(["begin", *(["--keep", str(session[1])] if session else [])])
+        if done.returncode != 0:
+            write_atomic(ENV_FILE, before)
+            raise Failed(f"vpn-bot-ssh-port begin exit {done.returncode} (SSH_PORT restored): "
+                         f"{tail(done.stdout + done.stderr, 3)}")
+    return {"ssh_port": {"rc": 0, "lines": _helper_lines(done)}, **facts(with_check=False)}
+
+
 COMMANDS = {
     "hello": cmd_hello,
     "status": cmd_status,
     "apply": cmd_apply,
     "update": cmd_update,
+    "update-status": cmd_update_status,
     "uninstall": cmd_uninstall,
     "input-confirm": cmd_input_confirm,
     "jump": cmd_jump,
     "jump-off": cmd_jump_off,
+    "ssh-port-finish": cmd_ssh_port_finish,
+    "ssh-port-keep": cmd_ssh_port_keep,
+    "ssh-port-resume": cmd_ssh_port_resume,
+    "ssh-port-set": cmd_ssh_port_set,
 }
 
 
@@ -1033,6 +1230,50 @@ def deploy_verdict(output: str, rc: int) -> dict[str, Any]:
         ],
         "log": log.group("log") if log else "",
     }
+# deploy.sh's DEPLOY_STEPS, in order (the progress of a running deploy).
+DEPLOY_STEPS = ("preflight", "fetch", "tests", "checks", "backup", "install", "restart", "verify")
+_DV_STEP = re.compile(r"\[deploy:step [0-9]+/[0-9]+ ([a-z_]{1,32})\]")
+_DV_SKIP = re.compile(r"\[deploy:skip ([a-z_]{1,32})\]")
+_DV_TOTAL = re.compile(r"\[deploy:tests total=([0-9]{1,7})\]")
+# pytest -q: a line of result characters, "[ NN%]" at its end once it is full.
+_DV_PYTEST_LINE = re.compile(r"^([.FEsxX]+)\s*(?:\[\s*[0-9]{1,3}%\])?\s*$")
+
+
+def deploy_progress(output: str) -> dict[str, Any]:
+    """Where a RUNNING deploy is, from its output so far: every step of DEPLOY_STEPS
+    with its state (wait / run / ok / fail / skip), the current step, and the tests
+    (done of total: total from ``[deploy:tests total=N]``, done counted from pytest's
+    result characters). After a relay's handover the steps start over: the LAST step
+    line is the current one."""
+    steps = _DV_STEP.findall(output)
+    current = steps[-1] if steps else ""
+    skipped = set(_DV_SKIP.findall(output))
+    result = None
+    for match in _DV_RESULT.finditer(output):
+        result = match
+    states: dict[str, str] = {}
+    at = DEPLOY_STEPS.index(current) if current in DEPLOY_STEPS else -1
+    for i, name in enumerate(DEPLOY_STEPS):
+        if name in skipped and i <= max(at, 0):
+            states[name] = "skip"
+        elif i < at:
+            states[name] = "ok"
+        elif i == at:
+            states[name] = "run"
+        else:
+            states[name] = "wait"
+    if result is not None and current in states:
+        if result.group("reason") is not None:
+            states[current] = "fail"
+        else:
+            states = {k: ("ok" if v in ("run", "wait") and DEPLOY_STEPS.index(k) <= at else v)
+                      for k, v in states.items()}
+    totals = _DV_TOTAL.findall(output)
+    done = sum(len(m.group(1)) for line in output.splitlines() if (m := _DV_PYTEST_LINE.match(line.strip())))
+    tests: dict[str, int] = {}
+    if totals or done:
+        tests = {"done": done, **({"total": int(totals[-1])} if totals else {})}
+    return {"step": current, "steps": states, "tests": tests}
 # --- DEPLOY VERDICT (end) ---
 
 
@@ -1099,12 +1340,18 @@ def internal_update() -> int:
              "deploy the relay once by hand: sudo DEPLOY_REF=main bash scripts/redeploy.sh",
              from_commit=old, release=latest, reason="preflight")
         return 1
-    note("running", f"deploying {latest} (scripts/redeploy.sh, DEPLOY_REF={latest})", from_commit=old, release=latest)
+    running = f"deploying {latest} (scripts/redeploy.sh, DEPLOY_REF={latest})"
+    note("running", running, from_commit=old, release=latest)
+
+    def progress(output: str) -> None:
+        # The bot reads it with `update-status` while this runs (bot/progress.py).
+        note("running", running, from_commit=old, release=latest, progress=deploy_progress(output))
+
     # The deploy an operator runs, unattended: redeploy.sh starts the tag's deploy.sh
     # in its own transient unit and, with REDEPLOY_ATTACH=pipe, waits and exits with
     # deploy.sh's code. deploy.sh re-checks forward-only itself and rolls back by itself.
-    done = run(["bash", str(redeploy)], env={"DEPLOY_REF": latest, "REDEPLOY_ATTACH": "pipe"},
-               timeout=UPDATE_TIMEOUT - 120)
+    done = run_streaming(["bash", str(redeploy)], env={"DEPLOY_REF": latest, "REDEPLOY_ATTACH": "pipe"},
+                         timeout=UPDATE_TIMEOUT - 120, on_output=progress)
     output = done.stdout + done.stderr
     verdict_of = deploy_verdict(output, done.returncode)
     where = {"log": verdict_of["log"]} if verdict_of["log"] else {}

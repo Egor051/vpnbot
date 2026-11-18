@@ -24,26 +24,42 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.container import Services
-from bot.fallback import fallback_text, names_text, preflight_text, report_text
+from bot.fallback import (
+    candidates_text,
+    failure_keys,
+    fallback_text,
+    names_text,
+    not_configured_text,
+    preflight_text,
+    report_text,
+    setup_step_title,
+    switch_step_titles,
+)
 from bot.fsm.states import AdminFallbackStates
 from bot.guards import require_superadmin
 from bot.handlers.common import answer_callback_error, answer_message_error, service_error_text
 from bot.keyboards.admin_fallback import (
     back_keyboard,
     cancel_keyboard,
+    candidates_keyboard,
     confirm_keyboard,
     fallback_keyboard,
+    fix_keyboard,
+    hub_choice_keyboard,
     name_tag,
     names_keyboard,
     origin_keyboard,
+    settings_keyboard,
+    setup_origin_keyboard,
     token_keyboard,
 )
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
+from bot.progress import ProgressMessage, steps_of
 from bot.totp_gate import require_totp
 from i18n import t
 from services.errors import InvalidOperation, NotFound, ServiceError
-from services.fallback import FallbackService
+from services.fallback import FallbackOverview, FallbackService
 from services.relays import host_is_ipv4
 from utils.formatting import code, h
 
@@ -91,8 +107,31 @@ async def _still_elevated(services: Services, user_id: int) -> bool:
 
 
 async def _screen(services: Services, actor: int, notice: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
-    overview = await _service(services).overview(actor)
+    """The main screen: set up — state, hub, names; not set up — what is missing."""
+    fallback = _service(services)
+    overview = await fallback.overview(actor)
+    if not await fallback.configured():
+        return not_configured_text(overview, notice), fallback_keyboard(overview, configured=False)
     return fallback_text(overview, notice), fallback_keyboard(overview)
+
+
+async def _settings_screen(services: Services, actor: int, notice: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    fallback = _service(services)
+    overview = await fallback.overview(actor)
+    auto_on = await fallback.auto_switch()
+    lines = [notice, ""] if notice else []
+    lines += [t("fb_settings_title"), ""]
+    lines.append(t("fb_addresses", main=code(overview.main_ipv4 or "—"), hub=code(overview.hub_ipv4 or "—")))
+    lines.append(
+        t("fb_token_set", fp=code(overview.token_fingerprint or "?")) if overview.token_set else t("fb_token_none")
+    )
+    if overview.direct_host:
+        lines.append(t("fb_direct_name", host=code(overview.direct_host), count=overview.single_direct_keys))
+    else:
+        lines.append(t("fb_direct_ipv4", count=overview.single_direct_keys))
+    lines.append(t("fb_sub_header_on") if overview.sub_fallback_url else t("fb_sub_header_off"))
+    lines += ["", t("fb_auto_line_on") if auto_on else t("fb_auto_line_off")]
+    return "\n".join(lines), settings_keyboard(overview, auto_on=auto_on)
 
 
 async def _edit(callback: CallbackQuery, screen: tuple[str, InlineKeyboardMarkup]) -> None:
@@ -111,6 +150,10 @@ async def _leave(state: FSMContext) -> None:
         await state.clear()
 
 
+def _hub_id(overview: FallbackOverview) -> int | None:
+    return overview.hub.id if overview.hub is not None else None
+
+
 # ── the screen ────────────────────────────────────────────────────────────────
 
 
@@ -126,6 +169,19 @@ async def fallback_panel(callback: CallbackQuery, state: FSMContext, services: S
         await answer_callback_error(callback, exc)
 
 
+@router.callback_query(F.data == "admin:fb:set")
+async def fallback_settings(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None
+        await _leave(state)
+        await safe_callback_answer(callback)
+        await _edit(callback, await _settings_screen(services, callback.from_user.id))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
 @router.callback_query(F.data == "admin:fb:pf")
 async def fallback_preflight(callback: CallbackQuery, services: Services) -> None:
     try:
@@ -133,20 +189,48 @@ async def fallback_preflight(callback: CallbackQuery, services: Services) -> Non
             return
         assert callback.from_user is not None
         await safe_callback_answer(callback, t("fb_checking"))
-        preflight = await _service(services).preflight(callback.from_user.id)
-        await safe_edit_message_text(callback.message, preflight_text(preflight), reply_markup=back_keyboard())
+        fallback = _service(services)
+        preflight = await fallback.preflight(callback.from_user.id)
+        overview = await fallback.overview(callback.from_user.id)
+        keys = [item.key for item in preflight.failures]
+        await safe_edit_message_text(
+            callback.message, preflight_text(preflight), reply_markup=fix_keyboard(keys, hub_id=_hub_id(overview))
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
+async def _progress_edit(message: object, text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> bool:
+    """bot/progress.py's edit through this module's ``safe_edit_message_text``."""
+    return await safe_edit_message_text(message, text, reply_markup=reply_markup)  # type: ignore[arg-type]
+
+
+def _switch_progress(callback: CallbackQuery, action: str) -> ProgressMessage:
+    return ProgressMessage(callback.message, t(f"fb_progress_{action}"), steps_of(switch_step_titles()),
+                           edit=_progress_edit)
+
+
 @router.callback_query(F.data.regexp(r"^admin:fb:(on|off)$"))
-async def fallback_confirm(callback: CallbackQuery, services: Services) -> None:
+async def fallback_confirm(callback: CallbackQuery, services: Services, state: FSMContext | None = None) -> None:
+    """«Включить» / «Выключить»: the plan (every step ⚪) and «✅ Да». «Включить» with an
+    empty failover set opens the names to switch with — never a silent refusal (C4)."""
     try:
         if not await _guard(callback, services):
             return
         assert callback.from_user is not None and callback.data is not None
         action = callback.data.rsplit(":", 1)[1]
-        overview = await _service(services).overview(callback.from_user.id)
+        fallback = _service(services)
+        overview = await fallback.overview(callback.from_user.id)
+        await safe_callback_answer(callback)
+        if action == "on" and not await fallback.configured():
+            await safe_edit_message_text(
+                callback.message, t("fb_on_not_configured"),
+                reply_markup=fix_keyboard(["fb_err_not_configured"], hub_id=None),
+            )
+            return
+        if action == "on" and not overview.names:
+            await _edit(callback, await _candidates_screen(services, callback.from_user.id, state, ctx="o"))
+            return
         if action == "on":
             text = t(
                 "fb_confirm_on", count=len(overview.names), hub=h(overview.hub.name if overview.hub else "—"),
@@ -154,10 +238,45 @@ async def fallback_confirm(callback: CallbackQuery, services: Services) -> None:
             )
         else:
             text = t("fb_confirm_off", count=len(overview.names), ip=code(overview.main_ipv4 or "—"))
-        await safe_callback_answer(callback)
-        await safe_edit_message_text(callback.message, text, reply_markup=confirm_keyboard(action))
+        plan = _switch_progress(callback, action)
+        plan.footer = text
+        await plan.show_plan(confirm_keyboard(action))
     except Exception as exc:
         await answer_callback_error(callback, exc)
+
+
+async def _run_switch(callback: CallbackQuery, services: Services, action: str) -> None:
+    """THE switch with its progress (D) — then the screen, with the report and, for a
+    refusal, the cause and the button that removes it (C4)."""
+    assert callback.from_user is not None
+    fallback = _service(services)
+    actor = callback.from_user.id
+    view = _switch_progress(callback, action)
+
+    async def on_progress(step: str, step_state: str, done: int | None, total: int | None) -> None:
+        view.set(step, step_state, done=done, total=total)
+        await view.push()
+
+    run = {"on": fallback.enable, "off": fallback.disable, "retry": fallback.repeat}[action]
+    view.start("preflight")
+    await view.push(force=True)
+    try:
+        report = await view.run(run(actor, on_progress=on_progress))
+    except ServiceError as exc:
+        view.fail_running()
+        overview = await fallback.overview(actor)
+        await view.finish(t("fb_switch_failed", error=h(service_error_text(exc))),
+                          fix_keyboard([exc.key or ""], hub_id=_hub_id(overview)))
+        return
+    if not report.started:
+        view.set("preflight", "fail")
+        overview = await fallback.overview(actor)
+        await view.finish(report_text(report), fix_keyboard(failure_keys(report), hub_id=_hub_id(overview)))
+        return
+    if report.complete:
+        view.complete()
+    steps = view.text(activity=False).split("\n", 2)[-1].strip()
+    await _show(callback, services, f"{steps}\n\n{report_text(report)}")
 
 
 @router.callback_query(F.data.regexp(r"^admin:fb:(on:ok|off:ok|retry)$"))
@@ -169,20 +288,8 @@ async def fallback_switch(callback: CallbackQuery, state: FSMContext, services: 
         if not await require_totp(callback, state, services, action="fallback_switch"):
             return
         await safe_callback_answer(callback, t("fb_switching"))
-        await safe_edit_message_text(callback.message, t("fb_switching"))
-        fallback = _service(services)
-        actor = callback.from_user.id
-        try:
-            if callback.data.endswith("on:ok"):
-                report = await fallback.enable(actor)
-            elif callback.data.endswith("off:ok"):
-                report = await fallback.disable(actor)
-            else:
-                report = await fallback.repeat(actor)
-            notice = report_text(report)
-        except ServiceError as exc:
-            notice = t("fb_switch_failed", error=h(service_error_text(exc)))
-        await _show(callback, services, notice)
+        action = callback.data.split(":")[2]
+        await _run_switch(callback, services, action)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -202,7 +309,246 @@ async def fallback_sub_header(callback: CallbackQuery, state: FSMContext, servic
         notice = t("fb_sub_header_switched_on") if on else t("fb_sub_header_switched_off")
         if on and overview.hub is not None and host_is_ipv4(overview.hub.host):
             notice += "\n" + t("fb_sub_header_ip_warning")
-        await _show(callback, services, notice)
+        await _edit(callback, await _settings_screen(services, callback.from_user.id, notice))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:fb:auto")
+async def fallback_auto_toggle(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """«Автопереключение» (services/fallback_auto.py): off by default."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None
+        if not await require_totp(callback, state, services, action="fallback_settings"):
+            return
+        fallback = _service(services)
+        on = await fallback.set_auto_switch(callback.from_user.id, not await fallback.auto_switch())
+        await safe_callback_answer(callback)
+        await _edit(callback, await _settings_screen(
+            services, callback.from_user.id, t("fb_auto_switched_on") if on else t("fb_auto_switched_off")
+        ))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+# ── the candidates: «Включить» with an empty set, and the setup (C1, C4) ──────
+
+_UNCHECKED = {"o": "fb_unchecked_on", "s": "fb_unchecked_setup"}
+
+
+async def _unchecked(state: FSMContext | None, ctx: str) -> list[str]:
+    if state is None:
+        return []
+    value = (await state.get_data()).get(_UNCHECKED[ctx])
+    return [str(v) for v in value] if isinstance(value, list) else []
+
+
+async def _candidates_screen(
+    services: Services, actor: int, state: FSMContext | None, *, ctx: str, notice: str | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
+    fallback = _service(services)
+    candidates = await fallback.explained_candidates(actor)
+    unchecked = await _unchecked(state, ctx)
+    if ctx == "o":
+        title = t("fb_cand_title_on")
+        markup = candidates_keyboard(candidates, unchecked, ctx="o", confirm_text=t("btn_fb_on_with_names"),
+                                     confirm_data="admin:fb:on:names")
+    else:
+        title = f"{setup_step_title(4)}\n{t('fb_cand_title_setup')}"
+        markup = candidates_keyboard(candidates, unchecked, ctx="s", confirm_text=t("btn_fb_cand_add"),
+                                     confirm_data="admin:fb:setup:names:ok", skip_data="admin:fb:setup:pf")
+    text = candidates_text(title, candidates, unchecked)
+    return (f"{notice}\n\n{text}" if notice else text), markup
+
+
+async def _selected(services: Services, actor: int, state: FSMContext | None, ctx: str) -> list[str]:
+    unchecked = set(await _unchecked(state, ctx))
+    return [c.name for c in await _service(services).explained_candidates(actor) if name_tag(c.name) not in unchecked]
+
+
+@router.callback_query(F.data.regexp(r"^admin:fb:cand:(o|s):[0-9a-f]{10}$"))
+async def fallback_candidate_toggle(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        _, _, _, ctx, tag = callback.data.split(":")
+        unchecked = await _unchecked(state, ctx)
+        unchecked = [u for u in unchecked if u != tag] if tag in unchecked else [*unchecked, tag]
+        await state.update_data({_UNCHECKED[ctx]: unchecked})
+        await safe_callback_answer(callback)
+        await _edit(callback, await _candidates_screen(services, callback.from_user.id, state, ctx=ctx))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:fb:on:names")
+async def fallback_on_with_names(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """«🛟 Enable with these names» (btn_fb_on_with_names): the checked candidates join the set, and the SAME
+    action goes on — the switch, without a detour through the screen (C4)."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None
+        if not await require_totp(callback, state, services, action="fallback_switch"):
+            return
+        actor = callback.from_user.id
+        names = await _selected(services, actor, state, "o")
+        if not names:
+            await safe_callback_answer(callback, t("fb_cand_nothing_checked"), show_alert=True)
+            return
+        try:
+            await _service(services).add_names(actor, names)
+        except InvalidOperation as exc:
+            await safe_callback_answer(callback)
+            await _edit(callback, await _candidates_screen(
+                services, actor, state, ctx="o", notice=t("fb_switch_failed", error=h(service_error_text(exc)))
+            ))
+            return
+        await state.update_data({_UNCHECKED["o"]: []})
+        await safe_callback_answer(callback, t("fb_switching"))
+        await _run_switch(callback, services, "on")
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+# ── «⚙️ Настроить фолбэк»: token → hub → origin → names → preflight (C1) ───────
+
+
+async def _setup_screen(services: Services, actor: int, state: FSMContext, notice: str | None = None) -> tuple[str, InlineKeyboardMarkup] | None:
+    """The next step of the setup; None — the token step (asked by a message)."""
+    fallback = _service(services)
+    overview = await fallback.overview(actor)
+    prefix = f"{notice}\n\n" if notice else ""
+    if not overview.token_set:
+        return None
+    if overview.hub is None:
+        candidates = await fallback.hub_candidates(actor)
+        lines = [setup_step_title(2), t("fb_setup_hub_intro")]
+        if candidates:
+            lines += ["", *[
+                f"• {h(c.relay.name)} — {code(c.address or '—')} · " + (c.country or t("fb_setup_country_unknown"))
+                for c in candidates
+            ]]
+        else:
+            lines += ["", t("fb_setup_hub_none")]
+        return prefix + "\n".join(lines), hub_choice_keyboard(candidates)
+    if not overview.names:
+        return await _candidates_screen(services, actor, state, ctx="s", notice=notice)
+    preflight = await fallback.preflight(actor)
+    keys = [item.key for item in preflight.failures]
+    text = f"{setup_step_title(5)}\n{preflight_text(preflight)}\n\n" + (
+        t("fb_setup_done") if preflight.passed else t("fb_setup_fix")
+    )
+    return prefix + text, fix_keyboard(keys, hub_id=_hub_id(overview))
+
+
+async def _setup_show(callback: CallbackQuery, services: Services, state: FSMContext, notice: str | None = None) -> None:
+    assert callback.from_user is not None
+    screen = await _setup_screen(services, callback.from_user.id, state, notice)
+    if screen is None:
+        await _ask_token(callback, state, setup=True)
+        return
+    await _edit(callback, screen)
+
+
+@router.callback_query(F.data.in_({"admin:fb:setup", "admin:fb:setup:pf"}))
+async def fallback_setup(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        if not await require_totp(callback, state, services, action="fallback_settings"):
+            return
+        await safe_callback_answer(callback)
+        if callback.data.endswith(":pf"):
+            overview = await _service(services).overview(callback.from_user.id)
+            preflight = await _service(services).preflight(callback.from_user.id)
+            text = f"{setup_step_title(5)}\n{preflight_text(preflight)}\n\n" + (
+                t("fb_setup_done") if preflight.passed else t("fb_setup_fix")
+            )
+            await safe_edit_message_text(callback.message, text, reply_markup=fix_keyboard(
+                [item.key for item in preflight.failures], hub_id=_hub_id(overview)))
+            return
+        await _setup_show(callback, services, state)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:fb:setup:hub:\d+$"))
+async def fallback_setup_hub(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Step 3: the origin for the chosen hub — ``origin.<zone>`` offered, one tap."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.data is not None
+        if not await require_totp(callback, state, services, action="fallback_hub"):
+            return
+        relay_id = int(callback.data.rsplit(":", 1)[1])
+        suggestion = _service(services).suggest_origin()
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            f"{setup_step_title(3)}\n" + t("fb_ask_origin", suggestion=code(suggestion or "origin.<зона>")),
+            reply_markup=setup_origin_keyboard(relay_id, suggestion),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:fb:setup:origin:\d+(:type)?$"))
+async def fallback_setup_origin(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        if not await require_totp(callback, state, services, action="fallback_hub"):
+            return
+        relay_id = int(callback.data.split(":")[4])
+        if callback.data.endswith(":type"):
+            await _ask(callback, state, AdminFallbackStates.origin, t("fb_ask_origin_typed"),
+                       cancel_keyboard("admin:fb:setup"), relay_id=relay_id, setup=True)
+            return
+        suggestion = _service(services).suggest_origin()
+        if suggestion is None:
+            await safe_callback_answer(callback, t("action_stale"), show_alert=True)
+            return
+        await safe_callback_answer(callback, t("fb_hub_assigning"))
+        await safe_edit_message_text(callback.message, t("fb_hub_assigning"))
+        notice, ok = await _assign(services, callback.from_user.id, relay_id, suggestion)
+        if not ok:
+            await safe_edit_message_text(callback.message, notice, reply_markup=setup_origin_keyboard(relay_id, suggestion))
+            return
+        await _setup_show(callback, services, state, notice)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:fb:setup:names:ok")
+async def fallback_setup_names(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None
+        if not await require_totp(callback, state, services, action="fallback_settings"):
+            return
+        actor = callback.from_user.id
+        names = await _selected(services, actor, state, "s")
+        if not names:
+            await safe_callback_answer(callback, t("fb_cand_nothing_checked"), show_alert=True)
+            return
+        try:
+            await _service(services).add_names(actor, names)
+        except InvalidOperation as exc:
+            await safe_callback_answer(callback)
+            await _edit(callback, await _candidates_screen(
+                services, actor, state, ctx="s", notice=h(service_error_text(exc))))
+            return
+        await state.update_data({_UNCHECKED["s"]: []})
+        await safe_callback_answer(callback, t("fb_name_added"))
+        await _setup_show(callback, services, state, t("fb_setup_names_added", count=len(names)))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -345,6 +691,13 @@ async def fallback_token(callback: CallbackQuery, state: FSMContext, services: S
         await answer_callback_error(callback, exc)
 
 
+async def _ask_token(callback: CallbackQuery, state: FSMContext, *, setup: bool) -> None:
+    """The DNS API token step (the setup's step 1, or «✏️ Задать токен»)."""
+    prompt = f"{setup_step_title(1)}\n{t('fb_ask_token')}" if setup else t("fb_ask_token")
+    await _ask(callback, state, AdminFallbackStates.token, prompt,
+               cancel_keyboard("admin:fb" if setup else "admin:fb:token"), setup=setup)
+
+
 @router.callback_query(F.data == "admin:fb:tok:set")
 async def fallback_token_set(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     try:
@@ -352,7 +705,7 @@ async def fallback_token_set(callback: CallbackQuery, state: FSMContext, service
             return
         if not await require_totp(callback, state, services, action="fallback_token"):
             return
-        await _ask(callback, state, AdminFallbackStates.token, t("fb_ask_token"), cancel_keyboard("admin:fb:token"))
+        await _ask_token(callback, state, setup=False)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -367,7 +720,7 @@ async def fallback_token_delete(callback: CallbackQuery, state: FSMContext, serv
             return
         removed = await _service(services).delete_token(callback.from_user.id)
         await safe_callback_answer(callback, t("fb_token_deleted") if removed else t("fb_token_none"))
-        await _show(callback, services)
+        await _edit(callback, await _settings_screen(services, callback.from_user.id))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -385,8 +738,9 @@ async def _typed(message: Message, state: FSMContext, services: Services) -> int
 
 
 async def _done(message: Message, state: FSMContext, services: Services, actor: int, notice: str) -> None:
+    """A typed setting is saved: back to «⚙️ Настройки» with the notice."""
     await state.clear()
-    text, markup = await _screen(services, actor, notice)
+    text, markup = await _settings_screen(services, actor, notice)
     await message.answer(text, reply_markup=markup)
 
 
@@ -407,12 +761,27 @@ async def fallback_token_input(message: Message, state: FSMContext, services: Se
         actor = await _typed(message, state, services)
         if actor is None:
             return
+        setup = bool((await state.get_data()).get("setup"))
+        fallback = _service(services)
         try:
-            status = await _service(services).set_token(actor, raw)
+            status = await fallback.set_token(actor, raw)
         except InvalidOperation as exc:
-            await _retry(message, exc, "admin:fb:token")
+            await _retry(message, exc, "admin:fb" if setup else "admin:fb:token")
             return
-        await _done(message, state, services, actor, t("fb_token_saved", status=h(status)))
+        notice = t("fb_token_saved", status=h(status))
+        try:
+            # Checked against the zone right away: a token for another zone would
+            # only fail at the switch.
+            notice += "\n" + t("fb_token_zone_ok", zone=code(await fallback.check_zone(actor)))
+        except InvalidOperation as exc:
+            notice += "\n" + h(service_error_text(exc))
+        if not setup:
+            await _done(message, state, services, actor, notice)
+            return
+        await state.clear()
+        screen = await _setup_screen(services, actor, state, notice)
+        if screen is not None:
+            await message.answer(screen[0], reply_markup=screen[1])
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -491,15 +860,15 @@ async def fallback_hub_start(callback: CallbackQuery, state: FSMContext, service
         await answer_callback_error(callback, exc)
 
 
-async def _assign(services: Services, actor: int, relay_id: int, origin: str) -> str:
+async def _assign(services: Services, actor: int, relay_id: int, origin: str) -> tuple[str, bool]:
     try:
         outcome = await _service(services).assign_hub(actor, relay_id, origin)
     except ServiceError as exc:
-        return t("fb_hub_failed", error=h(service_error_text(exc)))
+        return t("fb_hub_failed", error=h(service_error_text(exc))), False
     return t(
         "fb_hub_assigned", name=h(outcome.relay.name), origin=code(outcome.origin), ip=code(outcome.main_ipv4),
         created=t("fb_hub_record_created") if outcome.created_record else t("fb_hub_record_checked"),
-    )
+    ), True
 
 
 @router.callback_query(F.data.regexp(r"^admin:fb:hub:\d+:sug$"))
@@ -518,7 +887,7 @@ async def fallback_hub_suggested(callback: CallbackQuery, state: FSMContext, ser
         await state.clear()
         await safe_callback_answer(callback, t("fb_hub_assigning"))
         await safe_edit_message_text(callback.message, t("fb_hub_assigning"))
-        notice = await _assign(services, callback.from_user.id, relay_id, suggestion)
+        notice, _ = await _assign(services, callback.from_user.id, relay_id, suggestion)
         await safe_edit_message_text(callback.message, notice, reply_markup=_hub_back(relay_id))
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -530,10 +899,17 @@ async def fallback_origin_input(message: Message, state: FSMContext, services: S
         actor = await _typed(message, state, services)
         if actor is None:
             return
-        relay_id = int((await state.get_data()).get("relay_id") or 0)
+        data = await state.get_data()
+        relay_id = int(data.get("relay_id") or 0)
+        setup = bool(data.get("setup"))
         await state.clear()
         progress = await message.answer(t("fb_hub_assigning"))
-        notice = await _assign(services, actor, relay_id, message.text or "")
+        notice, ok = await _assign(services, actor, relay_id, message.text or "")
+        if setup and ok:
+            screen = await _setup_screen(services, actor, state, notice)
+            if screen is not None:
+                await safe_edit_message_text(progress, screen[0], reply_markup=screen[1])
+                return
         await safe_edit_message_text(progress, notice, reply_markup=_hub_back(relay_id))
     except Exception as exc:
         await answer_message_error(message, exc)

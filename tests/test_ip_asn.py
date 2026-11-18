@@ -120,3 +120,21 @@ def test_cache_reloads_when_file_changes(asn_db: Path) -> None:
         encoding="utf-8",
     )
     assert ip_asn.normalize_ip("91.79.3.141") == "AS64500"
+
+
+# ----------------------------------------------------------------- the country
+
+
+def test_country_of_an_address(asn_db: Path) -> None:
+    """The fallback mode's hub choice keeps relays outside Russia (services/fallback.py)."""
+    assert ip_asn.lookup_country("91.79.3.141") == "RU"
+    assert ip_asn.lookup_country("not an ip") is None
+    assert ip_asn.lookup_country("::1") is None
+    assert ip_asn.lookup_country("0.0.0.1") is None
+
+
+def test_no_database_no_country(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IP2ASN_DB_PATH", str(tmp_path / "missing.tsv"))
+    ip_asn.reset_cache()
+    assert ip_asn.lookup_country("91.79.3.141") is None
+    ip_asn.reset_cache()

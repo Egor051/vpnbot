@@ -410,7 +410,10 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   `only_input_filter_failures`: `check` exits with its FIRST failure only. Around the host files the [SSH port](host-state.md#the-ssh-port)
   moves when `SSH_PORT` asks for it (phase 1: both ports; the reload of `vpn-relay` then lets
   them in and main's probe confirms them); right after DEPLOY OK `vpn-bot-ssh-port.service` looks
-  for the proof once, so the relay usually finishes the migration in the same run.
+  for the proof once — when main's probe got through, the relay finishes in the same run; when it
+  did not (the fallback mode, a blocked port), the bot asks a superadmin to confirm closing the old
+  port and proves the new one by its own agent call on it, with no redeploy
+  ([host-state.md](host-state.md#a-relays-migration-from-the-bot)).
   DEPLOY OK carries `ssh port: …` and `input filter : …` from
   `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)` with nothing to do, or
   `PENDING CONFIRM (…) — <why>` followed by the reason and the instruction to run
@@ -430,6 +433,19 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
 - A unit installed by hand that loads `/etc/vpn-relay.nft` is the **expected first
   transition**, not drift. After the first successful deploy `/etc/vpn-relay.nft` is renamed to
   `/etc/vpn-relay.nft.pre-repo.<ts>` (never deleted) and nothing reads it any more.
+
+#### Progress of «Обновить агент»
+
+«⬆️ Обновить агент» first shows the plan — the deploy's steps ⚪ (preflight, fetch, tests, checks,
+backup, install, restart, verify) with «✅ Подтвердить»; then the run: the long `update` call, and
+next to it, every 10 s, **`update-status`** — a light, lock-free agent request answering
+`/var/lib/vpn-relay/update.json`, where the agent writes the deploy's progress
+(`deploy_progress`: the steps from deploy.sh's [step markers](deployment.md#step-and-result-markers)
+and the tests — done of `[deploy:tests total=N]`) at most every 2 s while it reads the output.
+Between polls the activity line moves locally. Why a state file and polling, not a stream: the
+agent answers ONE JSON per call and its `update` channel is blocked on `systemd-run --wait`; a
+file survives a dropped ssh connection (and the hub's hop) and costs one short ssh session per
+poll. The result closes the steps — ✅, or ❌ on the step deploy.sh failed in, with the cause.
 
 #### Which revision a relay deploys
 
@@ -817,6 +833,9 @@ line, extra words, an argv, an interactive login — is refused with exit 2 befo
 | `input-confirm` | Runs `vpn-relay-apply input-confirm` as a direct child — the bot's ssh session (a new one) is among its ancestors, which is the proof that check wants ([dead-man](#keeping-access-the-dead-man-and-input-confirm)). Answers the helper's lines and the new `input-status`. Takes no agent lock: the filter waits for its confirmation exactly while `update` holds it. |
 | `jump key=<ed25519 blob> open=<host>:<port>[,…]` | A hub: write the bot's ONE jump line in root's authorized_keys (`restrict,port-forwarding,permitopen="<host>:<port>"[,…],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump`) — [below](#managing-the-ru-relays-through-the-hub). A DNS name or IPv4 (not loopback, link-local, multicast), port 1..65535, unique, at most 32; a key that already has another line in the file (the agent's own) is refused; refused while `sshd -T` allows remote forwarding (not `allowtcpforwarding local`). Every other line stays byte-identical. Its own lock, so a hub's `update` does not hold it up. |
 | `jump-off` | A hub: remove that line. |
+| `ssh-port-finish port=<p> since=<s>` | Phase 2 of the SSH port migration — only from a session that came in on `<p>` (its `SSH_CONNECTION`): `vpn-bot-ssh-port confirm-session` writes the proof and closes the old port ([host-state.md](host-state.md#a-relays-migration-from-the-bot)). |
+| `ssh-port-keep since=<s>` / `ssh-port-resume since=<s>` | Hold phase 1 (the old port stays, no proof finishes it) / go on with the migration. |
+| `ssh-port-set port=<p>` | `SSH_PORT=<p>` in `.env`, then `vpn-bot-ssh-port begin --keep <this session's port>`: both ports listen now, no deploy; the port the bot came in on never closes; `.env` restored on a failure (a failed input filter included). A forwarded port is refused. |
 
 **The units** are not a list in the agent. They are read from the checkout by the same rule deploy.sh,
 install.sh and the host check use (`relay_unit_names`): every `deploy/relay/*.service` and `*.timer` of
@@ -1217,8 +1236,60 @@ Everything is audited (entity `relay`): `relay_hub_assigned`, `relay_hub_cleared
 `failover_preflight_failed`, `failover_enabled`, `failover_disabled`, `failover_setting_changed`,
 `failover_direct_host_changed`.
 
-There is no automatic switch on health — an admin switches the mode. The switch's core
-(`FallbackService._switch`) is kept apart from the permission check as the place for one.
+The switch shows its **progress** in the same message (bot/progress.py): first the plan — the
+steps ⚪ (preflight, the hub's jump line, the A records, the resolvers' check) with «✅ Да» — then
+🔄 / ✅ / ❌ per step, «N/M» for the records, an activity line, at most one edit per 3 s; the result
+closes it.
+
+### The screen, the setup, «Включить» with an empty set
+
+**Not set up** (no DNS API token or no hub): the screen says what is missing and offers ONE button,
+**«⚙️ Настроить фолбэк»** — a wizard (TOTP), each step skipped when already done:
+
+1. **the token** — asked by the bot; the message is deleted at once; checked with the API and
+   **against the zone** of `HYSTERIA2_SNI` right away («Токен управляет зоной …» or why not);
+2. **the hub** — among the relays with an agent **outside Russia** (by the IP-to-ASN database's
+   country of their IPv4; a relay whose country is unknown is offered, marked so);
+3. **the origin** — `origin.<zone>` offered, one tap to confirm (or another name);
+4. **the failover set** — the bot suggests the candidates itself, **each with why** (HYSTERIA2_SNI:
+   the hy2 certificate; the subscription's name; the names the RU relays forward to, with those
+   relays; a DNS-named XRAY_PUBLIC_HOST), **all checked**; uncheck what is not wanted — one
+   confirmation, no typing;
+5. **the preflight** — with a button for each thing it finds wrong.
+
+**Set up**: the state, the hub, the names with their statuses — and only **«Включить/Выключить
+режим»**, **«Проверить»**, **«⚙️ Настройки»**, **«⬅️ Назад»** («🔁 Повторить» appears only while a
+switch did not reach every name). Names, the token, the main/hub IPv4, the direct links' host,
+`fallback-url` and «Автопереключение» are in «⚙️ Настройки». No «Обновить»: the screen is drawn
+anew when opened and after every action.
+
+**«Включить» with an empty failover set** never refuses silently: it opens the candidates screen
+(checked, each with why) with ONE button **«🛟 Включить с этими именами»** — the checked names join
+the set and the SAME action goes on with the switch, no detour through the screen. Every refusal
+of «Включить» — an empty set, the preflight, a loop, the token, no hub — shows **its cause and the
+button that removes it** («🔑 Задать токен DNS API», «🧭 Выбрать имена», «🛟 Выбрать hub», «🛰
+Карточка hub», «🧭 Имена набора», the IPv4), never a bare refusal.
+
+### Automatics
+
+The health loop already sees the RU (edge) relays — directly and through the hub. When **every**
+enabled edge relay with an agent is **cut from main** in a pass — its own check says the upstream
+does not answer (exit 13/14), or main reaches neither its traffic port nor its agent — while the
+hub is reachable from main, that is a pass of an incident. **Stably** = 3 passes in a row **and**
+at least 10 minutes (`services/fallback_auto.py`: `PASSES`, `MIN_SECONDS`). Then:
+
+* **«Автопереключение» off** (the default): every superadmin gets ONE message with ONE button
+  **«🛟 Включить режим фолбэка»** (the screen's confirmation, behind TOTP);
+* **on** (⚙️ Настройки): the bot switches itself (`_switch` with no actor — the full preflight,
+  the hub's status asked as the bot itself; the hub chosen by `select_hub`, the seam a balancer
+  will use) and **always** tells the superadmins, with the result.
+
+One message per incident (it ends only when a pass sees an edge relay reachable again); after any
+switch — by hand or automatic — nothing automatic happens for an hour (`COOLDOWN_SECONDS`): no
+flapping. **Back to normal only by hand**: once the mode is on, the RU relays forward to the hub,
+so the signal that switched it on is no longer observable (their check probes the hub and passes);
+a «recovery» read from it would be false and send every client back into the blocked path. A
+switch-off that comes late costs the hub's traffic; one that comes too early, the outage.
 
 ### What moves and what does not
 

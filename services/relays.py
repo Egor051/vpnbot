@@ -307,7 +307,8 @@ def agent_uninstalled(agent: RelayAgent) -> bool:
 def _slim(payload: Mapping[str, Any]) -> dict[str, object]:
     """What is kept of a status answer (no unbounded fields)."""
     keep = ("agent", "protocol", "target_host", "tcp", "udp", "live_target", "resolved", "ip_forward",
-            "units", "ssh_ports", "egress", "checkout", "update", "check", "paired_at", "input_status", "jump")
+            "units", "ssh_ports", "egress", "checkout", "update", "check", "paired_at", "input_status", "jump",
+            "ssh_migration")
     return {k: payload[k] for k in keep if k in payload}
 
 
@@ -581,6 +582,9 @@ class RelayService:
         # Addresses opened on the hub for a pairing that is running (complete()).
         self._jump_pairing: set[tuple[str, int]] = set()
         self._jump_lock = asyncio.Lock()
+        # Called with (relay, status payload) after a status answer is kept (the SSH
+        # port monitor, services/ssh_port.py). Set by the bot's wiring.
+        self.status_listeners: list[Callable[[Relay, Mapping[str, Any]], Awaitable[None]]] = []
 
     def attach_key_deleters(self, key_deleters: Mapping[VpnKeyType, KeyDeleter]) -> None:
         self._key_deleters = dict(key_deleters)
@@ -1305,6 +1309,14 @@ class RelayService:
         await self._record_status(relay, reply)
         return reply
 
+    async def system_status(self, relay_id: int) -> AgentReply:
+        """``status`` asked by the bot itself (no actor: the fallback mode's automatic
+        switch, services/fallback_auto.py) — kept like any status answer."""
+        relay = await self._require_managed(relay_id)
+        reply = self._require_ok(await self._call(relay, "status"))
+        await self._record_status(relay, reply)
+        return reply
+
     async def poll_agent(self, relay: Relay) -> AgentCheck | None:
         """The health loop's question to a relay's agent (no actor: the bot itself).
 
@@ -1353,6 +1365,16 @@ class RelayService:
         except ServiceError:
             logger.info("Relay %s: status after update not received", relay.name)
         return reply
+
+    async def update_progress(self, actor_user_id: int, relay_id: int) -> dict[str, Any]:
+        """``update-status``: the relay's update.json as it is now — the progress of
+        a running ``update`` (its deploy's steps and tests). A light call, made next to
+        the long one; {} from an agent that does not know it."""
+        await self.users.require_superadmin(actor_user_id)
+        relay = await self._require_managed(relay_id)
+        reply = await self._call(relay, "update-status", timeout=30.0)
+        update = reply.payload.get("update") if reply.ok else None
+        return dict(update) if isinstance(update, Mapping) else {}
 
     async def change_forward(
         self, actor_user_id: int, relay_id: int, *, target_host: str, tcp: str, udp: str, allow_hub: bool = False
@@ -1424,6 +1446,112 @@ class RelayService:
             await self.refresh_catalog()
         await self.sync_hub_jump_quietly()
         return DetachReport(relay=after, uninstalled=uninstalled)
+
+    # ── the SSH port of a relay (docs/host-state.md#the-ssh-port) ──────────────
+
+    async def finish_ssh_port(
+        self, actor_user_id: int, relay_id: int, *, port: int, since: int,
+        on_progress: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> AgentReply:
+        """«Подтвердить»: phase 2 of the relay's SSH port migration, proven by THIS call.
+
+        The bot reaches the agent on the NEW port — directly, or through the hub with
+        the new port opened in the jump line next to the old one — and the agent runs
+        phase 2 only when its session came in on that port. A new port that does not
+        answer from here fails the call before anything is closed. Afterwards the
+        relay's row says the new port, the jump line opens it alone, and a TCP set
+        the input filter now waits a confirmation for is confirmed by the same kind of
+        NEW session (input-confirm)."""
+        await self.users.require_superadmin(actor_user_id)
+        if not 1 <= port <= 65535 or since <= 0:
+            raise InvalidOperation("плохой порт", key="relay_ssh_port_bad", params={"value": str(port)})
+
+        async def step(name: str, state: str) -> None:
+            if on_progress is not None:
+                await on_progress(name, state)
+
+        relay = await self._claim(relay_id)
+        agent = relay.agent
+        assert agent is not None
+        request = f"ssh-port-finish port={port} since={since}"
+        await step("probe", "run")
+        try:
+            client = self._require_client()
+            via = None
+            if not relay.is_hub and (relay.via_hub or await self.relays.fallback_mode_on()):
+                via = await self._jump_to((agent.ssh_host.lower(), port))
+            reply = await _agent_call(
+                client, agent.ssh_host, port, request, alias=f"vpn-relay-{relay.id}", host_key=agent.host_key,
+                timeout=300.0, via=via,
+            )
+            if reply.ok:
+                async with self._lock:
+                    await self.relays.update_agent_ssh_port(relay.id, port, now=self.clock.now(), updated_by=actor_user_id)
+        finally:
+            self._busy.discard(relay.id)
+        await self._audit(
+            actor_user_id, "relay_ssh_port_finished", relay.id,
+            {"name": relay.name, "from": agent.ssh_port, "to": port, "since": since, "ok": reply.ok,
+             **({} if reply.ok else {"error": reply.error[:300]})},
+        )
+        if not reply.ok:
+            await step("probe" if reply.returncode in (2, 255) else "phase2", "fail")
+        self._require_ok(reply, relay)
+        await step("probe", "ok")
+        await step("phase2", "ok")
+        await step("jump", "run")
+        await self.sync_hub_jump_quietly()
+        await step("jump", "ok")
+        await step("filter", "run")
+        await self._status_after(actor_user_id, relay.id)
+        await step("filter", "ok")
+        return reply
+
+    async def keep_ssh_port(self, actor_user_id: int, relay_id: int, *, since: int, keep: bool = True) -> AgentReply:
+        """«Оставить»: the relay holds phase 1 (both ports, no phase 2 on any proof);
+        ``keep=False`` — «Вернуться к переезду»: it waits for proof again."""
+        await self.users.require_superadmin(actor_user_id)
+        relay = await self._require_managed(relay_id)
+        request = f"ssh-port-{'keep' if keep else 'resume'} since={since}"
+        reply = await self._call(relay, request, timeout=120.0)
+        await self._audit(actor_user_id, "relay_ssh_port_kept" if keep else "relay_ssh_port_resumed", relay.id,
+                          {"name": relay.name, "since": since, "ok": reply.ok,
+                           **({} if reply.ok else {"error": reply.error[:300]})})
+        self._require_ok(reply, relay)
+        await self._status_after(actor_user_id, relay.id)
+        return reply
+
+    async def set_ssh_port(self, actor_user_id: int, relay_id: int, *, port: int) -> AgentReply:
+        """«Сменить порт»: SSH_PORT=<port> on the relay and phase 1 right away (both
+        ports listen) — no deploy. The old port closes later, on «Подтвердить»."""
+        await self.users.require_superadmin(actor_user_id)
+        relay = await self._require_managed(relay_id)
+        agent = relay.agent
+        assert agent is not None
+        if not 1 <= port <= 65535 or port == agent.ssh_port or port in agent.tcp_ports:
+            raise InvalidOperation("плохой порт", key="relay_ssh_port_bad", params={"value": str(port)})
+        claimed = await self._claim(relay_id)
+        try:
+            reply = await self._call(claimed, f"ssh-port-set port={port}", timeout=300.0)
+        finally:
+            self._busy.discard(relay_id)
+        await self._audit(actor_user_id, "relay_ssh_port_set", relay.id,
+                          {"name": relay.name, "from": agent.ssh_port, "to": port, "ok": reply.ok,
+                           **({} if reply.ok else {"error": reply.error[:300]})})
+        self._require_ok(reply, relay)
+        await self._status_after(actor_user_id, relay.id)
+        return reply
+
+    async def _status_after(self, actor_user_id: int | None, relay_id: int) -> None:
+        """A fresh status (a NEW session: it confirms a pending input filter), kept."""
+        relay = await self._require(relay_id)
+        try:
+            status = await self._call(relay, "status")
+            if status.ok:
+                status = await self._confirm_if_pending(actor_user_id, relay, status)
+                await self._record_status(relay, status)
+        except ServiceError:
+            logger.info("Relay %s: status after the SSH port change not received", relay.name)
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -1722,6 +1850,19 @@ class RelayService:
         return replace(status, payload=payload)
 
     async def _record_status(self, relay: Relay, reply: AgentReply) -> bool:
+        """:meth:`_record_answer`, then every :attr:`status_listeners` with the answer
+        (the SSH port monitor asks a superadmin when the relay is in phase 1 of a
+        migration). A listener that fails is logged; the answer is kept anyway."""
+        recorded = await self._record_answer(relay, reply)
+        if recorded:
+            for listener in self.status_listeners:
+                try:
+                    await listener(relay, reply.payload)
+                except Exception as exc:  # a listener never breaks the health loop
+                    logger.warning("Relay %s: a status listener failed: %s: %s", relay.name, type(exc).__name__, exc)
+        return recorded
+
+    async def _record_answer(self, relay: Relay, reply: AgentReply) -> bool:
         """Keep a ``status`` answer on the relay's row — only if it still describes it.
 
         The request may have started before an agent call that changes the row: under

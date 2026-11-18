@@ -696,6 +696,7 @@ When the port ssh listens on (`systemctl show -p Listen ssh.socket`) is not `SSH
 |---|---|---|
 | `relay-probe` | relay | main's probe (`POST /relay/ssh-probe`) connected to `SSH_PORT` through the input filter: `/etc/vpn-relay/input.confirmed` says `confirmed_by=main-probe`, its `tcp=` set holds `SSH_PORT`, `confirmed_at` ≥ `since` |
 | `journal` | both | sshd logged a connection from a **non-local** address on `SSH_PORT` (`journalctl -u ssh.service --since @<since>`). openssh 9.6 writes `Connection from <raddr> port <rport> on <laddr> port <lport> rdomain ""` **only at `LogLevel VERBOSE`** — measured with the noble binary; at `INFO` the line does not exist, hence the `LogLevel VERBOSE` in the Port drop-in. Loopback, the host's own addresses (`ip -o addr`) and `raddr == laddr` prove nothing |
+| `agent` | relay | a superadmin pressed **«Подтвердить закрытие <old>»** under the bot's message about the relay ([below](#a-relays-migration-from-the-bot)), and the bot's agent call came in **on `SSH_PORT`** — a NEW ssh session from main (or through the hub) that sshd accepted on the new port: the agent (`ssh-port-finish`) hands the helper its own `SSH_CONNECTION` (`vpn-bot-ssh-port confirm-session`), which refuses a session on any other port, writes the proof and runs phase 2 in the same call |
 | `bot` | main | a superadmin pressed **«Подтвердить»** under the bot's message «SSH теперь и на порту N — подключись на него и нажми Подтвердить»; the bot runs `vpn-bot-ssh-port confirm --port N --since S --admin ID` (sudo, exact-path grant in `deploy/sudoers.d/vpn-bot.example`; under the non-root bot's `ProtectSystem=strict` the helper re-enters PID 1's mount namespace first, as the other helpers do) |
 
 **Without a proof there is no phase 2, ever.** It is looked for by every deploy (Phase 1's plan; a
@@ -707,9 +708,8 @@ takes the deploy's lock (`/run/vpn-bot-deploy.lock`) or leaves the work to the r
 touches only files that are exactly what phase 1 left there.
 
 The bot tells the superadmins once when phase 1 starts (with the button) and once when the
-migration is done (`schema_meta` remembers it across restarts). A relay runs no bot: its state is in
-its deploy report and journal. The deploy prints the state in Phase 1, in the report and in DEPLOY
-OK, e.g.
+migration is done (`schema_meta` remembers it across restarts). The deploy prints the state in
+Phase 1, in the report and in DEPLOY OK, e.g.
 
 ```text
 ssh port: migrating 22 -> 54321 (waiting for proof: main's probe of tcp 54321 (RELAY_CONFIRM_URL), or an ssh connection from outside on 54321 in the sshd log)
@@ -718,6 +718,50 @@ ssh port: migrating 22 -> 54321 (waiting for proof: main's probe of tcp 54321 (R
 `SSH_PORT` changed again while waiting: a new phase 1 from the original port(s) to the new value
 (the unproven port is dropped, the original never closed); `SSH_PORT` back on the original port: the
 unproven one is dropped (`phase: 0`, called off).
+
+### A relay's migration from the bot
+
+A relay runs no bot, and main's probe is not always there to prove the new port (he1 kept 22 —
+root with a password — until a manual redeploy: no proof came, so phase 2 waited for the next
+deploy). The relay's agent reports the migration in every `status` (`ssh_migration`: the keys of
+`vpn-bot-ssh-port plan`), and the bot asks:
+
+* **The message.** When a status the bot keeps shows phase 1 (and it is not held), every superadmin
+  gets ONE bold message — «🔑 Relay X слушает SSH на 22 и 54321 — подтвердите закрытие 22» — with
+  **«✅ Подтвердить закрытие 22»** and **«Оставить 22»**. Once per migration (`schema_meta`
+  `relay_ssh_port_alerted`, keyed by relay and `since`); a new migration asks again.
+* **«Подтвердить»** (TOTP, `relay_ssh_port`): the bot calls the agent **on the new port** —
+  directly, or through the hub with the new port opened in the hub's jump line next to the old one —
+  with `ssh-port-finish port=<new> since=<since>`. The agent refuses unless its own session came in
+  on that port; then `vpn-bot-ssh-port confirm-session` writes the proof (`agent`) and runs phase 2
+  under the deploy's lock (the same post-check and revert as `advance`). The same dead-man principle
+  as the input filter: **a confirmation that does not arrive closes nothing** — a new port that does
+  not answer from main fails the call before the relay is touched. After it the bot's row says the
+  new port, the hub's jump line opens it alone, and the input filter's new TCP set is confirmed by
+  the bot's next NEW session (`input-confirm`). When the timer or a deploy already finished THIS
+  migration with another proof (the old port is closed and the bot cannot reach the relay on it),
+  «Подтвердить» over the new port is still a success (`already finished`): the bot moves its row.
+* **«Оставить 22»** (TOTP): the relay holds phase 1 (`hold` in the state file, `ssh-port-keep`): both
+  ports stay, and NO proof finishes it — not a deploy, not the timer, not main's probe — until
+  «↩️ Вернуться к переезду» (`ssh-port-resume`). The bot does not ask again. The hold is written
+  under the deploy lock, like `advance` and a deploy: a phase 2 already running finishes first.
+* **Setup wizard → «🔑 SSH-порт relay»**: every relay with an agent, its port and its migration;
+  per relay «Подтвердить закрытие» / «Оставить» (phase 1), «Вернуться к переезду» (held) and
+  **«✏️ Сменить порт»**: a typed port — the agent writes `SSH_PORT` into the relay's `.env` and runs
+  `vpn-bot-ssh-port begin`, which does what a deploy does around its host files (phase 1: both files
+  rendered for the current port(s) and the new one, the post-check, the state; or the cancel of an
+  unproven migration), **without a deploy**; the files must be the rendering of the ports ssh
+  listens on now (or absent on the package's 22), otherwise a deploy decides. `begin` never stops
+  listening on the port the agent's own session came in on (`--keep`: a new target while a migration
+  waits for proof would drop the previous target the bot may be on — refused, nothing changed), and
+  when `vpn-relay-apply apply` fails (the old input filter would drop the new port) it puts the ssh
+  files and the listeners back and records nothing (exit 4). A failed `begin` puts the old `.env`
+  back. The old port closes later, on «Подтвердить».
+
+Agent requests (`services/relay_ssh.py` `_REQUEST` and the agent's WHITELIST, run on the same
+requests by `tests/test_relay_jump.py`): `ssh-port-finish port=<1..65535> since=<epoch>`,
+`ssh-port-keep since=<epoch>`, `ssh-port-resume since=<epoch>`, `ssh-port-set port=<1..65535>`. The
+relay's helper also refuses a button of another migration (`since`), and the agent a forwarded port.
 
 ### The post-check of each phase
 
