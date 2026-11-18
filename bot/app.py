@@ -31,7 +31,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_bundles, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, security, settings as settings_handler, ssh_port, start, ufw
+from bot.handlers import admin, admin_bundles, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, relay_hardening, security, settings as settings_handler, ssh_port, start, ufw
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
 from bot.wizard_notifier import TelegramWizardNotifier
 from bot.middlewares.access import BlockedUserMiddleware
@@ -84,6 +84,7 @@ from services.protocol_uninstall import ProtocolUninstallService, UninstallRegis
 from services.proxy import ProxyService
 from services.relay import RelayCatalog
 from services.host_check import HostCheckMonitor
+from services.relay_hardening import RelayHardeningMonitor
 from services.ssh_port import SshPortMonitor
 from services.ufw import UfwApplier, UfwDeadmanMonitor
 from aiogram.types import InlineKeyboardMarkup
@@ -787,6 +788,10 @@ async def _build_app(
     )
     # A relay in phase 1 of its migration (its agent's status says so): asked once.
     relay_service.status_listeners.append(ssh_port_monitor.relay_status)
+    # A relay still on SSH 22 / without the input filter (what install.sh leaves a new
+    # relay with): «довести до нормы?» once per pairing (services/relay_hardening.py).
+    relay_hardening_monitor = RelayHardeningMonitor(store=db, admin_ids=settings.admin_ids)
+    relay_service.status_listeners.append(relay_hardening_monitor.relay_status)
     # A UFW policy change waiting for its proof (docs/host-state.md#the-firewall-ufw):
     # one message with «Подтвердить», one when it was confirmed or reverted.
     ufw_deadman_monitor = UfwDeadmanMonitor(
@@ -978,6 +983,7 @@ async def _build_app(
         protocol_uninstall=protocol_uninstall_service,
         host_check=host_check_monitor,
         ssh_port=ssh_port_monitor,
+        relay_hardening=relay_hardening_monitor,
         ufw_deadman=ufw_deadman_monitor,
         superadmin_claim=superadmin_claim_service,
         totp=totp_service,
@@ -1003,6 +1009,7 @@ async def _build_app(
     fallback_auto.notify = _fallback_notify
     host_check_monitor.bot = bot
     ssh_port_monitor.bot = bot
+    relay_hardening_monitor.bot = bot
     ufw_deadman_monitor.bot = bot
     warp_manager.bot = bot
     wizard_service.notifier = TelegramWizardNotifier(bot=bot, service=wizard_service, admin_ids=settings.admin_ids)
@@ -1061,6 +1068,7 @@ async def _build_app(
     dp.include_router(admin_relays.router)
     dp.include_router(admin_maintenance.router)
     dp.include_router(ssh_port.router)
+    dp.include_router(relay_hardening.router)
     dp.include_router(ufw.router)
     dp.include_router(admin_wizard.router)
     dp.include_router(admin_bundles.router)

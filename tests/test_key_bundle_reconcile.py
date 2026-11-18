@@ -884,13 +884,12 @@ async def test_one_bundle_error_does_not_stop_the_run_and_is_reported(world: _Wo
     assert (await world.bundle(good.id)).kind is KeyBundleKind.BASIC
 
 
-async def test_progress_is_edited_at_most_every_three_seconds() -> None:
+async def test_progress_is_edited_at_most_every_three_seconds(fake_timer: Any) -> None:
     message = _Message()
-    now = [100.0]
-    reporter = admin_bundles.ProgressReporter(message, "T", clock=lambda: now[0])
+    reporter = admin_bundles.ProgressReporter(message, "T")
     await reporter.start()
     for done in range(1, 10):
-        now[0] += 1.0  # one bundle per second
+        await fake_timer.advance(1.0)  # one bundle per second (the fake clock: tests/fake_timer.py)
         await reporter(done, 20)
     # start + t=103 + t=106 + t=109
     assert reporter.edits == 4

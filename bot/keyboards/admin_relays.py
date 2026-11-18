@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from i18n import t
 from models.dto import Relay, RelayPairing
 from services.relay_health import ProbeResult
-from services.relays import RelayOverview, agent_uninstalled, input_pending
+from services.relays import RelayOverview, agent_uninstalled, hardening_of, input_pending
 
 
 def _row(text: str, data: str) -> list[InlineKeyboardButton]:
@@ -112,6 +112,10 @@ def relay_card_keyboard(
         if input_pending(agent.last_status or {}):
             # Its input filter waits for input-confirm: the bot's new ssh session is the proof.
             rows.append(_row(t("btn_relay_input_confirm"), f"{base}:ag:inconf"))
+        hardening = hardening_of(relay)
+        if hardening is not None and hardening.needed:
+            # SSH on 22 / no input filter: «Довести» (bot/handlers/relay_hardening.py).
+            rows.append(_row(t("btn_relay_harden"), f"rhard:go:{relay.id}"))
         rows.append(_row(t("btn_relay_detach"), f"{base}:ag:detach"))
         if fallback:
             # The hub role of the fallback mode (bot/handlers/admin_fallback.py).

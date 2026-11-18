@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -318,14 +319,18 @@ class Host:
             f'if [[ "$1" == apply ]]; then\n'
             f'  n=$(grep -c "^vpn-relay-apply apply" "{self.log}")\n'
             f'  rc=$(sed -n "${{n}}p" "{rcs}"); [[ -n "$rc" ]] || rc=$(tail -n1 "{rcs}")\n'
-            f'  cp "{self.env_path}" "{self.tmp}/env-at-apply-$n"\n'
+            f'  cp "${{RELAY_ENV:-{self.env_path}}}" "{self.tmp}/env-at-apply-$n"\n'
+            f'  cp "{self.env_path}" "{self.tmp}/live-env-at-apply-$n"\n'
             f'  cache="{self.root}/etc/vpn-relay/upstream.resolved"\n'
             f'  if [[ -f "$cache" ]]; then cp "$cache" "{self.tmp}/cache-at-apply-$n"; fi\n'
             # like the real helper: an apply remembers the address of the name it applied
             f'  h=$(sed -n "s/^RELAY_UPSTREAM_HOST=//p" "{self.env_path}" | tail -n1)\n'
             f'  printf "host=%s\\nipv4=192.0.2.99\\nat=1\\n" "$h" > "$cache"\n'
             f'  echo "applied"; exit "$rc"\nfi\n'
-            f'if [[ "$1" == check ]]; then cat "{self.tmp}/check-output"; exit {self.check_rc}; fi\nexit 0\n',
+            f'if [[ "$1" == check ]]; then cat "{self.tmp}/check-output"; exit {self.check_rc}; fi\n'
+            # input-status: what the test put there, and which .env it was asked with.
+            f'if [[ "$1" == input-status ]]; then echo "${{RELAY_ENV:-live}}" >> "{self.tmp}/input-status-env"\n'
+            f'  if [[ -f "{self.tmp}/input-status" ]]; then cat "{self.tmp}/input-status"; fi; exit 0; fi\nexit 0\n',
         )
         hosts = "\n".join(f'  {n}) echo "{a}      STREAM {n}";;' for n, a in self.dns.items())
         self.stub("getent", f'case "$2" in\n{hosts}\n  *) exit 2;;\nesac\n')
@@ -1222,3 +1227,92 @@ def test_update_status_needs_the_pairing(host: Host) -> None:
     host.pair()
     rc, payload = host.run("update-status")
     assert rc == 3 and "not paired" in payload["error"]
+
+
+# --------------------------------------------------------------------------- #
+# input-filter on|off (agent 4, docs/relay.md «Входной фильтр relay»)
+# --------------------------------------------------------------------------- #
+STAGE = "etc/vpn-relay/input-filter.env"
+
+
+def _filter_status(host: Host, line: str) -> None:
+    (host.tmp / "input-status").write_text(line + "\n", encoding="utf-8")
+
+
+def test_input_filter_on_confirmed_by_mains_probe_commits_at_once(host: Host) -> None:
+    host.pair(paired=True)
+    _filter_status(host, "CONFIRMED by main probe (tcp 22; 2026-11-18 21:00:00 UTC)")
+    rc, payload = host.run("input-filter on")
+    assert rc == 0, payload
+    assert payload["input_filter"]["committed"] is True and payload["input_status"].startswith("CONFIRMED")
+    assert "RELAY_INPUT_FILTER=on" in (host.tmp / "env-at-apply-1").read_text(encoding="utf-8"), "applied from the stage"
+    assert "RELAY_INPUT_FILTER=off" in (host.tmp / "live-env-at-apply-1").read_text(encoding="utf-8"), (
+        "the live .env did not say on while the filter was unproven"
+    )
+    env = host.env_path.read_text(encoding="utf-8")
+    assert "RELAY_INPUT_FILTER=on" in env and "RELAY_INPUT_FILTER=off" not in env
+    assert "SSH_PORT=22" in env, "nothing else of .env changes"
+    assert not (host.root / STAGE).exists()
+    assert (host.tmp / "input-status-env").read_text(encoding="utf-8").split() == [str(host.root / STAGE)]
+
+
+def test_input_filter_on_pending_leaves_env_until_the_confirmation(host: Host) -> None:
+    host.pair(paired=True)
+    _filter_status(host, "PENDING CONFIRM (reverts at 2026-11-18 21:05:00 UTC) — main probe: no result")
+    before = host.env_path.read_text(encoding="utf-8")
+    rc, payload = host.run("input-filter on")
+    assert rc == 0 and payload["input_filter"]["committed"] is False
+    assert payload["input_status"].startswith("PENDING CONFIRM")
+    assert host.env_path.read_text(encoding="utf-8") == before, "not committed: the dead-man may still revert"
+    stage = host.root / STAGE
+    assert stage.exists() and stat.S_IMODE(stage.stat().st_mode) == 0o600
+    # The bot confirmed from a new session; the second call finds the set confirmed.
+    _filter_status(host, "OK (tcp 22; confirmed 2026-11-18T21:01:00Z by ssh-session)")
+    rc, payload = host.run("input-filter on")
+    assert rc == 0 and payload["input_filter"]["committed"] is True
+    assert "RELAY_INPUT_FILTER=on" in host.env_path.read_text(encoding="utf-8") and not stage.exists()
+
+
+def test_input_filter_on_whose_apply_fails_applies_the_live_env_again(host: Host) -> None:
+    host.pair(paired=True)
+    before = host.env_path.read_text(encoding="utf-8")
+    host.apply_rc = [9, 0]
+    rc, payload = host.run("input-filter on")
+    assert rc == 4 and "the live .env applied again (restored)" in payload["error"]
+    assert payload["input_filter"]["committed"] is False
+    assert [c for c in host.calls() if c.startswith("vpn-relay-apply apply")] == ["vpn-relay-apply apply"] * 2
+    assert "RELAY_INPUT_FILTER=on" in (host.tmp / "env-at-apply-1").read_text(encoding="utf-8")
+    assert (host.tmp / "env-at-apply-2").read_text(encoding="utf-8") == before, "the second apply is the live .env"
+    assert host.env_path.read_text(encoding="utf-8") == before and not (host.root / STAGE).exists()
+
+
+def test_input_filter_off_writes_env_and_applies(host: Host) -> None:
+    host.pair(paired=True)
+    host.env_path.write_text(host.env_path.read_text(encoding="utf-8").replace("FILTER=off", "FILTER=on"), encoding="utf-8")
+    (host.root / STAGE).write_text("RELAY_INPUT_FILTER=on\n", encoding="utf-8")
+    _filter_status(host, "off (RELAY_INPUT_FILTER=off)")
+    rc, payload = host.run("input-filter off")
+    assert rc == 0 and payload["input_filter"] == {"state": "off", "committed": True}
+    assert "RELAY_INPUT_FILTER=off" in host.env_path.read_text(encoding="utf-8")
+    assert not (host.root / STAGE).exists(), "a stage of an unfinished `on` goes too"
+    assert "RELAY_INPUT_FILTER=off" in (host.tmp / "env-at-apply-1").read_text(encoding="utf-8")
+
+
+def test_input_filter_off_whose_apply_fails_puts_env_back(host: Host) -> None:
+    host.pair(paired=True)
+    on = host.env_path.read_text(encoding="utf-8").replace("FILTER=off", "FILTER=on")
+    host.env_path.write_text(on, encoding="utf-8")
+    host.apply_rc = [6, 0]
+    rc, payload = host.run("input-filter off")
+    assert rc == 4 and ".env put back (restored)" in payload["error"]
+    assert host.env_path.read_text(encoding="utf-8") == on
+
+
+def test_input_filter_needs_a_pairing(host: Host) -> None:
+    host.pair(paired=False)
+    rc, _ = host.run("input-filter on")
+    assert rc == 3 and not [c for c in host.calls() if c.startswith("vpn-relay-apply")]
+
+
+def test_the_agent_says_version_4() -> None:
+    assert agent.AGENT_VERSION == "4" and "input-filter" in agent.COMMANDS

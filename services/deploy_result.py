@@ -12,6 +12,16 @@ This module only VALIDATES what arrives — it comes from another host (a relay'
 or a root helper's status file — into :class:`DeployFailure` /
 :class:`DeployWarning`, which the bot renders (bot/deploy_views.py). Anything unknown
 falls back to a generic reason; nothing is ever trusted as markup.
+
+THE STEP of a failure. A caller older than the markers (a relay agent before v3.2.1:
+only its one-line ``message``, e.g. «the deploy of v3.2.1 stopped before any change
+(exit 1): Phase 1 gate: pytest failed on tag v3.2.1 …») hands no ``step``. Then the
+step is read, in this order: from a ``[deploy:result failed step=… reason=…]`` line
+among the texts; else from the reason — the caller's, or the one the text tells
+(:data:`TEXT_REASONS`) — through :data:`REASON_STEPS`, the inverse of deploy.sh's
+``deploy_fail_reason`` (tests/test_deploy_verdict.py runs that function for every step
+against it); else it stays "" and the bot says «шаг неизвестен». Never a guess onto
+the first step.
 """
 
 from __future__ import annotations
@@ -27,6 +37,31 @@ DEPLOY_REASONS: tuple[str, ...] = (
 )
 # deploy.sh's DEPLOY_STEPS, in order.
 DEPLOY_STEPS: tuple[str, ...] = ("preflight", "fetch", "tests", "checks", "backup", "install", "restart", "verify")
+# reason → the step deploy.sh stops in with it: deploy_fail_reason maps preflight/fetch →
+# preflight, tests → tests, checks → checks, an armed Phase 2 → rolled_back; the explicit
+# reasons are set in the step named here (busy: the lock, before `step fetch`; no_venv:
+# the test venv of the tests step; upstream: the relay's verify after the restart). A
+# rollback without its step is read as the verify after the restart, where a relay's
+# rollbacks happen. "failed" and "timeout" say nothing about the step.
+REASON_STEPS: dict[str, str] = {
+    "busy": "preflight", "preflight": "preflight", "fetch": "fetch", "no_venv": "tests", "tests": "tests",
+    "checks": "checks", "upstream": "verify", "rolled_back": "verify",
+}
+# What a result's TEXT says the reason is (a caller older than the markers), first match
+# wins: the same readings as the DEPLOY VERDICT block's _dv_guess, on deploy.sh's own
+# words as an older agent forwards them (its one line drops the «[deploy][FAIL]» prefix).
+TEXT_REASONS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"did not finish within"), "timeout"),
+    (re.compile(r"another deploy already holds"), "busy"),
+    (re.compile(r"ensurepip is not available|\bpython3\.[0-9]+-venv\b|the test venv"), "no_venv"),
+    (re.compile(r"vpn-relay-apply check failed after the restart \(exit 1[34]\b"), "upstream"),
+    (re.compile(r"ROLLBACK|rolled back"), "rolled_back"),
+    (re.compile(r"Phase 1 gate: (?:ruff check|compileall|pytest) failed|^(?:FAILED|ERROR) tests/"
+                r"|^=+ .*\b[0-9]+ (?:failed|errors?)\b.* in [0-9.]+s", re.MULTILINE), "tests"),
+    (re.compile(r"git fetch"), "fetch"),
+    (re.compile(r"Phase 1 gate:|^\[deploy\]\[FAIL\] ", re.MULTILINE), "checks"),
+)
+_RESULT_LINE = re.compile(r"\[deploy:result failed step=(?P<step>[a-z_]{1,32}) reason=(?P<reason>[a-z_]{1,32})\]")
 MAX_EXCERPT_LINES = 8
 MAX_LINE_CHARS = 300
 MAX_MESSAGE_CHARS = 600
@@ -56,21 +91,46 @@ def _lines(raw: object) -> tuple[str, ...]:
     return tuple(out[-MAX_EXCERPT_LINES:])
 
 
+def reason_from_text(text: str) -> str:
+    """The reason a result's text tells (:data:`TEXT_REASONS`), "" when it tells none."""
+    for pattern, reason in TEXT_REASONS:
+        if pattern.search(text):
+            return reason
+    return ""
+
+
 def deploy_failure_from(
     data: Mapping[str, object] | None, *, message: str = "", default: str = "failed"
 ) -> DeployFailure:
     """A failure from a caller's fields (``reason``, ``step``/``fail_step``, ``excerpt``,
-    ``log``/``deploy_log``); a reason it does not know becomes *default*."""
+    ``log``/``deploy_log``); a reason it does not know becomes the one its text tells,
+    else *default*. A missing step is read as the module docstring says («THE STEP»)."""
     data = data or {}
-    reason = data.get("reason")
-    step = data.get("step") or data.get("fail_step")
+    raw_reason = data.get("reason")
+    raw_step = data.get("step") or data.get("fail_step")
     log = data.get("log") or data.get("deploy_log")
+    excerpt = _lines(data.get("excerpt"))
+    text_message = (message or str(data.get("message") or ""))[:MAX_MESSAGE_CHARS]
+    reason = raw_reason if isinstance(raw_reason, str) and raw_reason in DEPLOY_REASONS else ""
+    step = raw_step if isinstance(raw_step, str) and raw_step in DEPLOY_STEPS else ""
+    text = "\n".join((text_message, str(data.get("message") or "")[:MAX_MESSAGE_CHARS], *excerpt))
+    markers = list(_RESULT_LINE.finditer(text))
+    marker = markers[-1] if markers else None  # the last result line counts
+    if marker is not None:
+        if not step and marker.group("step") in DEPLOY_STEPS:
+            step = marker.group("step")
+        if not reason and marker.group("reason") in DEPLOY_REASONS:
+            reason = marker.group("reason")
+    if not reason:
+        reason = reason_from_text(text) or default
+    if not step:
+        step = REASON_STEPS.get(reason, "")
     return DeployFailure(
-        reason=reason if isinstance(reason, str) and reason in DEPLOY_REASONS else default,
-        step=step if isinstance(step, str) and step in DEPLOY_STEPS else "",
-        excerpt=_lines(data.get("excerpt")),
+        reason=reason,
+        step=step,
+        excerpt=excerpt,
         log=log if isinstance(log, str) and _LOG_PATH.fullmatch(log) else "",
-        message=(message or str(data.get("message") or ""))[:MAX_MESSAGE_CHARS],
+        message=text_message,
     )
 
 

@@ -17,6 +17,12 @@ is not modified» is no error, and a 429 (TelegramRetryAfter) is waited out by
 :func:`bot.messages.safe_edit_message_text` — it never fails the operation. An edit
 that still fails is logged and the operation goes on; the final edit is always sent.
 
+Time: every wait of a progress message — the throttle, the animation's tick, and the
+pollers that run next to an operation (the relay's ``update-status``) — goes through
+its :class:`Timer` (``now`` + ``wait``). Production uses real time (:data:`TIMER`);
+a test hands a fake one that moves only when the test says so (tests/fake_timer.py),
+so no progress test depends on how fast the host is.
+
 Used by: the All-in-One reconcile and the relay card's scoped twin
 (bot/handlers/admin_bundles.py, admin_relays.py), the fallback switch
 (admin_fallback.py), the relay's SSH port move (ssh_port.py) and the relay's
@@ -50,6 +56,32 @@ MAX_STARS = 6
 
 T = TypeVar("T")
 Edit = Callable[..., Awaitable[bool]]
+
+
+class Timer:
+    """Real time: what a progress message (and a poller next to it) reads and waits with.
+
+    :meth:`now` is a monotonic clock in seconds; :meth:`wait` waits for *event* at
+    most *timeout* seconds and says whether it is set. A test swaps in a fake one
+    (``bot.progress.TIMER``, or the ``timer`` of a :class:`ProgressMessage`)."""
+
+    def now(self) -> float:
+        return time.monotonic()
+
+    async def wait(self, event: asyncio.Event, timeout: float) -> bool:
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except TimeoutError:
+            return event.is_set()
+        return True
+
+
+# The timer a ProgressMessage gets when it is given none (read when it is built).
+TIMER = Timer()
+
+
+def current_timer() -> Timer:
+    return TIMER
 
 
 @dataclass
@@ -102,8 +134,7 @@ class ProgressMessage:
     title: str
     steps: list[Step]
     interval: float = PROGRESS_EDIT_INTERVAL_SECONDS
-    clock: Callable[[], float] = time.monotonic
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    timer: Timer = field(default_factory=current_timer)
     edit: Edit | None = None
     footer: str = ""
     tick: int = 0
@@ -142,6 +173,23 @@ class ProgressMessage:
                 step.state = "ok"
         self.set(key, "run", note=note)
 
+    def fail_at(self, key: str, note: str | None = None) -> None:
+        """*key* failed: every step before it that still waits or runs is done (the
+        operation got past it), *key* is ❌, a step after it that runs waits again."""
+        failed = False
+        for step in self.steps:
+            if step.key == key:
+                failed = True
+                step.state = "fail"
+                if note is not None:
+                    step.note = note
+            elif not failed and step.state in ("wait", "run"):
+                step.state = "ok"
+            elif failed and step.state == "run":
+                step.state = "wait"
+        if not failed:
+            raise KeyError(key)
+
     def fail_running(self, note: str | None = None) -> None:
         """The running step (else the first waiting one) failed; the rest stays ⚪."""
         running = [s for s in self.steps if s.state == "run"] or [s for s in self.steps if s.state == "wait"][:1]
@@ -170,7 +218,7 @@ class ProgressMessage:
             logger.warning("Progress message edit failed: %s: %s", type(exc).__name__, exc)
             return False
         self._last_text = text
-        self._last_at = self.clock()
+        self._last_at = self.timer.now()
         self.edits += 1
         return True
 
@@ -181,7 +229,7 @@ class ProgressMessage:
     async def push(self, *, force: bool = False, markup: InlineKeyboardMarkup | None = None) -> bool:
         """Edit when *interval* has passed since the last edit (or *force*) and the
         text changed. True when an edit went out."""
-        now = self.clock()
+        now = self.timer.now()
         if not force and self._last_at is not None and now - self._last_at < self.interval:
             return False
         text = self.text()
@@ -195,10 +243,7 @@ class ProgressMessage:
         step changes; a step change waits for the next tick)."""
         while not stop.is_set():
             await self.push()
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=self.interval)
-            except TimeoutError:
-                pass
+            await self.timer.wait(stop, self.interval)
 
     async def run(self, work: Awaitable[T]) -> T:
         """Await *work* while the message animates; the animation stops with it."""

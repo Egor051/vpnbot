@@ -236,7 +236,8 @@ Phase 2 step that was rolled back, …) in plain words, the step it stopped in, 
 deploy log that tell it and the log's path on the server (`/root/deploy-<ts>.log`). The
 helper's events carry `reason`, `fail_step`, `excerpt` and `deploy_log`; the classifier is the
 DEPLOY VERDICT block it shares with the relay agent. A deploy that succeeded with a finding
-(`[deploy:warn …]`) shows it under the report.
+(`[deploy:warn …]`) shows it under the report — among them `flaky_tests`: Phase 1's tests that
+failed and passed when only they were run again ([deployment.md](deployment.md#flaky-tests-in-phase-1)).
 
 The wizard calls `redeploy.sh` with `REDEPLOY_ATTACH=pipe`: `systemd-run --wait --pipe`
 instead of `--pty` (there is no terminal) under `set -o pipefail`, so the wrapper waits
@@ -254,6 +255,16 @@ Not a mode either: every relay with an agent, its SSH port and its move to `SSH_
 «✅ Подтвердить закрытие …» / «Оставить …» (phase 1), «↩️ Вернуться к переезду» (held) and
 «✏️ Сменить порт» (phase 1 to a new port at once, no deploy). All behind TOTP — see
 [host-state.md → A relay's migration from the bot](host-state.md#a-relays-migration-from-the-bot).
+A relay still on 22 or without its input filter (what the installer leaves a new relay with) shows
+a warning and **«🛡 Довести до нормы»** there.
+
+### 🛡 Входной фильтр relay
+
+Not a mode: every relay with an agent and its input filter (`vpn-relay-apply input-status`), and
+**«🛡 Довести: <relay>»** for each one not at the defaults (SSH on 22, the filter off) — the way back
+after «Позже» under the bot's alert. «Довести» turns the filter on (confirmed by a new ssh session of
+the bot), then moves SSH off 22, each step rolled back when it fails; TOTP (`relay_harden`) — see
+[relay.md → Bringing a relay to the defaults](relay.md#bringing-a-relay-to-the-defaults).
 
 ## The helpers' library
 
@@ -340,6 +351,7 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 | Relay: disconnect the agent | «🔌 Отключить агент» |
 | Relay: uninstall on the relay (delete of a relay with an agent, «🧹 Отключить и снять с relay») | the final button |
 | Relay: the SSH port — close the old port, keep it, resume, change the port ([host-state.md](host-state.md#a-relays-migration-from-the-bot)) | «✅ Подтвердить закрытие …», «Оставить …», «↩️ Вернуться к переезду», «✏️ Сменить порт» (the typed port checks the elevation again) |
+| Relay: bring a relay to the defaults — the input filter on, SSH off 22 ([relay.md](relay.md#bringing-a-relay-to-the-defaults)) | «🛡 Довести до нормы» (the plan) and «✅ Подтвердить» (the run) |
 | Fallback mode: switch on / off / repeat ([docs/relay.md](relay.md#fallback-mode-hub)) | «✅ Да, …» of the confirmation, «🔁 Повторить» |
 | Fallback mode: the hub role | «🛟 Сделать hub» (the typed origin checks the elevation again), «🛟 Снять роль hub» |
 | Fallback mode: the DNS API token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |

@@ -440,6 +440,28 @@ sudo FORCE_TESTS=1 bash scripts/redeploy.sh
 A relay deploying a release older than the stamp runs that release's `deploy.sh` (the handover),
 which knows no stamp: it tests, as before.
 
+### Flaky tests in Phase 1
+
+he2 (one vCPU, v3.2.1): `1 failed, 5808 passed` — a progress test that raced the real clock — and
+the relay's deploy stopped; ru1 passed the same tag. Now pytest's run is followed by ONE re-run of
+**exactly** the tests that failed, and only then the gate decides:
+
+- the full run is what it always was (`-q -p no:cacheprovider`; with the cache off `--lf` is out,
+  so a 10-line plugin passed with `-p` writes every failed report's node id — exact, a
+  parametrized id included, no parsing of pytest's text);
+- it failed with pytest's **exit 1** (tests failed — never 2: interrupted / a collection error, 3,
+  4, 5) and **at most 5** tests failed → only those run once more. **Green** → the gate passed: a
+  loud `WARN` block «flaky: <node ids>» right there, the same in DEPLOY OK (`!! FLAKY TESTS …`,
+  one id per line) and the marker `[deploy:warn flaky_tests] flaky: <node ids>`, which the bot
+  shows with the result (`deploy_warnings`: «⬆️ Обновить агент», «⬆️ Обновить бота»). **Red** → it
+  stops as before (`Phase 1 gate: pytest failed …`, `reason=tests`);
+- more than 5 failures is a broken release, not a flake: it stops without a re-run.
+
+`[deploy:tests total=N]` is printed again with the re-run added, so «done of total» never goes
+past 100%. A flaky test is still a bug: fix it (the progress tests now run on a fake clock —
+`tests/fake_timer.py`). A relay deploying a release older than this runs that release's
+`deploy.sh` (the handover): no re-run.
+
 ### Step and result markers
 
 `deploy.sh` prints machine-readable lines, never translated:
@@ -449,7 +471,7 @@ which knows no stamp: it tests, as before.
 | `[deploy:step <i>/<n> <name>]` | a step begins: `preflight`, `fetch`, `tests`, `checks`, `backup`, `install`, `restart`, `verify` (`CHECK=1`: the first four) |
 | `[deploy:skip <name>] <why>` | a step is skipped (the tests, on a stamp) |
 | `[deploy:tests total=<N>]` | the tests the gate collected (`pytest --collect-only`): the readers count pytest's result characters against it — «N/M» and the percentage in the bot |
-| `[deploy:warn <code>] <text>` | a finding of a deploy that succeeded (`upstream_preexisting`: [relay.md](relay.md#what-scriptsredeploysh-does-on-a-relay)) |
+| `[deploy:warn <code>] <text>` | a finding of a deploy that succeeded (`upstream_preexisting`: [relay.md](relay.md#what-scriptsredeploysh-does-on-a-relay); `flaky_tests`: [above](#flaky-tests-in-phase-1)) |
 | `[deploy:result ok]` / `[deploy:result noop]` | green / nothing to deploy |
 | `[deploy:result failed step=<name> reason=<class>]` | why it stopped — on every way out: a `FAIL`, an error under `set -e`, a rollback |
 
@@ -464,4 +486,8 @@ and «⬆️ Обновить бота» of the main server ([wizard.md](wizard.
 plain words, the step, the lines of the deploy log that tell it and where the full log is — not a bare
 «failed». Both readers carry ONE classifier (the DEPLOY VERDICT block of `scripts/vpn-relay-agent` and
 `scripts/wizard/vpn-bot-wizard-update`, pinned identical by `tests/test_deploy_verdict.py`); a
-`deploy.sh` that predates the markers is classified from its text.
+`deploy.sh` that predates the markers is classified from its text. A caller that predates them (a
+relay agent before v3.2.1 hands only its one-line message) gets its step read from that text too —
+a `[deploy:result …]` line in it, else its reason through `REASON_STEPS` (services/deploy_result.py,
+the inverse of `deploy_fail_reason`, pinned by a test); when nothing tells it, the bot says «шаг
+неизвестен» and marks no step.

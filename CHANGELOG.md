@@ -4,6 +4,68 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A flaky progress test no longer blocks a relay's deploy, and the race it caught is fixed in the
+  bot (docs/relay.md#progress-of-обновить-агент).** he2 (one vCPU), v3.2.1: Phase 1 stopped on
+  `tests/test_relay_unified.py::test_update_shows_the_plan_first_then_runs_with_progress` (1 failed,
+  5808 passed) — `🔄 тесты — 2802/5604` on the final card, 7 ✅ instead of 8; ru1 passed the same
+  tag. Reproduced: pinned with three busy loops to one core, 9 of 20 runs failed. The cause was not
+  only the test: an `update-status` poll still in flight when the update ended answered «running»
+  AFTER the final ✅ were set and put «🔄 тесты» back (and the result waited for that poll). Now the
+  poller (`UpdatePoller`) stops before the result sets the final states, drops a late answer, and
+  the result is drawn without waiting for it. Every wait of a progress message — the edit throttle,
+  the animation tick, the poller — goes through an injectable `bot.progress.Timer` (`now` + `wait`);
+  the tests run on a fake one that moves only when told (`tests/fake_timer.py`, an autouse fixture),
+  so the update test, `tests/test_progress.py` and the bundle reporter's throttle test take explicit
+  steps on events instead of `asyncio.sleep(0.01/0.05)` and real 3-second intervals; the relay
+  tests that parked a call with `sleep(0.05)` (a long agent call, a late status, a pairing cancel)
+  wait on an event the call sets. After the fix: 50 runs in a row green under the same load; a new
+  test forces the late answer and fails on the old code.
+- **An update through an agent without `update-status` (before v3.2.1) shows one line, not a frozen
+  list, and its failure lands on the right step.** he2 on agent v3.2.0, bot v3.2.1: every step stayed
+  ⚪ with only the stars moving, and ❌ was put on «проверки перед деплоем» although pytest had failed
+  («Phase 1 gate: pytest failed on tag v3.2.1»). Such an agent (its AGENT_VERSION from the last
+  status, or its «not an agent command» to the first poll) now gets ONE line «агент v3.2.0 — прогресс
+  по шагам появится после этого обновления» with the activity line and no more polls. The failing
+  step is the result's `step`; else a `[deploy:result failed step=…]` line in its text; else the
+  reason its text tells through ONE table (`REASON_STEPS`, services/deploy_result.py — the inverse of
+  deploy.sh's `deploy_fail_reason`, which a test runs for every step against it; `TEXT_REASONS` reads
+  the text the way the DEPLOY VERDICT block does): `Phase 1 gate: pytest failed` → «тесты», a
+  rollback → «проверка после рестарта». Nothing tells it → no ❌ on any step and «шаг неизвестен» —
+  never a guess onto the first step (`ProgressMessage.fail_at`).
+
+### Added
+
+- **Phase 1 re-runs ONLY the failed tests, once (docs/deployment.md#flaky-tests-in-phase-1).** A pytest
+  run that failed with exit 1 and at most 5 failures runs exactly those node ids again (a 10-line
+  plugin records them: the cache stays off, so `--lf` is out). Green → the deploy goes on with a loud
+  `WARN` «flaky: <node ids>», the same block in DEPLOY OK and `[deploy:warn flaky_tests]`, which the
+  bot shows with the result (`deploy_warnings`, «НЕСТАБИЛЬНЫЕ ТЕСТЫ»). Red → it stops as before; more
+  than 5 failures is no flake and is not re-run. `[deploy:tests total=N]` is reprinted with the re-run
+  added.
+- **«Довести relay до нормы»: SSH off 22 and the input filter on for a relay the bot added
+  (docs/relay.md#bringing-a-relay-to-the-defaults).** `install.sh` writes a new relay `SSH_PORT=<the
+  port sshd has>` and `RELAY_INPUT_FILTER=off` (so the first deploy cannot cut the bot off), and
+  nothing moved them on: he2, the hub, still ran SSH on 22 with no input filter. After a pairing — and
+  for an existing relay from a kept status or when its card is opened — the superadmins get ONE bold
+  message «relay X: SSH на 22, входной фильтр выключен — довести до нормы?» with «🛡 Довести до нормы»
+  / «Позже» (once per pairing; «Позже» remembered in `schema_meta`). «Довести» (TOTP `relay_harden`;
+  the plan ⚪, then the progress) runs `RelayService.harden`: (1) the input filter — the new agent
+  request `input-filter on` applies it from a STAGED `.env` (the live one says `on` only once the
+  filter is confirmed), `input-confirm` from a NEW ssh session of the bot (through the hub's jump for
+  a relay behind it), `input-filter on` again commits; rolled back with `input-filter off`, or by the
+  dead-man when the relay cannot be reached; (2) SSH — `ssh-port-set port=54321` and the finish ON
+  54321 (the existing two-phase migration); 54321 not answering → `ssh-port-set port=22`. The filter
+  goes first: the bigger protection and the self-healing step, so a port move that cannot finish
+  leaves the relay filtered on 22. The relay's card has a warning line and the button until it is
+  done; the wizard's «🔑 SSH-порт relay» and the new «🛡 Входной фильтр relay» lead back to it. An
+  agent too old for it is told «сначала обновите агент».
+- **Agent v4: `input-filter on|off`** (scripts/vpn-relay-agent, the bot's `_REQUEST` in step; pinned
+  by tests/test_relay_jump.py).
+
 ## [3.2.1](https://github.com/Egor051/vpnbot/releases/tag/v3.2.1) — 2026-11-18
 
 ### Fixed

@@ -447,6 +447,23 @@ agent answers ONE JSON per call and its `update` channel is blocked on `systemd-
 file survives a dropped ssh connection (and the hub's hop) and costs one short ssh session per
 poll. The result closes the steps — ✅, or ❌ on the step deploy.sh failed in, with the cause.
 
+- **A poll answered after the update ended is dropped.** The poller stops before the result sets
+  the final states, and the result is drawn without waiting for a poll still in flight (its ssh
+  call finishes on its own). Up to v3.2.1 such a late «running» answer put «🔄 тесты — N/M» back
+  over the ✅ — the Phase 1 flake of he2 (one vCPU) was this very race in its test.
+- **An agent without `update-status`** (older than AGENT_VERSION 3, i.e. released before v3.2.1 —
+  its version from the last `status`, or its «not an agent command» to the first poll) gets no list
+  of steps that cannot move: ONE line «агент v3.2.0 — прогресс по шагам появится после этого
+  обновления» with the activity line, and no further polls.
+- **The failing step** is the result's `step` (deploy.sh's
+  [result line](deployment.md#step-and-result-markers)); an agent older than the markers hands only
+  its one-line message, so the step is read from it: a `[deploy:result failed step=…]` line in it,
+  else the reason its text tells (`Phase 1 gate: pytest/ruff/compileall failed` → tests, a rollback
+  → «проверка после рестарта», …) through ONE table, `REASON_STEPS` of services/deploy_result.py —
+  the inverse of deploy.sh's `deploy_fail_reason` (a test runs that function for every step
+  against it). Nothing tells it → no ❌ on any step and «шаг неизвестен» — never a guess onto the
+  first step (he2: ❌ landed on «проверки перед деплоем» while pytest had failed).
+
 #### Which revision a relay deploys
 
 A relay follows **releases**, and has ONE update engine: this deploy. `sudo bash
@@ -836,6 +853,7 @@ line, extra words, an argv, an interactive login — is refused with exit 2 befo
 | `ssh-port-finish port=<p> since=<s>` | Phase 2 of the SSH port migration — only from a session that came in on `<p>` (its `SSH_CONNECTION`): `vpn-bot-ssh-port confirm-session` writes the proof and closes the old port ([host-state.md](host-state.md#a-relays-migration-from-the-bot)). |
 | `ssh-port-keep since=<s>` / `ssh-port-resume since=<s>` | Hold phase 1 (the old port stays, no proof finishes it) / go on with the migration. |
 | `ssh-port-set port=<p>` | `SSH_PORT=<p>` in `.env`, then `vpn-bot-ssh-port begin --keep <this session's port>`: both ports listen now, no deploy; the port the bot came in on never closes; `.env` restored on a failure (a failed input filter included). A forwarded port is refused. |
+| `input-filter on` / `input-filter off` | Agent 4. `on`: the filter is applied from a **staged** copy of `.env` with `RELAY_INPUT_FILTER=on` (`/etc/vpn-relay/input-filter.env`, `RELAY_ENV=<stage> vpn-relay-apply apply`) — the live `.env` is not touched yet; an unconfirmed TCP set arms the [dead-man](#keeping-access-the-dead-man-and-input-confirm), main's probe may confirm it in that apply. Confirmed (`input-status` OK / CONFIRMED) → `.env` gets `on` (`"committed": true`); still PENDING → the bot runs `input-confirm` from a NEW session and asks `on` again, which commits. Never confirmed → the dead-man removes the table and `.env` never said `on`. A failed apply → the live `.env` applied again, exit 4. `off`: `RELAY_INPUT_FILTER=off` and apply (the table goes, a waiting dead-man is disarmed); a failed apply puts `.env` back. [Bringing a relay to the defaults](#bringing-a-relay-to-the-defaults). |
 
 **The units** are not a list in the agent. They are read from the checkout by the same rule deploy.sh,
 install.sh and the host check use (`relay_unit_names`): every `deploy/relay/*.service` and `*.timer` of
@@ -882,12 +900,15 @@ With the fallback screen on, a relay that is not a hub also has **«🛟 Чер�
 ([through the hub](#managing-the-ru-relays-through-the-hub)), and the page says when its agent is
 reached through the hub. While the agent's last `status` reports the input filter `PENDING CONFIRM`,
 **«🛡 Подтвердить входной фильтр»** sends `input-confirm` (the status lines show the filter's state).
+While the relay is not [at the defaults](#bringing-a-relay-to-the-defaults), the page says so in a
+warning line and has **«🛡 Довести до нормы»**.
 
 ### Limits of the installer relay
 
-- **No input filter**: the installer sets `RELAY_INPUT_FILTER=off` — what comes in to the relay
-  itself is not filtered (as on a fresh VPS). [The input filter](#the-input-filter) can be
-  switched on by hand; its dead-man then needs a confirmation as described there.
+- **No input filter, SSH where it was**: the installer sets `RELAY_INPUT_FILTER=off` and
+  `SSH_PORT=<the port sshd listens on now>` — on purpose, so the first deploy cannot cut the bot off.
+  The bot brings it to the defaults afterwards, with a superadmin's «Довести»
+  ([below](#bringing-a-relay-to-the-defaults)).
 - `redeploy.sh` and the agent's `update` are the same engine (`deploy.sh` in the relay role, the
   newest release by default): an installer relay can be deployed by hand at any time, and the
   host files come with every update either way. An agent from before that (it called
@@ -899,6 +920,52 @@ reached through the hub. While the agent's last `status` reports the input filte
   `update` move the checkout without touching the file. The commit a relay runs is
   `git -C /opt/vpn-service rev-parse HEAD` (`status`: `checkout.commit`).
 - IPv4 only, like the rest of the relay.
+
+### Bringing a relay to the defaults
+
+**Why.** `install.sh` (`relay_write_env`) writes a NEW relay `SSH_PORT=<the port sshd listens on
+now>` and `RELAY_INPUT_FILTER=off`, so its first deploy cannot cut the bot off. Nothing moved them
+on: he2 — the hub, through which ALL traffic goes in the fallback mode — kept `SSH_PORT=22`,
+`RELAY_INPUT_FILTER=off`, sshd on `:22` only.
+
+**What is left** is read from the agent's last `status` (`hardening_of`, services/relays.py):
+*SSH on 22* — `ssh_migration.ssh_port` (the SSH_PORT in effect) is 22 and no migration is under way
+(an agent without the plan: `ssh_ports` is `[22]`); *the filter off* — `input_status` starts with
+`off`. A custom port (2222) is left alone.
+
+**The alert.** Right after a pairing (its `hello` is the relay's first status) and, for a relay that
+was there before, from a kept status (the health loop, a check) or when its card is opened, the
+superadmins get ONE message in bold — «⚠️ relay X: SSH на 22, входной фильтр выключен — довести до
+нормы?» — with **«🛡 Довести до нормы»** and **«Позже»**. Once per pairing (`schema_meta`
+`relay_hardening_told`, keyed by the relay and its `paired_at`: a re-pair asks again); «Позже» is
+remembered too (`relay_hardening_later`) and nothing asks again. The way back is always there: the
+warning line and the button on the relay's card, the wizard's «🔑 SSH-порт relay» (the relay's
+screen) and **«🛡 Входной фильтр relay»** (every relay with an agent, its `input-status`, «Довести»
+for each one not at the defaults).
+
+**«Довести»** (TOTP: `relay_harden`; an agent older than it needs — `input-filter` is agent 4,
+`ssh-port-set` agent 3 — gets «сначала обновите агент» with «⬆️ Обновить агент», and nothing is
+sent) shows the plan (each step ⚪, «✅ Подтвердить»), then runs it with
+[the progress](#progress-of-обновить-агент) in the same message (`RelayService.harden`):
+
+1. **The input filter** — `input-filter on` (the staged apply, the dead-man armed); unless main's
+   probe confirmed it already, `input-confirm` from a NEW ssh session of the bot (through the
+   hub's jump for a relay behind the hub — [below](#managing-the-ru-relays-through-the-hub)); then
+   `input-filter on` again, which finds the set confirmed and commits `.env`. **Rollback**:
+   `input-filter off`; a relay the bot cannot reach at all is rolled back by the dead-man within
+   5 minutes (`.env` never said `on`).
+2. **SSH off 22** — `ssh-port-set port=54321` (phase 1: 22 and 54321; the filter follows the
+   listeners, its new TCP set confirmed by main's probe or the bot's new session), then
+   `finish_ssh_port` — the bot's call ON 54321 is the proof, phase 2 closes 22
+   ([host-state.md](host-state.md#a-relays-migration-from-the-bot)). **Rollback**: 54321 does not
+   answer → `ssh-port-set port=22` cancels phase 1 (22 alone again).
+
+Each step is atomic; a failed one is rolled back and the step before it stays done. **The filter
+goes first** on purpose: it is the bigger protection (every listener but sshd closed on the host
+that carries the traffic) and the step that heals itself (the dead-man), so a port move that
+cannot finish — a provider's firewall dropping 54321 — leaves the relay filtered, on 22. The move
+then runs the path every default relay takes (filter on; main's probe of {22, 54321} is also a
+proof for phase 2). The price: two more dead-man rounds, each confirmed by the bot itself.
 
 ## Managing relays in the admin panel
 

@@ -29,8 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from aiogram import F, Router
@@ -70,7 +69,7 @@ from bot.keyboards.admin_relays import (
 )
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
-from bot.progress import STATES, ProgressMessage, steps_of
+from bot.progress import STATES, ProgressMessage, Timer, steps_of
 from bot.fallback import fallback_state_line
 from bot.relays import outcome_text, pairing_text, relay_card_text, relay_delete_text, relays_list_text
 from bot.totp_gate import require_totp
@@ -83,11 +82,14 @@ from services.key_bundles import ReconcileOutcome, ReconcileSummary, RelayMember
 from services.relay_health import LEVEL_ICONS
 from services.relay_pairing import format_ports
 from services.relays import (
+    AGENT_UPDATE_STATUS,
     IssuedPairing,
     PairingCheckFailed,
     RelayDeletionReport,
     RelayUpdateFailed,
     RelayUpdateResult,
+    agent_older_than,
+    agent_release,
     agent_uninstalled,
     host_is_ipv4,
     parse_relay_host,
@@ -215,6 +217,13 @@ async def _card_screen(
 ) -> tuple[str, Any]:
     relay, usage = await services.relays.usage(actor_user_id, relay_id)
     pending = await _pending_attach(services, actor_user_id, relay)
+    monitor = getattr(services, "relay_hardening", None)
+    if monitor is not None:
+        # SSH on 22 / no input filter: «довести до нормы?» once (services/relay_hardening.py).
+        try:
+            await monitor.observe(relay)
+        except Exception as exc:  # the card shows anyway
+            logger.warning("Relay %s: the hardening alert failed: %s: %s", relay.name, type(exc).__name__, exc)
     text = relay_card_text(
         relay,
         active_keys=usage.active_keys,
@@ -583,7 +592,7 @@ async def run_relay_members(
     relay: Relay,
     action: str,
     *,
-    clock: Callable[[], float] = time.monotonic,
+    timer: Timer | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """The background run: progress while it goes, the report when it is done.
@@ -592,7 +601,7 @@ async def run_relay_members(
     «exception was never retrieved» log line; the admin gets the error instead.
     """
     title = _subs_title(relay, action)
-    progress = ProgressReporter(message, title, clock=clock)
+    progress = ProgressReporter(message, title, timer=timer)
     try:
         await progress.start()
         summary = await progress.view.run(services.key_bundles.reconcile_relay_members(
@@ -1155,28 +1164,77 @@ async def relay_attach_target(message: Message, state: FSMContext, services: Ser
 # How often the bot asks a running update where it is (`update-status`, a second ssh
 # session — through the hub too): the animation runs locally in between.
 UPDATE_POLL_SECONDS = 10.0
+# The one step of an agent that cannot report steps (older than AGENT_UPDATE_STATUS).
+LEGACY_STEP = "update"
 
 
 def deploy_step_titles() -> list[tuple[str, str]]:
     return [(step, t(f"deploy_step_{step}")) for step in DEPLOY_STEPS]
 
 
-def apply_deploy_progress(view: ProgressMessage, progress: object) -> None:
+def apply_deploy_progress(view: ProgressMessage, progress: object) -> bool:
     """The agent's ``progress`` (deploy_progress of the deploy's output so far) onto
-    the message's steps; junk is ignored."""
+    the message's steps; junk is ignored. True when it moved a step or the tests."""
     if not isinstance(progress, dict):
-        return
+        return False
+    moved = False
     steps = progress.get("steps")
     if isinstance(steps, dict):
         for key, state in steps.items():
             if key in DEPLOY_STEPS and state in STATES:
                 view.set(str(key), str(state))
+                moved = True
     tests = progress.get("tests")
     if isinstance(tests, dict):
         done, total = tests.get("done"), tests.get("total")
         view.set("tests", view.step("tests").state,
                  done=done if isinstance(done, int) and done >= 0 else None,
                  total=total if isinstance(total, int) and total > 0 else None)
+        moved = True
+    return moved
+
+
+class UpdatePoller:
+    """``update-status`` every :data:`UPDATE_POLL_SECONDS` next to the long ``update``
+    call, onto *view* (waits through the view's timer, bot/progress.py).
+
+    * An answer that arrives after :meth:`stop` is DROPPED: the update's own result
+      decides the steps then. (A poll still in flight when the update ended used to
+      land after the final ✅ and put «🔄 тесты» back on the result.)
+    * An agent that does not know ``update-status`` (``fetch`` answers None) turns the
+      view into its one line (:meth:`legacy_view`) and polling ends.
+    """
+
+    def __init__(self, view: ProgressMessage, fetch: Callable[[], Awaitable[dict[str, Any] | None]],
+                 legacy_line: str) -> None:
+        self.view = view
+        self.fetch = fetch
+        self.legacy_line = legacy_line
+        self.legacy = False
+        self.seen = False  # a real progress of the deploy arrived (its steps are not a guess)
+        self._stop = asyncio.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def legacy_view(self) -> None:
+        self.legacy = True
+        self.view.steps = steps_of([(LEGACY_STEP, self.legacy_line)], **{LEGACY_STEP: "run"})
+
+    async def run(self) -> None:
+        while not await self.view.timer.wait(self._stop, UPDATE_POLL_SECONDS):
+            try:
+                update = await self.fetch()
+            except ServiceError:
+                continue
+            if self._stop.is_set():
+                return
+            if update is None:
+                self.legacy_view()
+                await self.view.push(force=True)
+                return
+            if apply_deploy_progress(self.view, update.get("progress")):
+                self.seen = True
 
 
 async def _progress_edit(message: object, text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> bool:
@@ -1189,9 +1247,19 @@ def _update_view(callback: CallbackQuery, relay: Relay) -> ProgressMessage:
                            steps_of(deploy_step_titles()), edit=_progress_edit)
 
 
+def _legacy_line(relay: Relay) -> str:
+    return t("relay_update_legacy", version=agent_release(relay.agent))
+
+
+def _legacy_agent(relay: Relay) -> bool:
+    """The agent is known (from its last status) to be older than ``update-status``."""
+    return agent_older_than(relay.agent, AGENT_UPDATE_STATUS)
+
+
 @router.callback_query(F.data.regexp(_RELAY_ACTION + r":ag:up$"))
 async def relay_agent_update(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """The plan: every step of the relay's deploy ⚪, and «✅ Подтвердить»."""
+    """The plan: every step of the relay's deploy ⚪ (an agent that cannot report the
+    steps: its one line instead), and «✅ Подтвердить»."""
     try:
         if not await _guard(callback, services):
             return
@@ -1202,6 +1270,8 @@ async def relay_agent_update(callback: CallbackQuery, state: FSMContext, service
         relay = await services.relays.get(callback.from_user.id, relay_id)
         await safe_callback_answer(callback)
         view = _update_view(callback, relay)
+        if _legacy_agent(relay):
+            view.steps = steps_of([(LEGACY_STEP, _legacy_line(relay))])
         view.footer = t("relay_update_plan_note")
         await view.show_plan(InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_relay_update_confirm"), callback_data=f"admin:relay:{relay_id}:ag:up:ok")],
@@ -1211,10 +1281,77 @@ async def relay_agent_update(callback: CallbackQuery, state: FSMContext, service
         await answer_callback_error(callback, exc)
 
 
+def _close_failed(view: ProgressMessage, poller: UpdatePoller, step: str) -> bool:
+    """The steps of a failed update; False when nothing is known about them (no step
+    from the result, no real progress) — then no list is shown and no step is ❌.
+
+    The step comes from the result (deploy.sh's marker, else what its text tells —
+    services/deploy_result.py); without it only a step the agent's progress REPORTED
+    as running may be marked. Never a guess onto the first step."""
+    if step in DEPLOY_STEPS:
+        if poller.legacy:
+            view.steps = steps_of(deploy_step_titles())
+        view.fail_at(step)
+        return True
+    if poller.seen and any(s.state == "run" for s in view.steps):
+        view.fail_running()
+        return True
+    return False
+
+
+async def _run_update(
+    callback: CallbackQuery, services: Services, view: ProgressMessage, poller: UpdatePoller, relay: Relay
+) -> str | None:
+    """The long ``update`` with the animation; the result's text for the card (None:
+    the relay is gone — the plain card/list)."""
+    assert callback.from_user is not None
+    shown = True
+    try:
+        try:
+            reply = await view.run(services.relays.update_agent(callback.from_user.id, relay.id))
+        finally:
+            # Before any final state: a poll answer from now on is dropped.
+            poller.stop()
+        raw_update = reply.payload.get("update")
+        update: dict[str, Any] = raw_update if isinstance(raw_update, dict) else {}
+        if poller.legacy:
+            view.steps = steps_of(deploy_step_titles())
+        if update.get("state") == "noop":
+            for step in view.steps:
+                if step.state in ("wait", "run"):
+                    step.state = "skip"
+        else:
+            view.complete()
+        notice = t(
+            "relay_agent_updated", state=h(str(update.get("state", "?"))), message=h(str(update.get("message", "")))
+        )
+        warnings = deploy_warnings_from(update.get("warnings"))
+        if warnings:
+            notice += "\n" + deploy_warnings_text(warnings)
+    except NotFound:
+        return None
+    except RelayUpdateFailed as exc:
+        shown = _close_failed(view, poller, exc.failure.step)
+        notice = t("relay_agent_update_failed_cause") + "\n" + deploy_failure_text(exc.failure)
+    except ServiceError as exc:
+        shown = _close_failed(view, poller, "")
+        notice = t("relay_agent_update_failed", error=h(service_error_text(exc)))
+    title = t("relay_update_title", name=h(relay.name))
+    if not shown:
+        return f"{title}\n\n{notice}"
+    steps = view.text(activity=False).split("\n", 2)[-1].strip()
+    return f"{title}\n{steps}\n\n{notice}"
+
+
 @router.callback_query(F.data.regexp(_RELAY_ACTION + r":ag:up:ok$"))
 async def relay_agent_update_run(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """The update itself: the long agent call, and next to it ``update-status`` every
-    :data:`UPDATE_POLL_SECONDS`; the result closes the steps (✅, or ❌ with the cause)."""
+    :data:`UPDATE_POLL_SECONDS` (:class:`UpdatePoller`); the result closes the steps
+    (✅, or ❌ on the step it stopped in — «шаг неизвестен» when nobody can tell).
+
+    An agent older than ``update-status`` (its version from the last status, or its
+    «not an agent command» to the first poll) shows ONE line with the activity, never a
+    list of steps that cannot move."""
     try:
         if not await _guard(callback, services):
             return
@@ -1226,57 +1363,24 @@ async def relay_agent_update_run(callback: CallbackQuery, state: FSMContext, ser
         relay = await services.relays.get(actor, relay_id)
         await safe_callback_answer(callback, t("relay_agent_updating"))
         view = _update_view(callback, relay)
-        view.start("preflight")
+        poller = UpdatePoller(view, lambda: services.relays.update_progress(actor, relay_id), _legacy_line(relay))
+        if _legacy_agent(relay):
+            poller.legacy_view()
+        else:
+            view.start("preflight")
         await view.push(force=True)
-        stop = asyncio.Event()
-
-        async def poll() -> None:
-            while not stop.is_set():
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=UPDATE_POLL_SECONDS)
-                    return
-                except TimeoutError:
-                    pass
-                try:
-                    update = await services.relays.update_progress(actor, relay_id)
-                except ServiceError:
-                    continue
-                apply_deploy_progress(view, update.get("progress"))
-
-        poller = asyncio.create_task(poll())
+        polling = asyncio.create_task(poller.run()) if not poller.legacy else None
         try:
-            reply = await view.run(services.relays.update_agent(actor, relay_id))
-            raw_update = reply.payload.get("update")
-            update: dict[str, Any] = raw_update if isinstance(raw_update, dict) else {}
-            if update.get("state") == "noop":
-                for step in view.steps:
-                    if step.state in ("wait", "run"):
-                        step.state = "skip"
+            body = await _run_update(callback, services, view, poller, relay)
+            if body is not None:
+                await _show_card(callback, services, relay_id, body)
             else:
-                view.complete()
-            notice = t(
-                "relay_agent_updated", state=h(str(update.get("state", "?"))), message=h(str(update.get("message", "")))
-            )
-            warnings = deploy_warnings_from(update.get("warnings"))
-            if warnings:
-                notice += "\n" + deploy_warnings_text(warnings)
-        except NotFound:
-            await _show_card(callback, services, relay_id)
-            return
-        except RelayUpdateFailed as exc:
-            if exc.failure.step in DEPLOY_STEPS:
-                view.set(exc.failure.step, "fail")
-            else:
-                view.fail_running()
-            notice = t("relay_agent_update_failed_cause") + "\n" + deploy_failure_text(exc.failure)
-        except ServiceError as exc:
-            view.fail_running()
-            notice = t("relay_agent_update_failed", error=h(service_error_text(exc)))
+                await _show_card(callback, services, relay_id)
         finally:
-            stop.set()
-            await asyncio.gather(poller, return_exceptions=True)
-        steps = view.text(activity=False).split("\n", 2)[-1].strip()
-        await _show_card(callback, services, relay_id, f"{t('relay_update_title', name=h(relay.name))}\n{steps}\n\n{notice}")
+            if polling is not None:
+                # Not cancelled: an ssh call in flight finishes on its own (its answer is
+                # dropped) — after the result is on the screen, which never waits for it.
+                await asyncio.gather(polling, return_exceptions=True)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

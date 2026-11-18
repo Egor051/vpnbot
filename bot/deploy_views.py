@@ -2,7 +2,7 @@
 server's «Обновить бота» (setup wizard) show the same block (services/deploy_result.py).
 
 A failure: the cause in plain words (one of deploy.sh's reasons), the step it stopped
-in, the lines that tell it (as received, escaped, in <pre>) and where the full log is
+in («шаг неизвестен» when neither the marker nor the text tells it), the lines that tell it (as received, escaped, in <pre>) and where the full log is
 on that host. A success with findings: one line per ``[deploy:warn]``.
 """
 
@@ -23,6 +23,9 @@ def deploy_failure_text(failure: DeployFailure) -> str:
     lines = [t("deploy_fail_cause", cause=t(f"deploy_reason_{failure.reason}"))]
     if failure.step:
         lines.append(t("deploy_fail_step", step=h(step_title(failure.step))))
+    else:
+        # Neither deploy.sh's marker nor the result's text tells it: never a guess.
+        lines.append(t("deploy_fail_step_unknown"))
     if failure.excerpt:
         lines.append(t("deploy_fail_lines"))
         lines.append("<pre>" + h("\n".join(failure.excerpt)) + "</pre>")
