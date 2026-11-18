@@ -503,6 +503,27 @@ def test_a_confirmation_that_did_not_come_over_the_new_port_closes_nothing(
     assert host.state()["phase"] == 1  # type: ignore[index]
 
 
+def test_confirm_after_the_timer_finished_the_same_migration_is_ok(tmp_path: Path) -> None:
+    """Another proof came first (here main's probe) and `advance` closed 22 before the
+    button: «Подтвердить» over the new port is a success, so the bot moves its row."""
+    host = Host(tmp_path, "relay")
+    since = host.phase1()
+    host.put(MARKER, f"tcp=22,54321\nconfirmed_at={_iso(since + 5)}\nconfirmed_by=main-probe\n")
+    assert host.helper("advance", "--listen-wait", "0").returncode == 0
+    assert host.state()["phase"] == 2  # type: ignore[index]
+    ok = host.helper("confirm-session", "--port", "54321", "--since", str(since), "--local-port", "54321",
+                     "--addr", "203.0.113.5", "--listen-wait", "0")
+    assert ok.returncode == 0 and "already finished" in ok.stdout, ok.stdout + ok.stderr
+    assert host.state()["proof"]["kind"] == "relay-probe", "the state is not rewritten"  # type: ignore[index]
+    # Not over the new port, or another migration: still refused.
+    old = host.helper("confirm-session", "--port", "54321", "--since", str(since), "--local-port", "22",
+                      "--addr", "203.0.113.5")
+    assert old.returncode == 3 and "came in on 22" in old.stderr
+    stale = host.helper("confirm-session", "--port", "54321", "--since", str(since - 1), "--local-port", "54321",
+                        "--addr", "203.0.113.5")
+    assert stale.returncode == 3 and "stale" in stale.stderr
+
+
 def test_confirm_session_is_for_a_relay(tmp_path: Path) -> None:
     host = Host(tmp_path, "main", env="SSH_PORT=60022\n")
     since = host.phase1((54321,), 60022)
