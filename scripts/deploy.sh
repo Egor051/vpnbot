@@ -6182,6 +6182,9 @@ EOF
 !!     ${RELAY_HELPER} input-confirm
 !! otherwise the filter removes itself (${RELAY_DEADMAN_TIMER} -> vpn-relay-apply input-off).
 !! This session does not count: established connections always pass the filter.
+!! A relay with an agent: the bot confirms it by itself — its agent call is a new ssh
+!! session (through the hub in the fallback mode): after «Обновить агент», in the
+!! health loop, or «🛡 Подтвердить входной фильтр» on the relay's card.
 
 EOF
   fi

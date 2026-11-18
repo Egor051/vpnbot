@@ -1384,6 +1384,35 @@ def test_a_retry_that_reaches_main_confirms(probing: Relay) -> None:
     assert "attempt 1 failed" in proc.stdout
 
 
+@pytest.mark.parametrize(
+    ("rc", "meaning"),
+    [
+        (28, "no answer in time: main is not reachable from this relay (blocked on the way? the fallback mode)"),
+        (7, "the connection to main was refused or dropped: main is not reachable from this relay"),
+        (56, "the connection to main was cut (blocked on the way? the fallback mode)"),
+    ],
+)
+def test_input_status_says_why_main_could_not_probe_and_what_is_left(probing: Relay, rc: int, meaning: str) -> None:
+    """Main unreachable (the TSPU in the fallback mode): input-status names the cause in
+    plain words and the way that is left — a NEW ssh session, the bot's or the operator's."""
+    probing.curl_answers = [(rc, 0, "")]
+    assert probing.run("apply").returncode == 0
+    status = probing.run("input-status").stdout.strip()
+    assert status.startswith("PENDING CONFIRM (reverts at ")
+    assert f"main probe did not confirm it: main unreachable (curl exit {rc}" in status and meaning in status
+    assert "the bot does it by itself (vpn-relay-agent input-confirm — through the hub" in status
+    assert "`vpn-relay-apply input-confirm`" in status
+    assert "\n" not in status, "one line: DEPLOY OK prints it"
+
+
+def test_input_status_without_a_probe_result_for_the_set_says_so(probing: Relay) -> None:
+    probing.curl_answers = [(28, 0, "")]
+    assert probing.run("apply").returncode == 0
+    probing.probe_note.unlink()
+    status = probing.run("input-status").stdout.strip()
+    assert status.startswith("PENDING CONFIRM (reverts at ") and "— main probe: no result for this TCP set; " in status
+
+
 def test_input_confirm_still_works_after_a_failed_probe(probing: Relay) -> None:
     probing.curl_answers = [(0, 404, "")]
     assert probing.run("apply").returncode == 0

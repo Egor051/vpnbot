@@ -967,10 +967,23 @@ one_line() {
 
 probe_http_reason() {
   case "$1" in
-    404) printf '%s' "main answered 404: this relay's address is not in the source IPs of an ENABLED relay in the admin panel (add the relay there first), or SUBSCRIPTION_ENABLED=false on main" ;;
+    404) printf '%s' "main answered 404: this relay's address is not in the source IPs of an ENABLED relay in the admin panel (add the relay there first), or SUBSCRIPTION_ENABLED=false on main, or the request came through the hub (the fallback mode: main never probes back through a hub)" ;;
     400) printf '%s' "main answered 400: it did not accept the request (ports $(list_text "${SSH_PORTS[@]}"))" ;;
     429) printf '%s' "main answered 429: too many probes from this address, try again in a minute" ;;
     *)   printf '%s' "main answered HTTP ${1}" ;;
+  esac
+}
+
+# What a curl exit code means for the probe, as " — ..." (nothing for the rest).
+# 28/7/56/52/35: main does not answer from here or the connection is cut on the way —
+# the case of the fallback mode, where the TSPU blocks the main server.
+curl_meaning() {
+  case "$1" in
+    6)  printf '%s' " — the name does not resolve" ;;
+    7)  printf '%s' " — the connection to main was refused or dropped: main is not reachable from this relay" ;;
+    28) printf '%s' " — no answer in time: main is not reachable from this relay (blocked on the way? the fallback mode)" ;;
+    35|52|56) printf '%s' " — the connection to main was cut (blocked on the way? the fallback mode)" ;;
+    60) printf '%s' " — main's certificate does not verify for ${CONFIRM_HOST}" ;;
   esac
 }
 
@@ -1018,7 +1031,7 @@ main_probe() {
     if (( rc != 0 )); then
       line=""
       IFS= read -r line < "$errf" || true
-      PROBE_REASON="main unreachable (curl exit ${rc}${line:+: ${line}})${hint}"
+      PROBE_REASON="main unreachable (curl exit ${rc}${line:+: ${line}})$(curl_meaning "$rc")${hint}"
     elif [[ "$code" == "200" ]]; then
       text="$(<"$resp")"
       compact="${text//[[:space:]]/}"
@@ -1445,15 +1458,20 @@ cmd_input_confirm() {
 }
 
 # What main's probe answered for the set with hash $1, as " — ..." for the PENDING
-# line (nothing when it did not run for that set).
+# line, and the way that is left: a NEW ssh session — the bot's (it confirms by itself
+# when its agent sees PENDING, through the hub in the fallback mode) or the operator's.
 probe_note() {
-  local result reason
-  [[ -n "$1" && "$(kv_get "$INPUT_PROBE" sha256)" == "$1" ]] || return 0
+  local result reason way
+  way="; confirm from a NEW ssh session: the bot does it by itself (vpn-relay-agent input-confirm — through the hub in the fallback mode; «🛡 Подтвердить входной фильтр» on the relay's card), or run \`${ME} input-confirm\` in one"
+  if [[ -z "$1" || "$(kv_get "$INPUT_PROBE" sha256)" != "$1" ]]; then
+    printf ' — main probe: no result for this TCP set%s' "$way"
+    return 0
+  fi
   result="$(kv_get "$INPUT_PROBE" result)"
   reason="$(kv_get "$INPUT_PROBE" reason)"
   case "$result" in
-    fail)    printf ' — main probe did not confirm it: %s' "${reason:-?}" ;;
-    skipped) printf ' — no main probe: %s' "${reason:-?}" ;;
+    fail)    printf ' — main probe did not confirm it: %s%s' "${reason:-?}" "$way" ;;
+    skipped) printf ' — no main probe: %s%s' "${reason:-?}" "$way" ;;
   esac
 }
 

@@ -179,6 +179,13 @@ confirmed set.
   ```
 
   instead of `OK`, followed by the instruction.
+- **The bot confirms it** on a relay with an agent: every agent call is a NEW ssh session of
+  the bot's — through the hub in the fallback mode ([below](#managing-the-ru-relays-through-the-hub)) —
+  so when `status` reports `PENDING CONFIRM`, the bot sends `input-confirm` and the agent runs
+  `vpn-relay-apply input-confirm` inside that session (its «session began after the apply»
+  check is the proof; the marker says `confirmed_by=ssh-session`). It does so right after
+  «⬆️ Обновить агент», in the health loop, and on «🛡 Подтвердить входной фильтр» on the relay's
+  card. Main's probe is then not needed.
 - **Or confirm by hand: open a NEW ssh session** to the relay and run
   `vpn-relay-apply input-confirm` within 5 minutes: it stops the timer and writes the marker
   with the hash. Without either, the timer runs `input-off`: only `table inet vpnrelay_input`
@@ -200,6 +207,11 @@ confirmed set.
   probe confirmed it), `PENDING CONFIRM (reverts at …) — <why main did not confirm it>`,
   `ABSENT — the dead-man removed it at …`, `off (RELAY_INPUT_FILTER=off)`; DEPLOY OK prints it as
   `input filter`. The marker says who confirmed: `confirmed_by=ssh-session` or `main-probe`.
+  When main's probe could not run or did not answer, the PENDING line says why in plain words
+  (`no answer in time: main is not reachable from this relay (blocked on the way? the fallback
+  mode)`, `the connection to main was cut`, a 404 that also covers a request through the hub, …;
+  `main probe: no result for this TCP set` when there is none) and the way that is left: a new
+  ssh session — the bot's (by itself, or the card's button) or yours.
 
 #### Main confirms the filter: `POST /relay/ssh-probe`
 
@@ -638,6 +650,11 @@ installer decodes it with the same rules):
   readable by anyone else is refused). In the helper-nonroot model, where the bot cannot write
   `/etc/vpn-bot`, create it once as root:
   `install -d -m 0700 -o vpn-bot /etc/vpn-bot/relay_ssh && sudo -u vpn-bot ssh-keygen -t ed25519 -N '' -C vpn-bot-relay -f /etc/vpn-bot/relay_ssh/id_ed25519`.
+  Next to it lives the bot's **jump key**, `/etc/vpn-bot/relay_ssh/id_ed25519_jump` — the same
+  model (generated on the first call through the hub; in the helper-nonroot model create it the
+  same way with `-C vpn-bot-relay-jump -f …/id_ed25519_jump`). It never reaches an agent: only the
+  hub's sshd knows it, and only to forward to the relays behind the hub
+  ([below](#managing-the-ru-relays-through-the-hub)).
 - `one_time_token` — 32 random bytes; the relay keeps only its sha256. The bot keeps the token
   while the pairing is pending (table `relay_pairings`) and clears it the moment the pairing is
   completed, cancelled or expired.
@@ -774,16 +791,19 @@ so its keys stop working until the relay is set up again (the screen says so).
 
 `scripts/vpn-relay-agent` (stdlib Python). sshd runs it for the bot's key whatever the client
 asks; the request comes in `SSH_ORIGINAL_COMMAND` and must match one of these **exactly**
-(full-string patterns, ASCII, at most 512 characters); everything else — shell syntax, a second
+(full-string patterns, ASCII, at most 4096 characters — the `jump` list is the longest); everything else — shell syntax, a second
 line, extra words, an argv, an interactive login — is refused with exit 2 before anything runs:
 
 | Request | Does |
 |---|---|
 | `hello <token>` | Complete the pairing; answers the relay's facts. The only request before pairing. |
-| `status` | Facts: target, ports, the live DNAT target, what the name resolves to now, `ip_forward`, the units (`vpn-relay.service` and every timer of the set below), the ssh ports, the egress source address, the checkout, the last update, and `vpn-relay-apply check`. |
+| `status` | Facts: target, ports, the live DNAT target, what the name resolves to now, `ip_forward`, the units (`vpn-relay.service` and every timer of the set below), the ssh ports, the egress source address, the checkout, the last update, `vpn-relay-apply check`, `vpn-relay-apply input-status` (`input_status`) and, on a hub, its jump line (`jump`: the relays it opens, the key's fingerprint). |
 | `apply target=<dns name> tcp=<ports> udp=<ports>` | Re-point / re-port: refused for a name that is not a name or does not resolve on the relay, a port outside 1..65535, more than 8, a TCP port sshd listens on. Rewrites only `RELAY_UPSTREAM_HOST` / `RELAY_FORWARD_*`, applies, checks; puts `.env` back and re-applies when the ruleset or the check (table, sysctls, the upstream not answering) fails. |
 | `update` | In a transient unit (`systemd-run --wait`): fetch the release tags, pick the newest release ([the same rule as the deploy](#which-revision-a-relay-deploys)) — only forward, never backwards or sideways — and run the relay's deploy for it: `scripts/redeploy.sh` with `DEPLOY_REF=<tag>` (that tag's `deploy.sh`, in its own transient unit, log `/root/deploy-<ts>.log`): the pytest gate, helpers, units and host files, the reload of vpn-relay, the checks; `deploy.sh` rolls back by itself. The agent never checks anything out. The result (`running` / `noop` / `failed` / `succeeded`, `from_commit`, `to_commit`, `release`, `log`) is in `/var/lib/vpn-relay/update.json` and in `status`. Minutes: the agent waits up to 45 minutes. |
-| `uninstall` | In a transient unit: the units of the set below stopped and removed (timers first, `vpn-relay.service` last), both tables deleted, the sysctl file removed and `ip_forward` back to what it was before the install, the helpers, `/etc/vpn-relay`, `/var/lib/vpn-relay`, the checkout (when the installer created it) and the agent's key line removed. The adoption backup stays. Refused on a host without the installer's `/etc/vpn-relay/install.json`. |
+| `uninstall` | In a transient unit: the units of the set below stopped and removed (timers first, `vpn-relay.service` last), both tables deleted, the sysctl file removed and `ip_forward` back to what it was before the install, the helpers, `/etc/vpn-relay`, `/var/lib/vpn-relay`, the checkout (when the installer created it), the agent's key line and the jump line removed. The adoption backup stays. Refused on a host without the installer's `/etc/vpn-relay/install.json`. |
+| `input-confirm` | Runs `vpn-relay-apply input-confirm` as a direct child — the bot's ssh session (a new one) is among its ancestors, which is the proof that check wants ([dead-man](#keeping-access-the-dead-man-and-input-confirm)). Answers the helper's lines and the new `input-status`. Takes no agent lock: the filter waits for its confirmation exactly while `update` holds it. |
+| `jump key=<ed25519 blob> open=<host>:<port>[,…]` | A hub: write the bot's ONE jump line in root's authorized_keys (`restrict,port-forwarding,permitopen="<host>:<port>"[,…],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump`) — [below](#managing-the-ru-relays-through-the-hub). A DNS name or IPv4 (not loopback, link-local, multicast), port 1..65535, unique, at most 32; a key that already has another line in the file (the agent's own) is refused. Every other line stays byte-identical. Its own lock, so a hub's `update` does not hold it up. |
+| `jump-off` | A hub: remove that line. |
 
 **The units** are not a list in the agent. They are read from the checkout by the same rule deploy.sh,
 install.sh and the host check use (`relay_unit_names`): every `deploy/relay/*.service` and `*.timer` of
@@ -826,6 +846,10 @@ relay before the row goes (a relay that does not answer offers «Удалить 
 call that takes minutes (update, apply, uninstall) marks only THAT relay busy — the screen stays
 usable, another change of that relay meanwhile is refused («relay занят»). Every change asks for the
 TOTP code ([below](#managing-relays-in-the-admin-panel)) and is audited (entity `relay`).
+With the fallback screen on, a relay that is not a hub also has **«🛟 Через hub: вкл/выкл»**
+([through the hub](#managing-the-ru-relays-through-the-hub)), and the page says when its agent is
+reached through the hub. While the agent's last `status` reports the input filter `PENDING CONFIRM`,
+**«🛡 Подтвердить входной фильтр»** sends `input-confirm` (the status lines show the filter's state).
 
 ### Limits of the installer relay
 
@@ -1215,18 +1239,68 @@ There is no automatic switch on health — an admin switches the mode. The switc
   an ordinary relay covers that address too. A hub masquerades the subscription port: in the
   fallback mode an RU relay's probe arrives from the hub's address, and the main server would dial
   the hub's SSH ports and "confirm" somebody else's filter. Consequence: the input filter of **the
-  hub itself** and of RU relays in the fallback mode is confirmed only by `input-confirm` from a new
-  SSH session ([dead-man](#keeping-access-the-dead-man-and-input-confirm)).
+  hub itself** and of RU relays in the fallback mode is confirmed by `input-confirm` from a new
+  SSH session — which the bot opens itself, through the hub
+  ([dead-man](#keeping-access-the-dead-man-and-input-confirm),
+  [below](#managing-the-ru-relays-through-the-hub)).
 - **Health.** In the fallback mode, a relay forwarding to a name of the set (or a relay without an
   agent) whose hairpin probe fails gets the level **🛟 «behind the hub, not reachable directly»**:
-  moving into it, and from it back to 🟢, **alerts nobody**, and SSH to its agent is not tried (every pass would
-  wait out the SSH timeout otherwise). The mode switched off and the relay still unreachable — an
-  ordinary 🔴 with its alert.
+  moving into it, and from it back to 🟢, **alerts nobody**. Its agent is still asked — through the
+  hub — so its status stays fresh and a pending input filter is confirmed. The mode switched off and
+  the relay still unreachable — an ordinary 🔴 with its alert.
 - **Anomaly detection** loses the IP signal: all traffic through the hub arrives from the hub's IP,
   and its source IPs are excluded like any relay's. While the mode is on, IP anomalies are not seen.
 
-Not done here: SSH to the RU relays through the hub (managing them from the bot in the fallback
-mode is not possible — the next step) and an automatic switch on health.
+Not done here: an automatic switch on health.
+
+### Managing the RU relays through the hub
+
+The TSPU cuts SSH from the main server to the RU relays too. The hub still reaches both, so the
+bot manages them **through the hub**:
+
+```
+bot ──ssh (jump key)──▶ hub sshd ──-W ru1:22──▶ ru1 sshd ──▶ vpn-relay-agent
+     pinned hub key                    pinned ru1 key, the agent key, forced command
+```
+
+- **When.** A relay goes through the hub when its card says **«🛟 Через hub: вкл»**
+  (`relays.via_hub`, schema v47 — always), and **every relay but a hub while the fallback mode is
+  on** (automatically, no flag). A hub is always reached directly. A relay behind the hub with no
+  hub (or a hub without an agent) is refused with a clear message, not a timeout. The card says how
+  the agent is reached: «SSH к агенту — через hub … (флаг «через hub» | режим фолбэка)».
+- **The ssh.** One `ssh` with a `ProxyCommand` — a second, fully pinned `ssh` (`-F /dev/null`, the
+  same option set, the **jump key**, the hub's own `HostKeyAlias` and pinned host key,
+  `StrictHostKeyChecking=yes` always) that only does `-W <relay ssh_host>:<ssh_port>`. Not `-J`:
+  ProxyJump starts the jump ssh with defaults (`~/.ssh`, any identity) that cannot be pinned. The
+  relay's hop is exactly a direct call: the agent key, its own alias and pinned key (TOFU on a
+  pairing). The ProxyCommand runs in `/bin/sh` (the bot's own `$SHELL` is nologin). The hub's hop
+  logs at `INFO`, so a refusal is named: «hub не пускает к …» (not in its permitopen) or «hub не
+  достучался до …».
+- **The hub's line.** The hub's agent keeps ONE line for the jump key in root's authorized_keys:
+
+  ```
+  restrict,port-forwarding,permitopen="<ssh_host>:<ssh_port>"[,permitopen="…"],command="/bin/false" ssh-ed25519 <jump key> vpn-bot-relay-jump
+  ```
+
+  `restrict` (no pty, no agent/X11 forwarding), port forwarding back — but only to the listed
+  relays' sshd — and `/bin/false` for a session: no shell. `permitopen` lists **exactly** the
+  relays with an agent that are behind the hub. The bot writes it (`jump key=… open=…`, or
+  `jump-off` when nothing is behind the hub) whenever that set changes — the flag, the mode
+  switched on/off, a hub given or taken (its line goes with the role), a pairing, a detach, a
+  delete — and before the first call through the hub after a restart. The client refuses a
+  target that is not in that list before any process starts; a hub that refuses the forward
+  anyway (re-installed, edited by hand) gets its line written again, once. The agent's own line —
+  `restrict,command="vpn-relay-agent"` — is untouched: it can never be a jump.
+- **A pairing during the ban** (the fallback mode on, or attaching an agent to a relay «через
+  hub») says `hello` through the hub: the hub's line opens that address for the pairing (and
+  closes it again if the pairing fails). The outside checks from the main server cannot pass then,
+  so the relay's own `vpn-relay-apply check` (TCP to its upstream on every forwarded port, TLS),
+  asked through the hub with the key the hello just learned, stands in for them (the result says
+  «relay's own check, via hub»).
+- **The input filter.** A session through the hub is a NEW ssh session on the relay. When `status`
+  reports `PENDING CONFIRM`, the bot sends `input-confirm` (after an update, in the health loop, or
+  «🛡 Подтвердить входной фильтр» on the card) — main's probe is not needed
+  ([dead-man](#keeping-access-the-dead-man-and-input-confirm)).
 
 ## Health monitor
 

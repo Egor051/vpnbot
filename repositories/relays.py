@@ -35,7 +35,7 @@ _COLUMNS = (
     "id, name, label, host, source_ips, enabled, in_subscriptions, note, "
     "created_at, updated_at, created_by, updated_by, "
     "ssh_host, ssh_port, host_key, target_host, tcp_ports, udp_ports, "
-    "agent_version, agent_paired_at, agent_status_json, agent_status_at, basic_visible, role"
+    "agent_version, agent_paired_at, agent_status_json, agent_status_at, basic_visible, role, via_hub"
 )
 # The agent columns, written all together and cleared all together.
 AGENT_COLUMNS: tuple[str, ...] = (
@@ -67,6 +67,10 @@ MAIN_BASIC_VISIBLE_META_KEY = "basic_visible_main"
 # schema_meta key of the direct links' host (repositories.failover.META_DIRECT_HOST
 # is the same string; the fallback service writes it).
 DIRECT_HOST_META_KEY = "failover_direct_host"
+# schema_meta key of the fallback mode ("on" — every relay but a hub is managed
+# through the hub). repositories.failover.META_MODE is the same string; only the
+# fallback service writes it.
+FALLBACK_MODE_META_KEY = "failover_mode"
 
 _DELETED = VpnKeyStatus.DELETED.value
 _ACTIVE = VpnKeyStatus.ACTIVE.value
@@ -135,6 +139,7 @@ def _row_to_relay(row: Row) -> Relay:
         agent=_row_to_agent(row),
         basic_visible=bool(row["basic_visible"]),
         role=str(row["role"]),
+        via_hub=bool(row["via_hub"]),
     )
 
 
@@ -281,6 +286,11 @@ class RelayRepository:
         value = ((await self.db.get_meta(DIRECT_HOST_META_KEY)) or "").strip()
         return value or None
 
+    async def fallback_mode_on(self) -> bool:
+        """The fallback mode is on (the relay service routes every relay but a hub
+        through the hub then)."""
+        return await self.db.get_meta(FALLBACK_MODE_META_KEY) == "on"
+
     # ── writes ────────────────────────────────────────────────────────────────
 
     async def create(
@@ -366,6 +376,16 @@ class RelayRepository:
         cursor = await self.db.conn.execute(
             "UPDATE relays SET role = ?, updated_at = ?, updated_by = ? WHERE id = ?",
             (role, now, updated_by, relay_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount == 1
+
+    async def set_via_hub(self, relay_id: int, via_hub: bool, *, now: str, updated_by: int | None) -> bool:
+        """«Через hub» on / off; False when the relay is gone. Kept out of
+        :data:`UPDATABLE_COLUMNS`: the relay service syncs the hub's jump line with it."""
+        cursor = await self.db.conn.execute(
+            "UPDATE relays SET via_hub = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+            (1 if via_hub else 0, now, updated_by, relay_id),
         )
         await self.db.commit()
         return cursor.rowcount == 1

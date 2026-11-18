@@ -67,8 +67,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     a hub's source IPs** — a hub masquerades, so the main server would dial the hub's SSH ports and
     confirm somebody else's filter.
   - **Health:** in the fallback mode a relay behind the hub whose hairpin fails is
-    «🛟 за hub» — no alert into it or from it back to ok (leaving it for down still alerts), no SSH wait. Anomaly detection loses the IP signal
+    «🛟 за hub» — no alert into it or from it back to ok (leaving it for down still alerts); its agent is asked through the hub (below). Anomaly detection loses the IP signal
     while the mode is on (documented).
+
+- **Managing the RU relays through the hub (docs/relay.md#managing-the-ru-relays-through-the-hub).**
+  The TSPU cuts SSH from the main server to the RU relays too; the bot now reaches their agents
+  THROUGH the hub — for a relay with **«🛟 Через hub»** on its card (new column `relays.via_hub`,
+  default 0, schema v47) always, and for every relay but a hub automatically while the fallback
+  mode is on. A hub is always reached directly; a relay behind the hub with no hub is refused with
+  a clear message.
+  - **The ssh:** one `ssh` whose `ProxyCommand` is a second, fully pinned `ssh` (`-F /dev/null`, the
+    same option set, the hub's own alias and pinned host key, `StrictHostKeyChecking=yes` always,
+    `-W <relay>:<port>` only, run in `/bin/sh`); the relay's hop is unchanged (the agent key, its
+    alias and pin). Not `-J` (its jump ssh cannot be pinned). A target outside the hub's list is
+    refused before any process starts; the hub's refusals are named (permitopen / cannot connect).
+  - **A separate jump key**, `/etc/vpn-bot/relay_ssh/id_ed25519_jump` (the agent key's storage
+    model; `jump_key_store`). The agent key's line on a relay stays
+    `restrict,command="vpn-relay-agent"` — never a jump.
+  - **The hub's line:** new agent requests `jump key=<ed25519 blob> open=<host>:<port>[,…]` and
+    `jump-off` keep ONE authorized_keys line
+    `restrict,port-forwarding,permitopen="<ssh_host>:<ssh_port>"[,…],command="/bin/false" … vpn-bot-relay-jump`
+    — exactly the relays with an agent behind the hub; values validated (the same regex in
+    `services/relay_ssh.py` `_REQUEST` and the agent's whitelist, max request 4096 characters,
+    at most 32 relays), a key with another line refused, every other line byte-identical,
+    `uninstall` removes it. The bot rewrites it when the set changes (the flag, the mode, the hub
+    role, a pairing, a detach, a delete) and before the first call through the hub; a refused
+    forward rewrites it once. `status` reports it (`jump`).
+  - **Pairing during the ban** says `hello` through the hub (the address opened for the pairing,
+    closed again if it fails); the relay's own `vpn-relay-apply check`, asked through the hub,
+    stands in for the outside checks the main server cannot make.
+  - **The input filter:** new agent request **`input-confirm`** runs `vpn-relay-apply input-confirm`
+    as a direct child — the bot's session (a NEW ssh session on the relay) is the proof that check
+    wants. The bot sends it when `status` (new field `input_status`) reports `PENDING CONFIRM`:
+    after «Обновить агент», in the health loop, and on **«🛡 Подтвердить входной фильтр»** on the
+    card — main's probe is not needed. `vpn-relay-apply input-status` names why main's probe could
+    not confirm in plain words (main not reachable from the relay, the connection cut, a 404 that
+    covers a request through the hub, no result for this set) and the way that is left; DEPLOY OK
+    says the bot confirms by itself.
+  - **Health:** a relay «🛟 за hub» still has its agent asked (through the hub); no alerts change.
+  - Audit: `relay_via_hub_changed`, `relay_hub_jump_synced`, `relay_hub_jump_removed`,
+    `relay_input_confirmed`. `ShellRunner.run` takes an optional `env`.
 
 - **Server visibility in basic subscriptions (docs/subscription.md#server-visibility-in-basic-subscriptions).**
   «👁 В базовых: да/нет» on a relay's card (new column `relays.basic_visible`, default 1, schema

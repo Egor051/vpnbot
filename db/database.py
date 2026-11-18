@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 46
+CURRENT_SCHEMA_VERSION = 47
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -431,6 +431,10 @@ class Database:
             await self._migrate_v46()
             await self._set_schema_version(46)
             version = 46
+        if version < 47:
+            await self._migrate_v47()
+            await self._set_schema_version(47)
+            version = 47
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -2090,6 +2094,19 @@ class Database:
             )
             """
         )
+
+    async def _migrate_v47(self) -> None:
+        # Managing RU relays through the hub — docs/relay.md «Управление RU-relay
+        # через hub». One idempotent ADD COLUMN, mirrored in schema.sql:
+        #
+        #   relays.via_hub — 1: the bot reaches this relay's agent through the hub
+        #   (SSH to the hub with the jump key, -W on to the relay), always. NOT NULL
+        #   DEFAULT 0, so every existing relay is still managed exactly as before
+        #   (directly; through the hub only while the fallback mode is on — that
+        #   rule needs no column). An ADD COLUMN, not a rebuild (see _migrate_v45).
+        cols = await self._table_columns("relays")
+        if "via_hub" not in cols:
+            await self.conn.execute("ALTER TABLE relays ADD COLUMN via_hub INTEGER NOT NULL DEFAULT 0")
 
     async def _table_exists(self, table_name: str) -> bool:
         row = await self.conn.execute_fetchone(

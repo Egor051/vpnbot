@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from i18n import t
 from models.dto import Relay, RelayPairing
 from services.relay_health import ProbeResult
-from services.relays import RelayOverview, agent_uninstalled
+from services.relays import RelayOverview, agent_uninstalled, input_pending
 
 
 def _row(text: str, data: str) -> list[InlineKeyboardButton]:
@@ -109,6 +109,9 @@ def relay_card_keyboard(
                 InlineKeyboardButton(text=t("btn_relay_agent_forward"), callback_data=f"{base}:ag:fw"),
             ]
         )
+        if input_pending(agent.last_status or {}):
+            # Its input filter waits for input-confirm: the bot's new ssh session is the proof.
+            rows.append(_row(t("btn_relay_input_confirm"), f"{base}:ag:inconf"))
         rows.append(_row(t("btn_relay_detach"), f"{base}:ag:detach"))
         if fallback:
             # The hub role of the fallback mode (bot/handlers/admin_fallback.py).
@@ -116,6 +119,10 @@ def relay_card_keyboard(
                 rows.append(_row(t("btn_fb_unhub"), f"admin:fb:unhub:{relay.id}"))
             else:
                 rows.append(_row(t("btn_fb_make_hub"), f"admin:fb:hub:{relay.id}"))
+                # «Через hub»: its agent is reached through the hub, always.
+                rows.append(
+                    _row(t("btn_relay_via_hub_on") if relay.via_hub else t("btn_relay_via_hub_off"), f"{base}:ag:hub")
+                )
     else:
         rows.append(_row(t("btn_relay_detach"), f"{base}:ag:detach"))
     rows.append(_row(t("btn_relay_delete"), f"{base}:del"))

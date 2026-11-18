@@ -205,7 +205,7 @@ CREATE TABLE IF NOT EXISTS key_bundles (
 );
 
 -- L4 relays — ONE table for every relay, whoever set it up (docs/relay.md).
--- Mirrors _migrate_v38 + _migrate_v44 + _migrate_v45.
+-- Mirrors _migrate_v38 + _migrate_v44 + _migrate_v45 + _migrate_v46 + _migrate_v47.
 --   name    — immutable slug, the value keys carry in vpn_keys.relay (no FK, see
 --             vpn_keys.relay above). Never reused for a different relay while any
 --             key row still names it — enforced by services.relays.
@@ -240,6 +240,11 @@ CREATE TABLE IF NOT EXISTS key_bundles (
 --             it and it forwards to the origin name (docs/relay.md, «Режим
 --             фолбэка»). Only a relay with an agent becomes a hub
 --             (services.fallback). Mirrors _migrate_v46.
+--   via_hub — 1: the bot manages this relay's agent THROUGH the hub (SSH to the hub
+--             with its jump key, then on to the relay — docs/relay.md «Управление
+--             RU-relay через hub»), always; 0 (every pre-v47 row): directly, except
+--             while the fallback mode is on, when every relay but a hub goes
+--             through the hub anyway. Ignored for a hub. Mirrors _migrate_v47.
 CREATE TABLE IF NOT EXISTS relays (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
@@ -264,7 +269,8 @@ CREATE TABLE IF NOT EXISTS relays (
   agent_status_json TEXT,
   agent_status_at TEXT,
   basic_visible INTEGER NOT NULL DEFAULT 1,
-  role TEXT NOT NULL DEFAULT 'edge' CHECK (role IN ('edge', 'hub'))
+  role TEXT NOT NULL DEFAULT 'edge' CHECK (role IN ('edge', 'hub')),
+  via_hub INTEGER NOT NULL DEFAULT 0
 );
 
 -- The DNS failover set of the fallback mode (services/fallback.py, docs/relay.md

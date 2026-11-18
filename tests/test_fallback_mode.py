@@ -47,6 +47,7 @@ async def test_v45_relays_come_out_as_edges_with_every_value_kept(tmp_path: Path
         assert await db.get_meta("schema_version") == str(CURRENT_SCHEMA_VERSION)
         after = [dict(row) for row in await db.conn.execute_fetchall("SELECT * FROM relays ORDER BY id")]
         assert [row.pop("role") for row in after] == ["edge", "edge", "edge"]
+        assert [row.pop("via_hub") for row in after] == [0, 0, 0]  # v47
         assert after == before
         relays = await RelayRepository(db).list_all()
         assert [(r.name, r.role, r.is_hub) for r in relays] == [
@@ -777,7 +778,7 @@ def test_name_settled() -> None:
 # ── health: «за hub», no alert storm ──────────────────────────────────────────
 
 
-async def test_health_marks_a_relay_behind_the_hub_without_an_alert_or_an_ssh_wait() -> None:
+async def test_health_marks_a_relay_behind_the_hub_without_an_alert() -> None:
     ru1 = Relay(
         id=1, name="ru1", label="ru1", host="relay.example.net",
         source_ips=validators.parse_ipv4_networks("s", "198.51.100.7/32"), enabled=True, in_subscriptions=True,
@@ -816,7 +817,8 @@ async def test_health_marks_a_relay_behind_the_hub_without_an_alert_or_an_ssh_wa
     assert supervisor.level(ru1.id) == LEVEL_HUB
     assert supervisor.last_probe(ru1.id).level == LEVEL_HUB  # type: ignore[union-attr]
     assert "hub" in supervisor.reason(supervisor.last_probe(ru1.id)).lower()  # type: ignore[arg-type]
-    assert agent_calls == [], "SSH to a relay behind the hub is not even tried"
+    # Its agent is still asked: the relay service routes the call through the hub.
+    assert agent_calls == ["ru1"] * 4
     assert sent == [], "no alert into or inside the fallback mode"
     # The mode is switched off and the relay is reachable again: back to ok, silently.
     behind[0] = False

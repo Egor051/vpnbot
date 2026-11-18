@@ -4,7 +4,7 @@ import codecs
 import logging
 import os
 import signal
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from models.dto import ShellResult
 
@@ -42,6 +42,7 @@ class ShellRunner:
         timeout: float = 15.0,
         sensitive_values: Sequence[str] = (),
         max_output_chars: int | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> ShellResult:
         """Execute a subprocess; redact sensitive_values from its args, stdout and stderr.
 
@@ -51,6 +52,8 @@ class ShellRunner:
         result or the log, wherever the limit falls. Pass in ``sensitive_values`` only
         what must never come back: a caller that needs a generated secret from stdout
         (``wg genkey``) does not list it there. stdout is never logged.
+
+        *env* replaces the child's whole environment (None: the caller's, as before).
         """
         if not args:
             raise ValueError("args must not be empty")
@@ -67,6 +70,7 @@ class ShellRunner:
                 # New session/process group so a timeout can SIGKILL the whole tree
                 # (e.g. awg-quick -> awg), not just the immediate child.
                 start_new_session=True,
+                env=None if env is None else dict(env),
             )
         except FileNotFoundError:
             logger.warning("Команда не найдена: %s", safe_args[0])
