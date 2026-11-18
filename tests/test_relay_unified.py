@@ -1120,7 +1120,8 @@ async def test_the_screen_lists_the_relay_and_offers_close_and_keep(prod: Env, s
     services = _services(prod)
     cb = Callback("admin:sshp")
     await sshp.relay_ssh_port_list(cb, fsm(), services)
-    assert t("relay_ssh_port_line_phase1", name="relay", old="22", new=54321) in cb.message.edits[-1]
+    relay = await prod.relay()
+    assert t("relay_ssh_port_line_phase1", name=relay.name, old="22", new=54321) in cb.message.edits[-1]
     card = Callback("admin:sshp:1")
     await sshp.relay_ssh_port_card(card, services)
     buttons = _buttons(card.message.markups[-1])
