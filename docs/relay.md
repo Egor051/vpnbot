@@ -802,7 +802,7 @@ line, extra words, an argv, an interactive login — is refused with exit 2 befo
 | `update` | In a transient unit (`systemd-run --wait`): fetch the release tags, pick the newest release ([the same rule as the deploy](#which-revision-a-relay-deploys)) — only forward, never backwards or sideways — and run the relay's deploy for it: `scripts/redeploy.sh` with `DEPLOY_REF=<tag>` (that tag's `deploy.sh`, in its own transient unit, log `/root/deploy-<ts>.log`): the pytest gate, helpers, units and host files, the reload of vpn-relay, the checks; `deploy.sh` rolls back by itself. The agent never checks anything out. The result (`running` / `noop` / `failed` / `succeeded`, `from_commit`, `to_commit`, `release`, `log`) is in `/var/lib/vpn-relay/update.json` and in `status`. Minutes: the agent waits up to 45 minutes. |
 | `uninstall` | In a transient unit: the units of the set below stopped and removed (timers first, `vpn-relay.service` last), both tables deleted, the sysctl file removed and `ip_forward` back to what it was before the install, the helpers, `/etc/vpn-relay`, `/var/lib/vpn-relay`, the checkout (when the installer created it), the agent's key line and the jump line removed. The adoption backup stays. Refused on a host without the installer's `/etc/vpn-relay/install.json`. |
 | `input-confirm` | Runs `vpn-relay-apply input-confirm` as a direct child — the bot's ssh session (a new one) is among its ancestors, which is the proof that check wants ([dead-man](#keeping-access-the-dead-man-and-input-confirm)). Answers the helper's lines and the new `input-status`. Takes no agent lock: the filter waits for its confirmation exactly while `update` holds it. |
-| `jump key=<ed25519 blob> open=<host>:<port>[,…]` | A hub: write the bot's ONE jump line in root's authorized_keys (`restrict,port-forwarding,permitopen="<host>:<port>"[,…],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump`) — [below](#managing-the-ru-relays-through-the-hub). A DNS name or IPv4 (not loopback, link-local, multicast), port 1..65535, unique, at most 32; a key that already has another line in the file (the agent's own) is refused. Every other line stays byte-identical. Its own lock, so a hub's `update` does not hold it up. |
+| `jump key=<ed25519 blob> open=<host>:<port>[,…]` | A hub: write the bot's ONE jump line in root's authorized_keys (`restrict,port-forwarding,permitopen="<host>:<port>"[,…],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump`) — [below](#managing-the-ru-relays-through-the-hub). A DNS name or IPv4 (not loopback, link-local, multicast), port 1..65535, unique, at most 32; a key that already has another line in the file (the agent's own) is refused; refused while `sshd -T` allows remote forwarding (not `allowtcpforwarding local`). Every other line stays byte-identical. Its own lock, so a hub's `update` does not hold it up. |
 | `jump-off` | A hub: remove that line. |
 
 **The units** are not a list in the agent. They are read from the checkout by the same rule deploy.sh,
@@ -1112,6 +1112,9 @@ Screen: **🛰 Relay → 🛟 Fallback mode**. The relay list carries one line w
 - **outside Russia** with a **clean** IP: both the clients / RU relays and the main server must
   reach it;
 - a relay **with an agent** (the bot re-points its forward itself), switched on;
+- **deployed** with local-only forwarding (`00-vpnrelay-forwarding.conf`, installed by every relay
+  deploy) before the bot can manage the RU relays through it
+  ([below](#managing-the-ru-relays-through-the-hub)) — «⬆️ Обновить агент» deploys it;
 - **conntrack and bandwidth**: **ALL** traffic of every client and every RU relay goes through the
   hub — size `RELAY_CONNTRACK_MAX` ([conntrack](#conntrack)) and the link for the whole audience;
 - the hub forwards TCP `XRAY_PUBLIC_PORT` + `SUBSCRIPTION_PUBLIC_PORT` and UDP `HYSTERIA2_PORT`
@@ -1283,7 +1286,14 @@ bot ──ssh (jump key)──▶ hub sshd ──-W ru1:22──▶ ru1 sshd ─
   ```
 
   `restrict` (no pty, no agent/X11 forwarding), port forwarding back — but only to the listed
-  relays' sshd — and `/bin/false` for a session: no shell. `permitopen` lists **exactly** the
+  relays' sshd — and `/bin/false` for a session: no shell. **`permitopen` limits only local
+  forwarding**: with port forwarding on, a key could also open listeners on the hub (`-R`: a TCP
+  port on loopback, a root-owned Unix socket at a new path), and no authorized_keys option forbids
+  that (`permitlisten` does not cover Unix sockets and has no `none`). So every relay's sshd forwards
+  **locally only**: `deploy.sh` installs `/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf`
+  (`AllowTcpForwarding local`, `AllowStreamLocalForwarding local`; `-R` is off for everyone on a
+  relay), the host check holds it in effect, and the hub's agent refuses `jump` until `sshd -T`
+  shows it — a hub installed but not deployed since gets no jump line (update it first). `permitopen` lists **exactly** the
   relays with an agent that are behind the hub. The bot writes it (`jump key=… open=…`, or
   `jump-off` when nothing is behind the hub) whenever that set changes — the flag, the mode
   switched on/off, a hub given or taken (its line goes with the role), a pairing, a detach, a

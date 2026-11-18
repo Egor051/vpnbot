@@ -698,6 +698,9 @@ MANAGED_HOST_FILES=(
   "-|/etc/systemd/system/multipathd.service|-|-|masked|main"
   # --- relay -----------------------------------------------------------------
   "deploy/host/ssh/00-vpnrelay-keyonly.conf|/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf|0644|root:root|ssh|relay"
+  # Local forwarding only: a hub forwards the bot's jump key to the relays behind it,
+  # and nothing may open a listener (-R, TCP or Unix socket) — docs/relay.md.
+  "deploy/host/ssh/00-vpnrelay-forwarding.conf|/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf|0644|root:root|ssh|relay"
   "deploy/host/ssh/ssh.socket-override.conf|/etc/systemd/system/ssh.socket.d/override.conf|0644|root:root|ssh|relay|render=ssh-port"
   "deploy/host/ssh/00-vpn-bot-port.conf|/etc/ssh/sshd_config.d/00-vpn-bot-port.conf|0644|root:root|ssh|relay|render=ssh-port"
   "deploy/host/systemd/vpn-bot-ssh-port.service|/etc/systemd/system/vpn-bot-ssh-port.service|0644|root:root|unit|relay"

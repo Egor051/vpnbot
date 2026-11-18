@@ -427,6 +427,9 @@ class Hub:
         self.keys.chmod(0o600)
         self.confirm_rc = 0
         self.input_status = "PENDING CONFIRM (reverts at 2026-11-18 10:05:00 UTC) — main probe did not confirm it: x"
+        # What `sshd -T` says about forwarding: local only, as deploy installs it.
+        self.sshd_t = "allowtcpforwarding local\nallowstreamlocalforwarding local\ndisableforwarding no\n"
+        self.sshd_rc = 0
 
     def stub(self, name: str, body: str) -> None:
         path = self.bin / name
@@ -447,6 +450,9 @@ class Hub:
             f'  check) echo "vpn-relay-apply: ok"; exit 0;;\n'
             f"esac\nexit 0\n",
         )
+        sshd_t = self.root / "sshd-T"
+        sshd_t.write_text("port 22\n" + self.sshd_t + "permitrootlogin without-password\n", encoding="utf-8")
+        self.stub("sshd", f'[[ "$1" == -T ]] || exit 2\ncat "{sshd_t}"\nexit {self.sshd_rc}\n')
         for name, body in {"nft": "exit 1\n", "getent": "exit 2\n", "ss": "exit 0\n", "sysctl": "echo 1\n",
                            "ip": "exit 0\n", "git": "exit 0\n", "logger": "exit 0\n", "systemctl": "exit 0\n",
                            "systemd-run": "exit 0\n"}.items():
@@ -497,6 +503,47 @@ def test_the_hub_keeps_exactly_one_jump_line_and_nothing_else_moves(hub: Hub) ->
     assert rc == 0 and payload["jump"] == {"open": [], "changed": True}
     assert hub.keys.read_text(encoding="utf-8") == OPERATOR_LINE + AGENT_LINE + "# keep me\n# after\n"
     assert "jump" not in hub.run("status")[1]
+
+
+@pytest.mark.parametrize(
+    ("sshd_t", "why"),
+    [
+        ("allowtcpforwarding yes\nallowstreamlocalforwarding yes\ndisableforwarding no\n", "allows remote forwarding"),
+        ("allowtcpforwarding remote\nallowstreamlocalforwarding local\ndisableforwarding no\n", "allows remote forwarding"),
+        ("allowtcpforwarding local\nallowstreamlocalforwarding all\ndisableforwarding no\n", "allows remote forwarding"),
+        ("allowtcpforwarding no\nallowstreamlocalforwarding no\ndisableforwarding no\n", "forwards nothing"),
+        ("allowtcpforwarding local\nallowstreamlocalforwarding local\ndisableforwarding yes\n", "forwards nothing"),
+        ("", "allows remote forwarding"),
+    ],
+)
+def test_no_jump_line_where_sshd_allows_remote_forwarding(hub: Hub, sshd_t: str, why: str) -> None:
+    """port-forwarding in the key would let it open listeners too (-R: TCP, Unix
+    sockets) — no key option forbids that, sshd's own setting must."""
+    hub.sshd_t = sshd_t
+    before = hub.keys.read_text(encoding="utf-8")
+    rc, payload = hub.run(f"jump key={BLOB} open={RU_IP}:22")
+    assert rc == 4 and why in payload["error"], payload
+    assert hub.keys.read_text(encoding="utf-8") == before
+    # jump-off never needs it: removing the line is always allowed.
+    assert hub.run("jump-off")[0] == 0
+
+
+def test_no_jump_line_when_sshd_cannot_tell(hub: Hub) -> None:
+    hub.sshd_rc = 255
+    before = hub.keys.read_text(encoding="utf-8")
+    rc, payload = hub.run(f"jump key={BLOB} open={RU_IP}:22")
+    assert rc == 4 and "sshd -T failed" in payload["error"]
+    assert hub.keys.read_text(encoding="utf-8") == before
+
+
+def test_every_relay_gets_local_only_forwarding_from_the_deploy() -> None:
+    """deploy.sh installs the setting the agent requires, on every relay (class ssh)."""
+    text = (ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    assert ('"deploy/host/ssh/00-vpnrelay-forwarding.conf|/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf'
+            '|0644|root:root|ssh|relay"') in text
+    lines = [ln for ln in (ROOT / "deploy/host/ssh/00-vpnrelay-forwarding.conf").read_text(encoding="utf-8")
+             .splitlines() if ln.strip() and not ln.startswith("#")]
+    assert lines == ["AllowTcpForwarding local", "AllowStreamLocalForwarding local"]
 
 
 def test_the_jump_line_grants_forwarding_and_nothing_else() -> None:

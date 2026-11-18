@@ -794,7 +794,7 @@ SSH, как выше, но:
 | `update` | В transient-юните (`systemd-run --wait`): забирает теги релизов, выбирает самый новый релиз ([то же правило, что у деплоя](#какую-ревизию-деплоит-relay)) — только вперёд, никогда назад или вбок — и запускает для него деплой relay: `scripts/redeploy.sh` с `DEPLOY_REF=<тег>` (`deploy.sh` этого тега в своём transient-юните, лог `/root/deploy-<ts>.log`): гейт pytest, helper'ы, юниты и файлы хоста, reload vpn-relay, проверки; откатывается `deploy.sh` сам. Сам агент ничего не checkout'ит. Итог (`running` / `noop` / `failed` / `succeeded`, `from_commit`, `to_commit`, `release`, `log`) — в `/var/lib/vpn-relay/update.json` и в `status`. Это минуты: агент ждёт до 45 минут. |
 | `uninstall` | В transient-юните: юниты набора ниже остановлены и удалены (сначала таймеры, `vpn-relay.service` последним), обе таблицы удалены, sysctl-файл удалён и `ip_forward` возвращён к значению до установки, удалены helper'ы, `/etc/vpn-relay`, `/var/lib/vpn-relay`, checkout (если его создал установщик), строка ключа агента и строка jump. Бэкап adoption остаётся. Отказ на хосте без `/etc/vpn-relay/install.json` установщика. |
 | `input-confirm` | Запускает `vpn-relay-apply input-confirm` прямым дочерним процессом — ssh-сессия бота (новая) среди его предков, а это и есть доказательство для той проверки ([dead-man](#как-не-потерять-доступ-dead-man-и-input-confirm)). Отвечает строками helper'а и новым `input-status`. Lock агента не берёт: фильтр ждёт подтверждения как раз пока `update` его держит. |
-| `jump key=<blob ed25519> open=<host>:<port>[,…]` | Hub: записать ОДНУ строку jump-ключа бота в authorized_keys root (`restrict,port-forwarding,permitopen="<host>:<port>"[,…],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump`) — [ниже](#управление-ru-relay-через-hub). DNS-имя или IPv4 (не loopback, link-local, multicast), порт 1..65535, без повторов, не больше 32; ключ, у которого в файле уже есть другая строка (сам ключ агента), — отказ. Все остальные строки — байт-в-байт. Свой lock, поэтому `update` hub'а его не задерживает. |
+| `jump key=<blob ed25519> open=<host>:<port>[,…]` | Hub: записать ОДНУ строку jump-ключа бота в authorized_keys root (`restrict,port-forwarding,permitopen="<host>:<port>"[,…],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump`) — [ниже](#управление-ru-relay-через-hub). DNS-имя или IPv4 (не loopback, link-local, multicast), порт 1..65535, без повторов, не больше 32; ключ, у которого в файле уже есть другая строка (сам ключ агента), — отказ; отказ и пока `sshd -T` разрешает удалённый проброс (не `allowtcpforwarding local`). Все остальные строки — байт-в-байт. Свой lock, поэтому `update` hub'а его не задерживает. |
 | `jump-off` | Hub: убрать эту строку. |
 
 **Юниты** в агенте не перечислены. Он берёт их из checkout по тому же правилу, что deploy.sh,
@@ -1099,6 +1099,9 @@ RU-relay и основной сервер друг до друга не дост
 
 - **вне РФ** и с **чистым** IP: его должны видеть и клиенты/RU-relay, и основной сервер;
 - relay **с агентом** (бот переводит его форвард сам) и включённый;
+- **задеплоенный** с только локальным пробросом (`00-vpnrelay-forwarding.conf`, его ставит каждый
+  деплой relay), прежде чем бот сможет управлять через него RU-relay
+  ([ниже](#управление-ru-relay-через-hub)), — «⬆️ Обновить агент» его деплоит;
 - **conntrack и полоса**: через hub идёт **ВЕСЬ** трафик всех клиентов и всех RU-relay —
   `RELAY_CONNTRACK_MAX` ([conntrack](#conntrack)) и канал выбирайте с запасом на всю аудиторию;
 - hub форвардит TCP `XRAY_PUBLIC_PORT` + `SUBSCRIPTION_PUBLIC_PORT` и UDP `HYSTERIA2_PORT`
@@ -1265,7 +1268,15 @@ source IPs. Оба можно переопределить кнопками «IP
   ```
 
   `restrict` (ни pty, ни проброса агента/X11), проброс портов обратно — но только к sshd
-  перечисленных relay, — и `/bin/false` для сессии: shell нет. В `permitopen` **ровно** relay с
+  перечисленных relay, — и `/bin/false` для сессии: shell нет. **`permitopen` ограничивает только
+  локальный проброс**: с включённым пробросом ключ мог бы ещё и открывать listener на hub (`-R`:
+  TCP-порт на loopback, Unix-сокет от root по новому пути), а запретить это опцией authorized_keys
+  нельзя (`permitlisten` не покрывает Unix-сокеты и не знает `none`). Поэтому sshd каждого relay
+  пробрасывает **только локально**: `deploy.sh` ставит `/etc/ssh/sshd_config.d/00-vpnrelay-forwarding.conf`
+  (`AllowTcpForwarding local`, `AllowStreamLocalForwarding local`; `-R` на relay выключен для всех),
+  проверка хоста следит, что он действует, а агент hub отказывает в `jump`, пока `sshd -T` этого не
+  показывает, — hub, установленный, но с тех пор не деплоившийся, строку jump не получит (сначала
+  обновите его). В `permitopen` **ровно** relay с
   агентом, которые за hub. Бот переписывает строку (`jump key=… open=…` или `jump-off`, когда за
   hub никого) при каждом изменении этого набора — флаг, включение/выключение режима, выдача или
   снятие роли hub (строка уходит вместе с ролью), pairing, отключение агента, удаление — и перед
