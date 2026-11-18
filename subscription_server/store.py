@@ -12,6 +12,7 @@ from db.database import Database
 from models.dto import KeyBundle, TrafficScopeTotals, VpnKey
 from models.enums import KeyBundleStatus, VpnKeyStatus
 from repositories.key_bundles import KeyBundleRepository
+from repositories.failover import FailoverRepository
 from repositories.relays import RelayRepository
 from repositories.traffic_scope import ALL_TIME
 from repositories.vpn_keys import VpnKeyRepository
@@ -134,6 +135,9 @@ class BundleView:
     # own flag rides in ``relays`` (Relay.basic_visible). True for a view built
     # by hand, which is exactly the behaviour before this setting existed.
     main_basic_visible: bool = True
+    # The fallback mode's «fallback-url в подписке» switch (schema_meta, off by
+    # default): the response then carries ``fallback-url`` pointing at the hub.
+    fallback_url: bool = False
 
     @property
     def expires_at(self) -> str | None:
@@ -162,6 +166,7 @@ class ReadOnlyBundleStore:
         self._bundles = KeyBundleRepository(self._db)
         self._vpn_keys = VpnKeyRepository(self._db)
         self._relays = RelayRepository(self._db)
+        self._failover = FailoverRepository(self._db)
         self._lock = asyncio.Lock()
         self._infra_failures = 0
 
@@ -198,8 +203,11 @@ class ReadOnlyBundleStore:
                 children = await self._bundles.list_keys_of_bundle(bundle.id)
                 active = tuple(key for key in children if key.status is VpnKeyStatus.ACTIVE)
                 totals = await self._vpn_keys.sum_traffic_for_owner(bundle.user_id, ALL_TIME)
-                relays = RelaySnapshot.of(await self._relays.list_all())
+                relays = RelaySnapshot.of(
+                    await self._relays.list_all(), direct_host=await self._relays.direct_host()
+                )
                 main_basic_visible = await self._relays.main_basic_visible()
+                fallback_url = await self._failover.sub_fallback_url()
             except (aiosqlite.Error, OSError, ValueError) as exc:
                 self._infra_failures += 1
                 logger.error(
@@ -217,6 +225,7 @@ class ReadOnlyBundleStore:
             traffic=totals if totals.measured else None,
             relays=relays,
             main_basic_visible=main_basic_visible,
+            fallback_url=fallback_url,
         )
 
     async def load_relays(self) -> RelaySnapshot:
@@ -230,7 +239,9 @@ class ReadOnlyBundleStore:
         async with self._lock:
             try:
                 await self._db.ensure_fresh()
-                relays = RelaySnapshot.of(await self._relays.list_all())
+                relays = RelaySnapshot.of(
+                    await self._relays.list_all(), direct_host=await self._relays.direct_host()
+                )
             except (aiosqlite.Error, OSError, ValueError) as exc:
                 self._infra_failures += 1
                 logger.error(

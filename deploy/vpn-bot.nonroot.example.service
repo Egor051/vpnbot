@@ -48,6 +48,11 @@ LockPersonality=true
 RuntimeDirectory=vpn-bot
 RuntimeDirectoryMode=0700
 ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot
+# The fallback mode's DNS API token (adapters/cloudflare_dns.py), written from the
+# admin panel. Create the directory once as root:
+#   install -d -m 0700 -o vpn-bot -g vpn-bot /etc/vpn-bot/dns_failover
+# The leading "-" keeps the unit starting while the directory does not exist.
+ReadWritePaths=-/etc/vpn-bot/dns_failover
 
 [Install]
 WantedBy=multi-user.target

@@ -1057,6 +1057,177 @@ Full reference: [Configuration → Relay](configuration.md#relay).
 **There is no relay port setting**: the port in a relay link is the protocol's own
 public port (`XRAY_PUBLIC_PORT`, `HYSTERIA2_PORT`), because the relay forwards 1:1.
 
+## Fallback mode (hub)
+
+**Why.** The TSPU blocks the main server's IP at the Russian border **in both directions**:
+clients in Russia, the RU relays and the main server cannot reach each other, and the main
+server's egress IP cannot change. The way out is the **hub**: a relay **outside Russia** with a
+clean IP that the main server still sees. In the fallback mode only the hub talks to the main
+server, and every name of the **failover set** points at the hub:
+
+```
+normal mode:                            fallback mode:
+
+client ─▶ RU relay ─▶ main              client ─▶ RU relay ─▶ hub ─▶ main
+client ─────────────▶ main              client ─────────────▶ hub ─▶ main
+          (A: anycastedge.net → main)             (A: anycastedge.net → hub)
+                                         hub → origin.anycastedge.net → main's IPv4 (always)
+```
+
+**The RU relays need no switching** — nor could they get it: the main server cannot reach them
+at that moment. They forward to a DNS name (`RELAY_UPSTREAM_HOST`,
+[above](#a-dns-name-as-the-upstream)), and `vpn-relay-resolve.timer` re-points their DNAT to the
+new A record by itself every 5 minutes. Subscriptions (`HYSTERIA2_SNI:2096`) are rendered per
+request and go through the hub too when the subscription's name is in the set.
+
+Screen: **🛰 Relay → 🛟 Fallback mode**. The relay list carries one line with the state (off / ON /
+⚠️ the switch is not finished).
+
+### What the hub needs
+
+- **outside Russia** with a **clean** IP: both the clients / RU relays and the main server must
+  reach it;
+- a relay **with an agent** (the bot re-points its forward itself), switched on;
+- **conntrack and bandwidth**: **ALL** traffic of every client and every RU relay goes through the
+  hub — size `RELAY_CONNTRACK_MAX` ([conntrack](#conntrack)) and the link for the whole audience;
+- the hub forwards TCP `XRAY_PUBLIC_PORT` + `SUBSCRIPTION_PUBLIC_PORT` and UDP `HYSTERIA2_PORT`
+  (the bot sets that itself when it gives the role);
+- **one** enabled hub is supported for now. The model allows several (`relays.role`); the choice
+  goes through `services.relay.select_hub` — the place for a future balancer.
+
+### The origin name: why there is a loop without it
+
+The hub forwards to the **origin** — a separate name (e.g. `origin.anycastedge.net`) that
+**always** points at the main server's IPv4 and is **never** in the failover set. If the hub
+forwarded to a name of the set, that name would point at the hub itself after the switch — the
+hub would DNAT into itself and **every** client would lose the connection. Hence:
+
+- **«🛟 Make it the hub»** on the page of a relay with an agent asks for the origin (suggesting
+  `origin.<the zone of HYSTERIA2_SNI>`); the bot creates/corrects its A record through the DNS
+  API (`proxied=false`, TTL 60) → waits until public resolvers (DoH) answer the main server's
+  IPv4 → the agent runs `apply target=<origin> tcp=443,2096 udp=443` (the agent's check is a TCP
+  connect to the main server on **each** port; a failure rolls the relay back) → checks that the
+  hub looks at the main server (the agent's `live_target` / `resolved`) → the role `hub`. Any
+  failure leaves the role as it was;
+- the origin and the hub's host **cannot** join the set; a name of the set cannot be the origin;
+- the loop is checked when the role is given and **before every switch-on** (the preflight).
+
+The role can be removed only when no name of the set points at the hub — the mode is off **and**
+the switch-off finished (a name the bot moved to the hub and could not write back keeps the role).
+The hub's forward is left as it is. While a relay is the hub it cannot be deleted, have its agent
+detached (`uninstall` included) or its ports/target changed from its page: every client goes
+through it, and its own key count sees none of them. «🛟 Remove the hub role» first.
+
+### The DNS API token
+
+The DNS is switched through Cloudflare's API. It needs an **API token** with nothing but
+**«Zone · DNS · Edit»** on the failover names' zone. **Do not reuse** acme.sh's token: it serves
+something else (ACME `dns_cf` on the main server), and the switch does not get in its way.
+
+The token is entered only in the admin panel (**🔑 DNS API token**) — no `.env`, no CLI. The
+message with it is **deleted at once** after it is read (if Telegram refuses, the bot asks to
+delete it by hand); the token is checked against the API and only then stored in
+`/etc/vpn-bot/dns_failover/cloudflare_token` (0600, owned by the bot's user, no symlinks — the
+checks of the relay key and the TOTP key). Logs and the audit never carry it: the value is masked
+by exact match wherever redaction runs, and the audit stores only a fingerprint (8 hex of
+sha256). In the helper-nonroot model (`ProtectSystem=strict`) create the directory first —
+`install -d -m 0700 -o vpn-bot -g vpn-bot /etc/vpn-bot/dns_failover` — and let the unit write it:
+`ReadWritePaths=-/etc/vpn-bot/dns_failover` (already in `deploy/vpn-bot.nonroot.example.service`;
+the `-` keeps the unit starting without the directory).
+
+### The failover set
+
+**📝 Names** — the names whose A record is switched: the main server's IPv4 in the normal mode,
+the hub's in the fallback mode. Stored in the database (`failover_names`). The bot suggests
+`HYSTERIA2_SNI` (the subscription's and the hy2 certificate's domain) and the names relays with an
+agent forward to (an RU relay's `target_host`). The addresses are derived: main — `XRAY_PUBLIC_HOST`,
+else `HYSTERIA2_HOST` (when an IPv4); the hub — its host, else its SSH address, else its single /32
+source IP. Both can be overridden with «Main IPv4» / «Hub IPv4» (while the mode is off).
+
+### Switching on and off
+
+**«🟥 Switch the fallback mode on»** (confirmation + TOTP):
+
+1. **preflight** — exactly one enabled hub with an agent; the agent answers a fresh `status`; the
+   hub forwards the needed ports and **reaches** the main server on TCP `XRAY_PUBLIC_PORT` and
+   `SUBSCRIPTION_PUBLIC_PORT` **by itself** (the agent's `vpn-relay-apply check` lines; an exit
+   16–18 counts only when **every** FAIL line is about the input filter, not `ip_forward` or the
+   forward); no loop (the origin is outside the set and points at the main server — by DoH and by
+   the hub's own view — and the upstream name and ports the hub reports in its fresh `status`
+   **now** are the origin and the hub ports: a hub
+   re-pointed by hand to a failover name resolves to main before the switch and would loop
+   after it); the token is active; every name has **exactly one** A record that is **not proxied**
+   (grey cloud) and points at the main server or the hub — a foreign address is never silently
+   overwritten. An AAAA record is a warning (IPv6 clients bypass the hub), not a blocker. A failed
+   preflight leaves the DNS untouched and the mode off;
+2. every A record → the hub's IPv4 (`proxied=false`, TTL 60);
+3. **DoH check** (cloudflare-dns.com and dns.google — never the system resolver): up to 30 s
+   waiting for the resolvers to answer the new address;
+4. **the report** per name: ✅ written and visible / ⏳ written, resolvers still answer the old one
+   (they may keep it up to the previous TTL — not an error) / ❌ not written (the reason).
+
+**«🟩 Switch off»** writes the main server's IPv4 back (only the token is needed; the hub may be
+switched off already).
+
+The mode the admin asked for is kept in the database, what the last write did — **per name**. When
+some names were not updated, the screen and the relay list say «⚠️ the switch is not finished»
+with those names, and **«🔁 Repeat»** finishes it (names already in place are left alone).
+Everything is audited (entity `relay`): `relay_hub_assigned`, `relay_hub_cleared`,
+`failover_name_added`/`_removed`, `failover_token_set`/`_deleted`/`_rejected`,
+`failover_preflight_failed`, `failover_enabled`, `failover_disabled`, `failover_setting_changed`,
+`failover_direct_host_changed`.
+
+There is no automatic switch on health — an admin switches the mode. The switch's core
+(`FallbackService._switch`) is kept apart from the permission check as the place for one.
+
+### What moves and what does not
+
+- **Subscriptions** are rendered per request: their URL (`HYSTERIA2_SNI`) and their relay children
+  follow the DNS by themselves.
+- **Direct links** (`XRAY_PUBLIC_HOST` / `HYSTERIA2_HOST`) are an **IPv4** in the live deployment:
+  the DNS does not move them. **«🔗 Direct links' host»** replaces that IPv4 with a DNS name in every
+  new render — the bot's and the subscriptions' (`schema_meta`, empty by default = as before). The
+  name must resolve to the main server now. When it is **in the set**, the subscriptions' direct
+  entries go through the hub in the fallback mode; otherwise always directly. Existing keys do not
+  break: REALITY and hy2 do not depend on the address in the link (the SNI stays), and a link
+  imported with the IPv4 works as long as the main server does. **Single** direct keys
+  (VLESS/Hysteria2, not subscription children) issued before the name was set were imported with
+  the IPv4 and **do not move** — the screen shows how many (an upper bound: a user may have
+  re-imported).
+- **`fallback-url` in subscriptions** (off by default): the subscription carries
+  `fallback-url: https://<hub host>:<SUBSCRIPTION_PUBLIC_PORT>/sub/<token>`. Happ reads it **only**
+  for a subscription with a Provider ID. The subscription port's certificate must cover the hub's
+  host (an IPv4 host gets a warning on the screen). The DNS is the real mechanism.
+
+### Through the hub: the subscription limit, ssh-probe, health, anomaly detection
+
+- **The subscription's rate limit.** Through the hub every client reaches the main server from one
+  IP, so a bucket per peer would be one bucket for everybody. Requests whose peer is inside a hub's
+  source IPs are limited per **token hash** (its own prefix: neither the token nor its fingerprint
+  can be recovered from the bucket; the token is never logged). The 429 still comes **before** the
+  token is looked up. The hubs' networks are cached in the subscription process for 30 s (an
+  expired cache is re-read by one request, the others wait for it) so the limiter does not read
+  the database per request. Residual risk: through the hub, cycling random
+  tokens is not held back by the per-peer limit — malformed tokens never reach the database,
+  well-formed ones cost one indexed lookup.
+- **`POST /relay/ssh-probe`** ([above](#main-confirms-the-filter-post-relayssh-probe)) answers
+  **404** when the caller's IP is inside the source IPs of **any** hub (enabled or not), even when
+  an ordinary relay covers that address too. A hub masquerades the subscription port: in the
+  fallback mode an RU relay's probe arrives from the hub's address, and the main server would dial
+  the hub's SSH ports and "confirm" somebody else's filter. Consequence: the input filter of **the
+  hub itself** and of RU relays in the fallback mode is confirmed only by `input-confirm` from a new
+  SSH session ([dead-man](#keeping-access-the-dead-man-and-input-confirm)).
+- **Health.** In the fallback mode, a relay forwarding to a name of the set (or a relay without an
+  agent) whose hairpin probe fails gets the level **🛟 «behind the hub, not reachable directly»**:
+  moving into it, and from it back to 🟢, **alerts nobody**, and SSH to its agent is not tried (every pass would
+  wait out the SSH timeout otherwise). The mode switched off and the relay still unreachable — an
+  ordinary 🔴 with its alert.
+- **Anomaly detection** loses the IP signal: all traffic through the hub arrives from the hub's IP,
+  and its source IPs are excluded like any relay's. While the mode is on, IP anomalies are not seen.
+
+Not done here: SSH to the RU relays through the hub (managing them from the bot in the fallback
+mode is not possible — the next step) and an automatic switch on health.
+
 ## Health monitor
 
 With `RELAY_HEALTH_INTERVAL > 0` the bot runs **one** background loop for every relay,

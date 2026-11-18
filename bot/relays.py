@@ -83,6 +83,7 @@ def relays_list_text(
     reason: ReasonFn | None = None,
     main_basic_visible: bool | None = None,
     basic_has_server: bool = True,
+    fallback_line: str | None = None,
 ) -> str:
     """The relay list: the main server's line (its visibility in BASIC subscriptions,
     when known), one entry per relay (``id`` order), then the codes still waiting.
@@ -95,6 +96,8 @@ def relays_list_text(
         lines.extend(["", t("relays_main_line", basic=basic_visibility_text(main_basic_visible))])
     if not basic_has_server:
         lines.extend(["", t("relays_basic_fail_open")])
+    if fallback_line:
+        lines.extend(["", fallback_line])
     if not overviews and not pending:
         lines.extend(["", t("relays_empty")])
         return "\n".join(lines)
@@ -170,6 +173,9 @@ def relay_card_text(
         lines.append(f"{t('relay_field_keys')}: {active_keys}")
     lines.append(f"{t('relay_field_health')}: {relay_health_text(probe, reason)}")
     lines.append(f"{t('relay_field_note')}: {h(relay.note or t('none'))}")
+    if relay.is_hub:
+        origin = relay.agent.target_host if relay.agent is not None else "—"
+        lines.append(t("relay_role_hub", origin=code(origin)))
     if host_is_ipv4(relay.host):
         lines.append(t("relay_host_ipv4_hint"))
     lines.append("")

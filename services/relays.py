@@ -252,6 +252,7 @@ def _audit_view(relay: Relay) -> dict[str, object]:
         "in_subscriptions": relay.in_subscriptions,
         "basic_visible": relay.basic_visible,
         "note": relay.note,
+        "role": relay.role,
     }
     if relay.agent is not None:
         view["agent"] = {
@@ -460,7 +461,7 @@ class RelayService:
 
     async def refresh_catalog(self) -> RelaySnapshot:
         """Re-read the table into the bot's snapshot (after every write, and at startup)."""
-        snapshot = RelaySnapshot.of(await self.relays.list_all())
+        snapshot = RelaySnapshot.of(await self.relays.list_all(), direct_host=await self.relays.direct_host())
         self.catalog.replace(snapshot)
         return snapshot
 
@@ -797,6 +798,7 @@ class RelayService:
         """
         await self.users.require_superadmin(actor_user_id)
         relay = await self._require(relay_id)
+        self._refuse_hub(relay)
         uninstalled = relay.agent is not None and agent_uninstalled(relay.agent)
         if relay.agent is not None and relay_side and not uninstalled:
             if not with_keys:
@@ -808,6 +810,7 @@ class RelayService:
         async with self._lock:
             relay = await self._require(relay_id)
             self._ensure_idle(relay)
+            self._refuse_hub(relay)
             deleted_ids: list[int] = []
             if with_keys:
                 for ref in await self.relays.list_keys(relay.name):
@@ -1177,10 +1180,17 @@ class RelayService:
         return reply
 
     async def change_forward(
-        self, actor_user_id: int, relay_id: int, *, target_host: str, tcp: str, udp: str
+        self, actor_user_id: int, relay_id: int, *, target_host: str, tcp: str, udp: str, allow_hub: bool = False
     ) -> AgentReply:
-        """``apply`` on the relay: forward to another main-server name / other ports."""
+        """``apply`` on the relay: forward to another main-server name / other ports.
+
+        A hub's forward (its origin and the hub ports) belongs to the fallback mode
+        (services/fallback.py) and is refused here unless *allow_hub* — only the
+        fallback service passes it, after its own origin and loop checks.
+        """
         await self.users.require_superadmin(actor_user_id)
+        if not allow_hub:
+            self._refuse_hub(await self._require(relay_id))
         try:
             target = parse_target_host(target_host)
             tcp_ports, udp_ports = parse_ports(tcp), parse_ports(udp)
@@ -1216,6 +1226,7 @@ class RelayService:
         working until the relay is set up again."""
         await self.users.require_superadmin(actor_user_id)
         relay = await self._require_managed(relay_id)
+        self._refuse_hub(relay)
         assert relay.agent is not None
         uninstalled = agent_uninstalled(relay.agent)
         if uninstall and not uninstalled:
@@ -1268,6 +1279,16 @@ class RelayService:
         if self.client is None:
             raise ServiceError("relay-агенты не подключены", key="relay_agent_unavailable")
         return self.client
+
+    @staticmethod
+    def _refuse_hub(relay: Relay) -> None:
+        """A hub is not deleted, uninstalled, detached or re-pointed from its card:
+        in the fallback mode every client reaches the main server through it, and
+        its own key usage counts none of them. Its role is removed first
+        («🛟 Снять роль hub»), which the fallback service refuses while any failover
+        name may still point at it."""
+        if relay.is_hub:
+            raise InvalidOperation("relay — hub", key="relay_is_hub", params={"name": relay.name})
 
     def _ensure_idle(self, relay: Relay) -> None:
         if relay.id in self._busy:

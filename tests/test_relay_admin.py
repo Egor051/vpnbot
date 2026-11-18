@@ -253,6 +253,8 @@ async def test_fresh_database_has_an_empty_relays_table(tmp_path: Path) -> None:
             "agent_version", "agent_paired_at", "agent_status_json", "agent_status_at",
             # visibility in BASIC subscriptions (v45)
             "basic_visible",
+            # the fallback mode's hub role (v46)
+            "role",
         }
         tables = {row["name"] for row in await db.conn.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "relay_agents" not in tables

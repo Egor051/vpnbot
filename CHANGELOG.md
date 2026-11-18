@@ -29,6 +29,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Fallback mode (hub) — DNS failover through a relay outside Russia (docs/relay.md#fallback-mode-hub).**
+  For when the TSPU drops the main server's IP at the border in both directions: a relay with an
+  agent gets the role **hub** (new column `relays.role`, `'edge'|'hub'`, default `'edge'`, schema
+  v46) and, in the fallback mode, every name of the **failover set** (new table `failover_names`)
+  points at it; only the hub reaches the main server. The RU relays follow the A record by
+  themselves (`RELAY_UPSTREAM_HOST` + `vpn-relay-resolve.timer`) — no connection from the main
+  server to them is needed. New screen **🛰 Relay → 🛟 Режим фолбэка** and «🛟 Сделать hub» /
+  «Снять роль hub» on the relay card (TOTP-gated, four new dangerous actions).
+  - **Hub role:** the bot creates/corrects the **origin** record (always the main server's IPv4,
+    never in the set) through the DNS API, waits for DoH to agree, re-points the hub with the agent
+    (`apply target=<origin> tcp=XRAY_PUBLIC_PORT,SUBSCRIPTION_PUBLIC_PORT udp=HYSTERIA2_PORT`, its
+    check proving the hub reaches the main server on each port) and checks the loop. One hub for
+    now; `services.relay.select_hub` is the seam of a future balancer. A hub cannot be deleted,
+    detached or re-pointed from its card, and loses its role only when no name points at it.
+  - **DNS switch:** Cloudflare API adapter (`adapters/cloudflare_dns.py`: A records with
+    `proxied=false`, TTL 60; DoH checks, never the system resolver). «Включить»: preflight (one
+    enabled hub, its agent answers, it reaches the main server by its own check with only
+    input-filter failures tolerated, no loop — by the DNS record, DoH and the upstream name and
+    ports the hub reports now — one non-proxied A record per name pointing at main or the hub, the token
+    active) → writes → DoH verification → a per-name report. «Выключить» writes main back.
+    The asked mode and each name's last write are persistent: a partial switch is shown name by
+    name and «🔁 Повторить» finishes it. Everything audited (`relay_hub_*`, `failover_*`).
+  - **The DNS API token** (Cloudflare API token with «Zone · DNS · Edit» only; not acme.sh's) is
+    entered in the panel only: the message is deleted at once, the token is verified, stored in
+    `/etc/vpn-bot/dns_failover/cloudflare_token` (0600, the relay key's / TOTP key's checks) and
+    masked by value in logs and the audit (`utils.redact.register_secret`); the audit keeps a
+    fingerprint. The non-root example unit gets `ReadWritePaths=-/etc/vpn-bot/dns_failover`.
+  - **Direct links' host:** optional DNS name instead of `XRAY_PUBLIC_HOST` / `HYSTERIA2_HOST` for
+    every new render (bot and subscriptions; `schema_meta`, empty = as before); the screen counts
+    single direct keys already imported with the IPv4 (they do not move).
+  - **`fallback-url`** header in subscriptions (`https://<hub host>:<SUBSCRIPTION_PUBLIC_PORT>/sub/<token>`,
+    off by default; Happ with a Provider ID only).
+  - **Subscription endpoint:** requests from a hub's source IPs are rate-limited per token hash
+    (still before the token lookup, nothing token-shaped logged; the hubs' networks cached for
+    30 s with a single-flight refresh). **`POST /relay/ssh-probe` answers 404 to any caller inside
+    a hub's source IPs** — a hub masquerades, so the main server would dial the hub's SSH ports and
+    confirm somebody else's filter.
+  - **Health:** in the fallback mode a relay behind the hub whose hairpin fails is
+    «🛟 за hub» — no alert into it or from it back to ok (leaving it for down still alerts), no SSH wait. Anomaly detection loses the IP signal
+    while the mode is on (documented).
+
 - **Server visibility in basic subscriptions (docs/subscription.md#server-visibility-in-basic-subscriptions).**
   «👁 В базовых: да/нет» on a relay's card (new column `relays.basic_visible`, default 1, schema
   v45) and «👁 Основной сервер в базовых: да/нет» on the relay list (the `basic_visible_main` key

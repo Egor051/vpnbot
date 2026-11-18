@@ -1114,6 +1114,10 @@ def test_user_texts_naming_several_protocols_are_composed_variants_only() -> Non
         # Superadmin dashboard: traffic and key counts per protocol, disabled ones included.
         "dashboard_traffic_total",
         "dashboard_keys_active",
+        # «🛟 Режим фолбэка» (superadmin): which .env hosts the direct links carry and
+        # how many single direct keys of each protocol do not follow a DNS switch.
+        "fb_ask_main_ipv4",
+        "fb_direct_ipv4",
     }
     offenders = {
         key

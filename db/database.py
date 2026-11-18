@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 45
+CURRENT_SCHEMA_VERSION = 46
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -427,6 +427,10 @@ class Database:
             await self._migrate_v45()
             await self._set_schema_version(45)
             version = 45
+        if version < 46:
+            await self._migrate_v46()
+            await self._set_schema_version(46)
+            version = 46
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -2051,6 +2055,41 @@ class Database:
         cols = await self._table_columns("relays")
         if "basic_visible" not in cols:
             await self.conn.execute("ALTER TABLE relays ADD COLUMN basic_visible INTEGER NOT NULL DEFAULT 1")
+
+    async def _migrate_v46(self) -> None:
+        # The fallback mode (hub) — docs/relay.md «Режим фолбэка». Both steps are
+        # idempotent and additive, mirrored in schema.sql:
+        #
+        #  1) relays.role — 'edge' | 'hub'. NOT NULL DEFAULT 'edge', so every
+        #     existing relay stays exactly what it was; nothing a key or a link
+        #     reads changes. An ADD COLUMN, not a rebuild: rebuilding relays inside
+        #     bootstrap's transaction would fire relay_pairings.relay_id's ON DELETE
+        #     SET NULL (see _migrate_v45).
+        #  2) failover_names — the DNS failover set (empty: the mode is off and has
+        #     nothing to switch until an admin adds names in the panel).
+        #
+        # The mode itself, the main/hub addresses, the subscription's fallback-url
+        # switch and the direct links' host are runtime settings in schema_meta
+        # (repositories.failover), so they need no DDL.
+        cols = await self._table_columns("relays")
+        if "role" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE relays ADD COLUMN role TEXT NOT NULL DEFAULT 'edge' CHECK (role IN ('edge', 'hub'))"
+            )
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS failover_names (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL UNIQUE,
+              applied TEXT CHECK (applied IS NULL OR applied IN ('normal', 'failover')),
+              applied_ipv4 TEXT,
+              applied_at TEXT,
+              last_error TEXT,
+              created_at TEXT NOT NULL,
+              created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
+            )
+            """
+        )
 
     async def _table_exists(self, table_name: str) -> bool:
         row = await self.conn.execute_fetchone(

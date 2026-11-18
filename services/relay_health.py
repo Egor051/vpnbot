@@ -196,8 +196,14 @@ async def udp_relay_probe(host: str, port: int) -> bool | None:
 LEVEL_OK = "ok"
 LEVEL_WARN = "warn"
 LEVEL_DOWN = "down"
-LEVELS = (LEVEL_OK, LEVEL_WARN, LEVEL_DOWN)
-LEVEL_ICONS = {LEVEL_OK: "🟢", LEVEL_WARN: "🟡", LEVEL_DOWN: "🔴"}
+# The fallback mode (services/fallback.py): a relay the main server cannot reach
+# directly any more — its traffic runs client → relay → hub → main — whose hairpin
+# probe from here fails. Not "down": it is expected. Moving into or out of this
+# level alerts nobody (an alert per RU relay every time the mode is switched would
+# be exactly the storm the mode does not need).
+LEVEL_HUB = "hub"
+LEVELS = (LEVEL_OK, LEVEL_WARN, LEVEL_DOWN, LEVEL_HUB)
+LEVEL_ICONS = {LEVEL_OK: "🟢", LEVEL_WARN: "🟡", LEVEL_DOWN: "🔴", LEVEL_HUB: "🛟"}
 # `vpn-relay-apply check` exit codes that do not count against the agent: 13/14 =
 # the relay cannot reach the upstream by itself (this host may not answer it
 # directly) — the hairpin probe from here is what judges the path.
@@ -345,6 +351,8 @@ def judge(*, tcp: bool, udp: bool | None, agent: AgentCheck | None) -> str:
 
 def health_reason(probe: ProbeResult, *, port: int, udp_port: int | None = None) -> str:
     """The one line saying why a relay is at its level (in the active locale)."""
+    if probe.level == LEVEL_HUB:
+        return t("relay_reason_behind_hub")
     if not probe.tcp and probe.udp is False:
         return t("relay_reason_tcp_udp_down", port=port, udp_port=udp_port or port)
     if not probe.tcp:
@@ -411,6 +419,10 @@ class RelayHealthSupervisor:
         self._current: dict[int, Relay] = {}
         self._monitors: dict[int, RelayHealthMonitor] = {}
         self._last: dict[int, ProbeResult] = {}
+        # The fallback mode's question (FallbackService.behind_hub, attached by
+        # bot.app): is this relay one the main server cannot reach directly right
+        # now? None — no fallback mode in this process.
+        self.behind_hub: Callable[[Relay], bool] | None = None
 
     @property
     def port(self) -> int:
@@ -451,16 +463,22 @@ class RelayHealthSupervisor:
                 logger.warning("Relay UDP probe of %s raised", relay.name, exc_info=True)
                 udp = False
         agent: AgentCheck | None = None
-        if relay.agent is not None and self.agent_probe is not None:
-            try:
-                agent = await self.agent_probe(relay)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning("Relay agent probe of %s raised", relay.name, exc_info=True)
-                agent = AgentCheck(ok=False, error_key="internal_error")
-        # Up when TCP passes and UDP did not FAIL (None: not judged); then the agent.
-        level = judge(tcp=bool(ok), udp=udp, agent=agent)
+        behind = self.behind_hub is not None and self.behind_hub(relay)
+        if behind and not (ok and udp is not False):
+            # Behind the hub: the hairpin cannot pass and SSH to the relay is cut
+            # too — asking its agent would only wait out the SSH timeout every pass.
+            level = LEVEL_HUB
+        else:
+            if relay.agent is not None and self.agent_probe is not None:
+                try:
+                    agent = await self.agent_probe(relay)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("Relay agent probe of %s raised", relay.name, exc_info=True)
+                    agent = AgentCheck(ok=False, error_key="internal_error")
+            # Up when TCP passes and UDP did not FAIL (None: not judged); then the agent.
+            level = judge(tcp=bool(ok), udp=udp, agent=agent)
         self._last[relay.id] = ProbeResult(
             ok=level == LEVEL_OK,
             checked_at=self._wall_clock(),
@@ -490,6 +508,12 @@ class RelayHealthSupervisor:
             return await self._run_probe(self._current[relay_id])
 
         async def on_change(before: str, after: str) -> None:
+            # Silent: into «за hub», and back to ok from it (nothing was alerted).
+            # Out of it into down / warn alerts as usual: the fallback mode is off
+            # and the relay did not come back.
+            if after == LEVEL_HUB or (before == LEVEL_HUB and after == LEVEL_OK):
+                logger.info("Relay %s: %s -> %s (fallback mode, no alert)", self._current[relay_id].name, before, after)
+                return
             await self._broadcast(after, self._current[relay_id])
 
         monitor = RelayHealthMonitor(probe=probe, on_change=on_change, window=self._window, clock=self._clock)

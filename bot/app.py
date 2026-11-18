@@ -17,6 +17,7 @@ from bot.fsm.ttl_storage import TTLMemoryStorage
 from adapters.awg_config import AwgConfigAdapter
 from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
+from adapters.cloudflare_dns import CloudflareDns, CloudflareTokenFile, doh_resolve_a
 from adapters.hysteria_auth_health import Hysteria2AuthHealthProbe
 from adapters.hysteria_stats import HysteriaStatsAdapter
 from adapters.warp_feed_fetcher import WarpFeedFetcher
@@ -30,7 +31,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_bundles, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, security, settings as settings_handler, ssh_port, start, ufw
+from bot.handlers import admin, admin_bundles, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, security, settings as settings_handler, ssh_port, start, ufw
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
 from bot.wizard_notifier import TelegramWizardNotifier
 from bot.middlewares.access import BlockedUserMiddleware
@@ -51,6 +52,7 @@ from repositories.key_bundles import KeyBundleRepository
 from repositories.protocol_modules import ProtocolModulesRepository
 from repositories.proxy_entries import ProxyRepository
 from repositories.proxy_accesses import ProxyAccessRepository
+from repositories.failover import FailoverRepository
 from repositories.relays import RelayRepository
 from repositories.traffic_stats import TrafficStatsRepository
 from repositories.trial_requests import TrialKeyRequestRepository
@@ -85,6 +87,7 @@ from services.host_check import HostCheckMonitor
 from services.ssh_port import SshPortMonitor
 from services.ufw import UfwApplier, UfwDeadmanMonitor
 from services.relay_health import build_relay_health_supervisor
+from services.fallback import FallbackService
 from services.relays import RelayService, warn_legacy_relay_env
 from services.relay_ssh import RelayAgentClient, RelayKeyStore
 from services.server_status import ServerStatusService
@@ -743,6 +746,25 @@ async def _build_app(
     # ONE health verdict per relay: traffic through it (TLS, QUIC) and, for a relay
     # with an agent, the agent's own status — one latch, one alert per change.
     relay_health_supervisor = build_relay_health_supervisor(settings, relays_repo.list_all, relay_service.poll_agent)
+    # The fallback mode (services/fallback.py, docs/relay.md «Режим фолбэка»): the
+    # hub, the DNS failover set and the switch, through the DNS API with a token
+    # the admin enters in the panel (adapters/cloudflare_dns.py). The health loop
+    # asks it which relays are behind the hub right now (no alert storm).
+    fallback_token = CloudflareTokenFile()
+    fallback_service = FallbackService(
+        repo=FailoverRepository(db),
+        relays_repo=relays_repo,
+        relays=relay_service,
+        users=user_service,
+        audit=audit_service,
+        clock=clock,
+        settings=settings,
+        token_file=fallback_token,
+        dns=CloudflareDns(fallback_token.load),
+        doh=doh_resolve_a,
+    )
+    await fallback_service.refresh_state()
+    relay_health_supervisor.behind_hub = fallback_service.behind_hub
     # What the host check (vpn-bot-host-check.timer) last found; alerts the
     # superadmins on a change, remembering what it reported in schema_meta.
     host_check_monitor = HostCheckMonitor(store=db, admin_ids=settings.admin_ids)
@@ -949,6 +971,7 @@ async def _build_app(
         superadmin_claim=superadmin_claim_service,
         totp=totp_service,
         wizard=wizard_service,
+        fallback=fallback_service,
     )
 
     await _startup_reconcile_keys(services)
@@ -1018,6 +1041,7 @@ async def _build_app(
     # order of these two routers does not change behaviour.
     dp.include_router(admin_warp_split_sources.router)
     dp.include_router(admin_modules.router)
+    dp.include_router(admin_fallback.router)
     dp.include_router(admin_relays.router)
     dp.include_router(admin_maintenance.router)
     dp.include_router(ssh_port.router)

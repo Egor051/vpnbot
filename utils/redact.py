@@ -13,7 +13,30 @@ _URL_CREDENTIALS_RE = re.compile(r"(?i)([a-z][a-z0-9+\-.]*://)([^:@/\s]+:[^@/\s]
 _WG_PRIVATE_KEY_RE = re.compile(r"\b[A-Za-z0-9+/]{43}={1,2}(?=[^A-Za-z0-9+/=]|$)")
 
 
+# Secrets that match no pattern (e.g. the DNS API token of the fallback mode: 40
+# URL-safe characters, indistinguishable from an ordinary identifier) but whose
+# exact value this process knows. Registered by their owner when it reads or saves
+# them; every redaction below masks them by value. Short values are refused: a
+# value that common could mask ordinary text.
+_REGISTERED_SECRETS: set[str] = set()
+_MIN_REGISTERED_LENGTH = 12
+
+
+def register_secret(value: str) -> None:
+    """Mask *value* wherever a redaction runs (logs, audit details), by value."""
+    if len(value) >= _MIN_REGISTERED_LENGTH:
+        _REGISTERED_SECRETS.add(value)
+
+
+def forget_secret(value: str) -> None:
+    _REGISTERED_SECRETS.discard(value)
+
+
 def _apply_patterns(text: str) -> str:
+    # A snapshot: a log record may be formatted on another thread (aiosqlite's).
+    for secret in tuple(_REGISTERED_SECRETS):
+        if secret in text:
+            text = text.replace(secret, "***")
     text = _SECRET_QUERY_RE.sub(r"\1***", text)
     text = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
     text = _HEX_SECRET_RE.sub("***", text)

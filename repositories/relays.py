@@ -28,14 +28,14 @@ from aiosqlite import Row
 
 from config.validators import format_ipv4_networks, parse_ipv4_networks
 from db.database import Database
-from models.dto import Relay, RelayAgent, RelayPairing
+from models.dto import RELAY_ROLE_HUB, RELAY_ROLES, Relay, RelayAgent, RelayPairing
 from models.enums import VpnKeyStatus, VpnKeyType
 
 _COLUMNS = (
     "id, name, label, host, source_ips, enabled, in_subscriptions, note, "
     "created_at, updated_at, created_by, updated_by, "
     "ssh_host, ssh_port, host_key, target_host, tcp_ports, udp_ports, "
-    "agent_version, agent_paired_at, agent_status_json, agent_status_at, basic_visible"
+    "agent_version, agent_paired_at, agent_status_json, agent_status_at, basic_visible, role"
 )
 # The agent columns, written all together and cleared all together.
 AGENT_COLUMNS: tuple[str, ...] = (
@@ -64,6 +64,9 @@ UPDATABLE_COLUMNS: frozenset[str] = frozenset(
 # has no row of its own, so its flag lives in the database's runtime key-value
 # store (db.database.Database.get_meta / set_meta) rather than in .env.
 MAIN_BASIC_VISIBLE_META_KEY = "basic_visible_main"
+# schema_meta key of the direct links' host (repositories.failover.META_DIRECT_HOST
+# is the same string; the fallback service writes it).
+DIRECT_HOST_META_KEY = "failover_direct_host"
 
 _DELETED = VpnKeyStatus.DELETED.value
 _ACTIVE = VpnKeyStatus.ACTIVE.value
@@ -131,6 +134,7 @@ def _row_to_relay(row: Row) -> Relay:
         updated_by=None if row["updated_by"] is None else int(row["updated_by"]),
         agent=_row_to_agent(row),
         basic_visible=bool(row["basic_visible"]),
+        role=str(row["role"]),
     )
 
 
@@ -242,6 +246,13 @@ class RelayRepository:
         row = await self.db.conn.execute_fetchone(f"SELECT {_COLUMNS} FROM relays WHERE label = ?", (label,))
         return None if row is None else _row_to_relay(row)
 
+    async def list_hubs(self) -> list[Relay]:
+        """Every relay with the role 'hub' (enabled or not), in ``id`` order."""
+        rows = await self.db.conn.execute_fetchall(
+            f"SELECT {_COLUMNS} FROM relays WHERE role = ? ORDER BY id", (RELAY_ROLE_HUB,)
+        )
+        return [_row_to_relay(row) for row in rows]
+
     async def count(self) -> int:
         row = await self.db.conn.execute_fetchone("SELECT COUNT(*) AS n FROM relays")
         return int(row["n"]) if row is not None else 0
@@ -260,6 +271,15 @@ class RelayRepository:
 
     async def set_main_basic_visible(self, visible: bool) -> None:
         await self.db.set_meta(MAIN_BASIC_VISIBLE_META_KEY, "1" if visible else "0")
+
+    async def direct_host(self) -> str | None:
+        """The DNS name direct links point at (fallback mode's setting), None: .env.
+
+        Read here, next to the table, because it rides in the same
+        :class:`services.relay.RelaySnapshot` every link builder reads.
+        """
+        value = ((await self.db.get_meta(DIRECT_HOST_META_KEY)) or "").strip()
+        return value or None
 
     # ── writes ────────────────────────────────────────────────────────────────
 
@@ -336,6 +356,19 @@ class RelayRepository:
             )
             await self.db.commit()
         return await self.get_by_id(relay_id)
+
+    async def set_role(self, relay_id: int, role: str, *, now: str, updated_by: int | None) -> bool:
+        """The relay's role ('edge' | 'hub'); False when the relay is gone. Kept out
+        of :data:`UPDATABLE_COLUMNS`: only the fallback service changes it, after
+        its own checks (agent, origin name, no loop)."""
+        if role not in RELAY_ROLES:
+            raise ValueError(f"relays: bad role {role!r}")
+        cursor = await self.db.conn.execute(
+            "UPDATE relays SET role = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+            (role, now, updated_by, relay_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount == 1
 
     async def delete_if_unused(self, relay_id: int, *, now: str = "") -> bool:
         """Delete the relay only if no key outside status 'deleted' still names it.
