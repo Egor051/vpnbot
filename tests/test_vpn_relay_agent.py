@@ -353,7 +353,7 @@ class Host:
         )
         (self.bin / "vpn-relay-agent").chmod(0o755)
 
-    def run(self, request: str | None, *argv: str, ssh: bool = False) -> tuple[int, dict[str, Any]]:
+    def run(self, request: str | None, *argv: str, ssh: bool = False, conn: str | None = None) -> tuple[int, dict[str, Any]]:
         self.stubs()
         env = {
             "PATH": os.environ["PATH"],
@@ -361,6 +361,8 @@ class Host:
             "VPN_RELAY_AGENT_ROOT": str(self.root),
             "VPN_RELAY_AGENT_SELFTEST_BIN": str(self.bin),
         }
+        if conn is not None:
+            env["VPN_RELAY_AGENT_SELFTEST_CONN"] = conn
         if request is not None:
             env["SSH_ORIGINAL_COMMAND"] = request
         if ssh:
@@ -1070,3 +1072,126 @@ def test_output_that_is_not_utf8_does_not_crash_update(repo_host: tuple[Host, Pa
     assert rc == 4
     assert payload["update"]["state"] == "failed" and payload["update"]["reason"] == "checks"
     assert "deploying v1.1.0" not in payload["error"], "never the stale running line"
+
+
+
+# --------------------------------------------------------------------------- #
+# The SSH port (docs/host-state.md#the-ssh-port): phase 2 only from the new port
+# --------------------------------------------------------------------------- #
+SSH_PORT_STUB = r"""
+echo "ssh-port $*" >> "@LOG@"
+case "$1" in
+  plan) printf '%s\n' ssh_port=54321 current=22,54321 state=phase1 action=wait from=22 to=54321 since=1763460000 hold=0 \
+          proof=none "status=ssh port: migrating 22 -> 54321 (waiting for proof)" listen=22,54321 ;;
+  confirm-session) [[ -f "@SD@/refuse" ]] && { echo "vpn-bot-ssh-port: stale" >&2; exit 3; }; echo "phase 2: 22 -> 54321" ;;
+  begin) [[ -f "@SD@/refuse" ]] && { echo "vpn-bot-ssh-port: this session came in on 54321" >&2; exit 3; }; echo "$1 done" ;;
+  hold|unhold) echo "$1 done" ;;
+esac
+"""
+
+
+def _ssh_port_host(host: Host) -> Host:
+    host.pair(paired=True)
+    original = host.stubs
+    sd = host.tmp / "sp"
+    sd.mkdir(exist_ok=True)
+
+    def stubs() -> None:
+        original()
+        host.stub("vpn-bot-ssh-port", SSH_PORT_STUB.replace("@LOG@", str(host.log)).replace("@SD@", str(sd)))
+
+    host.stubs = stubs  # type: ignore[method-assign]
+    return host
+
+
+@pytest.mark.parametrize(
+    "request_",
+    ["ssh-port-finish port=54321 since=1763460000", "ssh-port-keep since=1763460000",
+     "ssh-port-resume since=1763460000", "ssh-port-set port=60022"],
+)
+def test_the_ssh_port_requests_are_on_the_whitelist(request_: str) -> None:
+    assert agent.parse_request(request_)[0] == request_.split()[0]
+
+
+@pytest.mark.parametrize(
+    "request_",
+    ["ssh-port-finish port=54321", "ssh-port-finish port=54321 since=1 extra", "ssh-port-set port=-1",
+     "ssh-port-set port=123456", "ssh-port-keep", "ssh-port-finish port=54321 since=1;id"],
+)
+def test_malformed_ssh_port_requests_are_refused(request_: str) -> None:
+    with pytest.raises(agent.Refused):
+        agent.parse_request(request_)
+
+
+def test_status_carries_the_migration(host: Host) -> None:
+    _ssh_port_host(host)
+    rc, payload = host.run("status")
+    assert rc == 0, payload
+    assert payload["ssh_migration"]["state"] == "phase1" and payload["ssh_migration"]["to"] == "54321"
+    assert "listen" not in payload["ssh_migration"], "only the keys the bot reads"
+
+
+def test_finish_runs_phase2_only_from_a_session_on_the_new_port(host: Host) -> None:
+    _ssh_port_host(host)
+    rc, payload = host.run("ssh-port-finish port=54321 since=1763460000", conn="192.0.2.1 50000 192.0.2.50 22")
+    assert rc == 2 and "came in on 22, not on 54321" in payload["error"]
+    assert not [c for c in host.calls() if c.startswith("ssh-port confirm-session")], "nothing ran"
+    rc, payload = host.run("ssh-port-finish port=54321 since=1763460000", conn="192.0.2.1 50000 192.0.2.50 54321")
+    assert rc == 0, payload
+    assert ("ssh-port confirm-session --port 54321 --since 1763460000 --local-port 54321 --addr 192.0.2.1"
+            in host.calls())
+    assert payload["ssh_port"]["lines"] == ["phase 2: 22 -> 54321"]
+
+
+def test_finish_without_an_ssh_session_is_refused(host: Host) -> None:
+    _ssh_port_host(host)
+    rc, payload = host.run("ssh-port-finish port=54321 since=1763460000")
+    assert rc == 2 and "not an ssh session" in payload["error"]
+
+
+def test_a_refused_finish_reports_the_helpers_reason(host: Host) -> None:
+    _ssh_port_host(host)
+    (host.tmp / "sp" / "refuse").touch()
+    rc, payload = host.run("ssh-port-finish port=54321 since=1763460000", conn="192.0.2.1 50000 192.0.2.50 54321")
+    assert rc == 4 and "stale" in payload["error"] and payload["ssh_port"]["rc"] == 3
+
+
+@pytest.mark.parametrize(("verb", "arg"), [("keep", "hold"), ("resume", "unhold")])
+def test_keep_and_resume_hold_the_migration(host: Host, verb: str, arg: str) -> None:
+    _ssh_port_host(host)
+    rc, payload = host.run(f"ssh-port-{verb} since=1763460000")
+    assert rc == 0, payload
+    assert f"ssh-port {arg} --since 1763460000" in host.calls()
+
+
+def test_set_writes_ssh_port_and_begins(host: Host) -> None:
+    _ssh_port_host(host)
+    rc, payload = host.run("ssh-port-set port=60022")
+    assert rc == 0, payload
+    assert "ssh-port begin" in host.calls()
+    assert "SSH_PORT=60022" in host.env_path.read_text(encoding="utf-8")
+
+
+def test_set_keeps_the_port_this_session_came_in_on(host: Host) -> None:
+    """A new target must not close the port the bot manages the relay through."""
+    _ssh_port_host(host)
+    rc, payload = host.run("ssh-port-set port=60022", conn="192.0.2.1 50000 192.0.2.50 54321")
+    assert rc == 0, payload
+    assert "ssh-port begin --keep 54321" in host.calls()
+
+
+def test_a_refused_begin_restores_ssh_port(host: Host) -> None:
+    _ssh_port_host(host)
+    before = host.env_path.read_text(encoding="utf-8")
+    (host.tmp / "sp" / "refuse").touch()
+    rc, payload = host.run("ssh-port-set port=60022", conn="192.0.2.1 50000 192.0.2.50 54321")
+    assert rc == 4 and "SSH_PORT restored" in payload["error"], payload
+    assert host.env_path.read_text(encoding="utf-8") == before
+
+
+def test_set_refuses_a_forwarded_port(host: Host) -> None:
+    _ssh_port_host(host)
+    before = host.env_path.read_text(encoding="utf-8")
+    rc, payload = host.run("ssh-port-set port=443")
+    assert rc == 2 and "forwarded" in payload["error"]
+    assert host.env_path.read_text(encoding="utf-8") == before

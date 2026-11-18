@@ -472,6 +472,16 @@ class RelayRepository:
         await self.db.commit()
         return cursor.rowcount == 1
 
+    async def update_agent_ssh_port(self, relay_id: int, port: int, *, now: str, updated_by: int | None) -> bool:
+        """The port the agent answers on (the relay moved ssh there: phase 2 of the SSH
+        port migration). False when the relay has no agent."""
+        cursor = await self.db.conn.execute(
+            "UPDATE relays SET ssh_port = ?, updated_at = ?, updated_by = ? WHERE id = ? AND ssh_host IS NOT NULL",
+            (port, now, updated_by, relay_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount == 1
+
     async def update_agent_forward(
         self, relay_id: int, *, target_host: str, tcp_ports: Sequence[int], udp_ports: Sequence[int]
     ) -> None:

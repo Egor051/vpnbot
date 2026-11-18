@@ -410,7 +410,10 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   `only_input_filter_failures`: `check` exits with its FIRST failure only. Around the host files the [SSH port](host-state.md#the-ssh-port)
   moves when `SSH_PORT` asks for it (phase 1: both ports; the reload of `vpn-relay` then lets
   them in and main's probe confirms them); right after DEPLOY OK `vpn-bot-ssh-port.service` looks
-  for the proof once, so the relay usually finishes the migration in the same run.
+  for the proof once — when main's probe got through, the relay finishes in the same run; when it
+  did not (the fallback mode, a blocked port), the bot asks a superadmin to confirm closing the old
+  port and proves the new one by its own agent call on it, with no redeploy
+  ([host-state.md](host-state.md#a-relays-migration-from-the-bot)).
   DEPLOY OK carries `ssh port: …` and `input filter : …` from
   `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)` with nothing to do, or
   `PENDING CONFIRM (…) — <why>` followed by the reason and the instruction to run
@@ -817,6 +820,9 @@ line, extra words, an argv, an interactive login — is refused with exit 2 befo
 | `input-confirm` | Runs `vpn-relay-apply input-confirm` as a direct child — the bot's ssh session (a new one) is among its ancestors, which is the proof that check wants ([dead-man](#keeping-access-the-dead-man-and-input-confirm)). Answers the helper's lines and the new `input-status`. Takes no agent lock: the filter waits for its confirmation exactly while `update` holds it. |
 | `jump key=<ed25519 blob> open=<host>:<port>[,…]` | A hub: write the bot's ONE jump line in root's authorized_keys (`restrict,port-forwarding,permitopen="<host>:<port>"[,…],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump`) — [below](#managing-the-ru-relays-through-the-hub). A DNS name or IPv4 (not loopback, link-local, multicast), port 1..65535, unique, at most 32; a key that already has another line in the file (the agent's own) is refused; refused while `sshd -T` allows remote forwarding (not `allowtcpforwarding local`). Every other line stays byte-identical. Its own lock, so a hub's `update` does not hold it up. |
 | `jump-off` | A hub: remove that line. |
+| `ssh-port-finish port=<p> since=<s>` | Phase 2 of the SSH port migration — only from a session that came in on `<p>` (its `SSH_CONNECTION`): `vpn-bot-ssh-port confirm-session` writes the proof and closes the old port ([host-state.md](host-state.md#a-relays-migration-from-the-bot)). |
+| `ssh-port-keep since=<s>` / `ssh-port-resume since=<s>` | Hold phase 1 (the old port stays, no proof finishes it) / go on with the migration. |
+| `ssh-port-set port=<p>` | `SSH_PORT=<p>` in `.env`, then `vpn-bot-ssh-port begin --keep <this session's port>`: both ports listen now, no deploy; the port the bot came in on never closes; `.env` restored on a failure (a failed input filter included). A forwarded port is refused. |
 
 **The units** are not a list in the agent. They are read from the checkout by the same rule deploy.sh,
 install.sh and the host check use (`relay_unit_names`): every `deploy/relay/*.service` and `*.timer` of

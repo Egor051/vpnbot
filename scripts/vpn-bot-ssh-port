@@ -34,6 +34,18 @@ Proof — any one of (each must be later than the start of phase 1):
                it) — the Port drop-in sets LogLevel VERBOSE for that reason.
   bot          main: a superadmin pressed «Подтвердить» in the bot; the bot runs
                `vpn-bot-ssh-port confirm` through sudo.
+  agent        relay: a superadmin pressed «Подтвердить» in the bot, and the bot's
+               agent call came in on SSH_PORT — a NEW ssh session from the main
+               server (or through the hub) that sshd accepted on the new port. The
+               agent (`ssh-port-finish`) hands this helper the session's own
+               SSH_CONNECTION facts (`confirm-session`), which writes the proof and
+               runs phase 2 at once. A confirmation that never arrives proves
+               nothing: the old port is closed only after it.
+
+HOLD (relay): «Оставить 22» in the bot (`hold`): phase 1 stays as it is — both ports
+listen — and no proof finishes it, not even one this helper finds by itself, until
+`unhold` («Вернуться к переезду»). Kept in the state file (`hold`), so a deploy or
+the timer never closes a port a superadmin chose to keep.
 
 Without proof there is no phase 2, ever. Every deploy, the boot run and every run of
 vpn-bot-host-check.timer (vpn-bot-host-check.service Wants= vpn-bot-ssh-port.service,
@@ -51,6 +63,17 @@ Usage (root, except `render` and a `plan` / `status` that can read what they nee
   vpn-bot-ssh-port firewall-close --from P[,P] --to P    main: close the old port(s)
   vpn-bot-ssh-port advance [--listen-wait S]   phase 1 + proof -> phase 2 (the unit)
   vpn-bot-ssh-port confirm --port P --since EPOCH --admin ID    proof `bot` (sudo)
+  vpn-bot-ssh-port confirm-session --port P --since EPOCH --local-port L --addr A
+                                    relay: proof `agent` (the agent's session came in on
+                                    L == P from A), then phase 2 now (vpn-relay-agent)
+  vpn-bot-ssh-port hold --since EPOCH / unhold --since EPOCH
+                                    relay: keep the old port (no phase 2) / go on again
+                                    (under the deploy lock)
+  vpn-bot-ssh-port begin [--keep L] relay: the start (or the cancel) a deploy would do
+                                    for SSH_PORT, now: both ports listen, the state
+                                    records phase 1 — the agent's `ssh-port-set`. Never
+                                    stops listening on L (the agent's own session port);
+                                    a failed `vpn-relay-apply apply` reverts it (exit 4)
   vpn-bot-ssh-port proof-journal --ports P[,P] --since EPOCH   read-only: the journal proof for
                                     any port (vpn-bot-ufw-apply's dead-man), key=value lines
 Common options: --env FILE (default /opt/vpn-service/.env), --repo DIR (default
@@ -503,6 +526,21 @@ def proof_bot(ctx: Ctx, st: State) -> Proof | None:
     return Proof("bot", f"superadmin {admin} pressed «Подтвердить» in the bot ({iso(at)})")
 
 
+def proof_agent(ctx: Ctx, st: State) -> Proof | None:
+    if ctx.role != "relay":
+        return None
+    c = st.raw.get("agent_confirm")
+    if not isinstance(c, dict):
+        return None
+    try:
+        port, at, addr = int(c["port"]), int(c["at"]), str(c["addr"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if port != st.to or at < st.since:
+        return None
+    return Proof("agent", f"the bot's agent session came in on {port} from {addr}, after «Подтвердить» ({iso(at)})")
+
+
 def local_addresses() -> set[str]:
     out = out_of(["ip", "-o", "addr", "show"]) or ""
     addrs: set[str] = set()
@@ -557,7 +595,7 @@ def proof_journal(st: State) -> Proof | None:
 
 
 def find_proof(ctx: Ctx, st: State) -> Proof | None:
-    return proof_relay(ctx, st) or proof_bot(ctx, st) or proof_journal(st)
+    return proof_agent(ctx, st) or proof_relay(ctx, st) or proof_bot(ctx, st) or proof_journal(st)
 
 
 def waiting_for(ctx: Ctx, to: int) -> str:
@@ -587,6 +625,7 @@ class Plan:
     proof: Proof | None = None
     done: str = ""
     last_error: str = ""
+    hold: bool = False
 
     def status(self, ctx: Ctx) -> str:
         a, b = csv(self.from_), self.to
@@ -595,6 +634,9 @@ class Plan:
         if self.action == "start":
             return (f"ssh port: migrating {a} -> {b} (phase 1 starts now: ssh.socket listens on both; "
                     f"then waiting for proof: {waiting_for(ctx, b)})")
+        if self.action == "wait" and self.hold:
+            return (f"ssh port: migrating {a} -> {b} — HELD by the bot («Оставить»): {a} stays open, "
+                    "no proof finishes it until «Вернуться к переезду»")
         if self.action == "wait":
             return f"ssh port: migrating {a} -> {b} (waiting for proof: {waiting_for(ctx, b)})"
         if self.action == "finish" and self.proof is not None:
@@ -626,7 +668,8 @@ def compute_plan(ctx: Ctx) -> Plan:
         plan.state = "phase1"
         if p == st.to:
             plan.from_, plan.to, plan.since = st.from_, st.to, st.since
-            plan.proof = find_proof(ctx, st)
+            plan.hold = st.raw.get("hold") is True
+            plan.proof = None if plan.hold else find_proof(ctx, st)
             if plan.proof is not None:
                 plan.action, plan.listen = "finish", [p]
             else:
@@ -669,6 +712,7 @@ def plan_lines(ctx: Ctx, plan: Plan) -> list[str]:
         f"to={plan.to or ''}",
         f"since={plan.since or ''}",
         f"listen={csv(plan.listen)}",
+        f"hold={1 if plan.hold else 0}",
         f"proof={plan.proof.kind if plan.proof else 'none'}",
         f"proof_detail={one(plan.proof.detail) if plan.proof else ''}",
         f"waiting_for={one(waiting_for(ctx, plan.to)) if plan.to else ''}",
@@ -686,7 +730,8 @@ def record(ctx: Ctx, action: str, from_: list[int], to: int, proof: Proof | None
     if action == "start":
         data: dict[str, Any] = {
             "role": ctx.role, "from": from_, "to": to, "phase": 1, "since": now, "since_iso": iso(now),
-            "proof": None, "bot_confirm": None, "done_at": None, "done_iso": None, "last_error": None,
+            "proof": None, "bot_confirm": None, "agent_confirm": None, "hold": False,
+            "done_at": None, "done_iso": None, "last_error": None,
         }
     elif action in ("finish", "cancel"):
         if st is None or st.phase != 1:
@@ -995,7 +1040,10 @@ def port_arg(text: str) -> int:
     return int(text)
 
 
-WRITING_COMMANDS = frozenset({"confirm", "record", "advance", "firewall-open", "firewall-undo", "firewall-close"})
+WRITING_COMMANDS = frozenset({
+    "confirm", "confirm-session", "hold", "unhold", "begin", "record", "advance",
+    "firewall-open", "firewall-undo", "firewall-close",
+})
 GLOBAL_OPTIONS_WITH_VALUE = frozenset({"--env", "--repo", "--role", "--root"})
 
 
@@ -1069,6 +1117,18 @@ def main(argv: Sequence[str]) -> int:
     p = sub.add_parser("proof-journal")
     p.add_argument("--ports", required=True, type=ports_arg)
     p.add_argument("--since", required=True, type=int)
+    p = sub.add_parser("confirm-session")
+    p.add_argument("--port", required=True, type=port_arg)
+    p.add_argument("--since", required=True, type=int)
+    p.add_argument("--local-port", required=True, type=port_arg)
+    p.add_argument("--addr", required=True)
+    p.add_argument("--listen-wait", type=int, default=10)
+    for name in ("hold", "unhold"):
+        p = sub.add_parser(name)
+        p.add_argument("--since", required=True, type=int)
+    p = sub.add_parser("begin")
+    p.add_argument("--listen-wait", type=int, default=10)
+    p.add_argument("--keep", type=port_arg, default=None)
     args = ap.parse_args(argv)
 
     try:
@@ -1127,6 +1187,12 @@ def main(argv: Sequence[str]) -> int:
                 return phase2(ctx, plan)
         if args.cmd == "confirm":
             return confirm(ctx, args.port, args.since, args.admin)
+        if args.cmd == "confirm-session":
+            return confirm_session(ctx, args.port, args.since, args.local_port, args.addr)
+        if args.cmd in ("hold", "unhold"):
+            return set_hold(ctx, args.since, args.cmd == "hold")
+        if args.cmd == "begin":
+            return begin(ctx, args.keep)
     except Refused as exc:
         print(f"vpn-bot-ssh-port: {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -1151,6 +1217,159 @@ def confirm(ctx: Ctx, port: int, since: int, admin: int) -> int:
     print(f"confirmed: {port} (superadmin {admin}); {ADVANCE_UNIT} "
           + ("started" if rc == 0 else f"could not be started (rc {rc}: {text.strip()}) — the next timer run finishes it"))
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# Relay: the bot's confirmation, the hold, a start without a deploy
+# --------------------------------------------------------------------------- #
+def _relay_phase1(ctx: Ctx, since: int) -> State:
+    if ctx.role != "relay":
+        raise Refused("relay only (the main server confirms with `confirm`)")
+    st = load_state(ctx)
+    if st is None or st.phase != 1 or st.since != since:
+        raise Refused(f"no migration started at {since} is in phase 1 — the button is stale")
+    return st
+
+
+def confirm_session(ctx: Ctx, port: int, since: int, local_port: int, addr: str) -> int:
+    """Proof `agent`, then phase 2 at once — under the deploy lock, like `advance`.
+
+    The agent passes its OWN session's facts (SSH_CONNECTION): the session that runs it
+    came in on *local_port*. Only when that IS the migration's target is the proof
+    written — a confirmation that did not arrive over the new port closes nothing.
+
+    The same migration already finished (phase 2 with this *since* and *port*: the timer
+    or a deploy had another proof first) is a success, not a stale button — the bot
+    then moves its row to the new port it just reached the relay on.
+    """
+    if ctx.role != "relay":
+        raise Refused("relay only (the main server confirms with `confirm`)")
+    if local_port != port:
+        raise Refused(f"this session came in on {local_port}, not on {port}: it proves nothing about {port}")
+    try:
+        ipaddress.ip_address(addr)
+    except ValueError:
+        raise Refused(f"{addr!r} is not an address") from None
+    done = load_state(ctx)
+    if done is not None and done.phase == 2 and done.since == since and done.to == port:
+        # The timer's `advance` or a deploy finished THIS migration before the button
+        # (another proof came first). The session on the new port is the bot's: ok, so
+        # the bot moves its row to the port it just came in on.
+        proof = done.raw.get("proof")
+        kind = proof.get("kind") if isinstance(proof, dict) else None
+        print(f"vpn-bot-ssh-port: already finished — {csv(done.from_)} -> {port} at {done.raw.get('done_iso')} "
+              f"(proof {kind or 'unknown'}); this session came in on {port}")
+        return 0
+    st = _relay_phase1(ctx, since)
+    if port != st.to:
+        raise Refused(f"the migration goes to {st.to}, not {port} — the button is stale")
+    with deploy_lock(ctx) as got:
+        if not got:
+            raise Refused("a deploy holds the lock — confirm again once it is done")
+        data = dict(st.raw)
+        data["agent_confirm"] = {"port": port, "addr": addr, "at": int(time.time())}
+        data["hold"] = False
+        save_state(ctx, data)
+        plan = compute_plan(ctx)
+        if plan.action != "finish":
+            print(plan.status(ctx))
+            print(f"vpn-bot-ssh-port: confirmed, but the plan is {plan.action!r}, not finish — nothing closed",
+                  file=sys.stderr)
+            return EXIT_REFUSED
+        return phase2(ctx, plan)
+
+
+def set_hold(ctx: Ctx, since: int, hold: bool) -> int:
+    """«Оставить» / «Вернуться к переезду» — under the deploy lock, like `advance` and a
+    deploy: the state is read and written by one of them at a time, so a phase 2 that
+    is running finishes first (and this is then refused as stale) and a hold written
+    here is what the next `advance` reads."""
+    with deploy_lock(ctx) as got:
+        if not got:
+            raise Refused("a deploy or the timer's advance holds the lock — try again once it is done")
+        st = _relay_phase1(ctx, since)
+        data = dict(st.raw)
+        data["hold"] = hold
+        save_state(ctx, data)
+    print(f"{ctx.state_path}: {'held — the old port stays open' if hold else 'released — waiting for proof again'} "
+          f"({csv(st.from_)} -> {st.to})")
+    return 0
+
+
+def begin(ctx: Ctx, keep: int | None = None) -> int:
+    """What a deploy does for SSH_PORT around its host files, without the deploy (relay):
+    phase 1 of a migration (`start`: the old port(s) AND SSH_PORT) or the cancel of an
+    unproven one (`cancel`: back to SSH_PORT alone, which still listens). The ssh files
+    must be the rendering of the ports ssh listens on now — otherwise a deploy decides.
+
+    *keep*: the port the caller's own ssh session came in on (the agent passes it). A
+    plan that would stop listening on it is refused before anything changes — the bot
+    must not lose the port it manages the relay through (a new target while a migration
+    waits for proof drops the previous target).
+
+    The relay's input filter follows the listeners (`vpn-relay-apply apply`). When that
+    fails, the old filter stays and drops the new port: everything is put back and the
+    exit is EXIT_REVERTED — nothing is recorded, the caller restores SSH_PORT."""
+    with deploy_lock(ctx) as got:
+        if not got:
+            raise Refused("a deploy holds the lock — it moves the port itself")
+        plan = compute_plan(ctx)
+        if ctx.role != "relay":
+            raise Refused("relay only: the main server moves the port with a deploy")
+        if plan.action not in ("start", "cancel"):
+            print(plan.status(ctx))
+            return 0
+        current = sorted(plan.current)
+        if keep is not None and keep in current and keep not in plan.listen:
+            raise Refused(f"this session came in on {keep}, and the {plan.action} would stop ssh listening on it "
+                          f"({csv(current)} -> {csv(plan.listen)}) — confirm or cancel the migration first; "
+                          "nothing changed")
+        targets: list[tuple[Path, str | None, str]] = []
+        for rel, dst in TEMPLATES:
+            tpl = template_text(ctx, rel)
+            path = ctx.host(dst)
+            have = read_text(path)
+            # Absent is the package's own port (22, no override yet): what a deploy
+            # installs without the knob too.
+            if have != render(tpl, current) and not (have is None and current == [22]):
+                raise Refused(f"{dst} is not the rendering of the ports ssh listens on ({csv(current)}) — "
+                              "a deploy decides (an ssh file that differs needs ALLOW_SSH_CHANGE=1); nothing changed")
+            targets.append((path, have, render(tpl, plan.listen)))
+        ssh_was_active = unit_active(SSH_UNIT)
+        print(f"vpn-bot-ssh-port: {plan.action}: listen on {csv(plan.listen)} (now {csv(current)})")
+        for path, _, new_text in targets:
+            write_atomic(ctx, path, new_text)
+        removed = [p for p in current if p not in plan.listen]
+
+        def revert(why: str) -> int:
+            for path, old_text, _ in targets:
+                if old_text is None:
+                    with contextlib.suppress(FileNotFoundError):
+                        path.unlink()
+                else:
+                    write_atomic(ctx, path, old_text)
+            back = apply_set(ctx, current, [], ssh_was_active)
+            print(f"vpn-bot-ssh-port: {plan.action} failed ({why}) — reverted to {csv(current)}"
+                  + ("" if not back else " — REVERT CHECK FAILED TOO: " + "; ".join(back)), file=sys.stderr)
+            return EXIT_REVERTED
+
+        probs = apply_set(ctx, plan.listen, removed, ssh_was_active)
+        if probs:
+            return revert("its check: " + "; ".join(probs))
+        if unit_active(RELAY_UNIT):
+            rc, text = run([str(ctx.host(RELAY_HELPER)), "apply"], timeout=180)
+            print(f"vpn-bot-ssh-port: vpn-relay-apply apply: rc {rc}" + (f" — {text.strip()}" if rc else ""))
+            if rc != 0:
+                # nft applies a ruleset in one transaction: the old filter is in place and
+                # lets in only the old ports. Back to them; the filter is applied again to
+                # the listeners as they are now (best effort — it already matches them).
+                code = revert(f"vpn-relay-apply apply rc {rc}: the input filter would drop {plan.to}")
+                rc2, text2 = run([str(ctx.host(RELAY_HELPER)), "apply"], timeout=180)
+                print(f"vpn-bot-ssh-port: vpn-relay-apply apply (after the revert): rc {rc2}"
+                      + (f" — {text2.strip()}" if rc2 else ""), file=sys.stderr)
+                return code
+        print(f"vpn-bot-ssh-port: {record(ctx, plan.action, plan.from_, plan.to, None)}")
+        return 0
 
 
 if __name__ == "__main__":

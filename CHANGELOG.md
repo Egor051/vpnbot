@@ -54,6 +54,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **A relay's SSH port closes without a redeploy — after the bot proved the new one
+  (docs/host-state.md#a-relays-migration-from-the-bot).** he1 kept ssh on 22 (root with a password) next to
+  `SSH_PORT` until a manual redeploy: phase 2 of the migration waited for a proof main's probe could not give.
+  The agent's `status` now carries the migration (`ssh_migration`, from `vpn-bot-ssh-port plan`); a status the
+  bot keeps in phase 1 makes the SSH port monitor send every superadmin ONE bold message — «🔑 Relay X слушает
+  SSH на 22 и 54321 — подтвердите закрытие 22» — with «✅ Подтвердить закрытие 22» / «Оставить 22» (once per
+  migration, `schema_meta` `relay_ssh_port_alerted`; listeners on `RelayService.status_listeners`).
+  «Подтвердить» (TOTP `relay_ssh_port`) calls the agent ON THE NEW PORT — directly or through the hub, the new
+  port opened in the jump line next to the old — with `ssh-port-finish`; the agent refuses unless its own
+  session came in on that port (`SSH_CONNECTION`), then `vpn-bot-ssh-port confirm-session` writes the proof
+  (`agent`) and runs phase 2 under the deploy lock. A confirmation that does not arrive closes nothing. The
+  bot's row moves to the new port (`RelayRepository.update_agent_ssh_port`), the jump line follows, the input
+  filter's new set is confirmed by the next new session. «Оставить 22» holds phase 1 on the relay (`hold`: no
+  deploy, timer or probe closes it) and nothing asks again; Setup wizard → «🔑 SSH-порт relay» lists every
+  relay's port and migration, resumes a held one and changes the port: `ssh-port-set` writes `SSH_PORT` and runs
+  the new `vpn-bot-ssh-port begin` (phase 1 as a deploy does it, without the deploy; it never stops listening on
+  the port the agent's own session came in on — `--keep`; a failed `vpn-relay-apply apply` puts ssh back and
+  records nothing; `.env` restored on a failure). The hold is written under the deploy lock, like `advance`; the
+  port prompt's «Отмена» clears the pending input; «Подтвердить» after the timer or a deploy already finished the
+  same migration is a success, so the bot still moves to the new port. New whitelisted agent requests `ssh-port-finish port= since=`, `ssh-port-keep since=`,
+  `ssh-port-resume since=`, `ssh-port-set port=` — the same regex in `services/relay_ssh.py` `_REQUEST`
+  (pinned by `tests/test_relay_jump.py`); agent version 3.
 - **The Phase 1 stamp — a deploy right after a green `CHECK=1` skips the tests
   (docs/deployment.md#the-phase-1-stamp).** On a one-vCPU relay the pytest gate takes ~13 minutes and ran
   twice. A fully green `PHASE1_ONLY` run (tests passed, nothing a real deploy stops on reported —

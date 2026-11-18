@@ -239,6 +239,13 @@ operator reads it. Parameter `force` (`0`/`1`) is `FORCE=1`.
 Not a mode: the wizard's «🛰 Relay» opens the admin panel's ONE relay screen — see
 [relay.md → Managing relays in the admin panel](relay.md#managing-relays-in-the-admin-panel).
 
+### 🔑 SSH-порт relay
+
+Not a mode either: every relay with an agent, its SSH port and its move to `SSH_PORT`. Per relay
+«✅ Подтвердить закрытие …» / «Оставить …» (phase 1), «↩️ Вернуться к переезду» (held) and
+«✏️ Сменить порт» (phase 1 to a new port at once, no deploy). All behind TOTP — see
+[host-state.md → A relay's migration from the bot](host-state.md#a-relays-migration-from-the-bot).
+
 ## The helpers' library
 
 `vpn-bot-wizard-lib` is what future modes (IP or domain change, restore) build on:
@@ -323,6 +330,7 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 | Relay: change a relay's ports / target | «⚙️ Порты / цель» (the typed step checks the elevation again) |
 | Relay: disconnect the agent | «🔌 Отключить агент» |
 | Relay: uninstall on the relay (delete of a relay with an agent, «🧹 Отключить и снять с relay») | the final button |
+| Relay: the SSH port — close the old port, keep it, resume, change the port ([host-state.md](host-state.md#a-relays-migration-from-the-bot)) | «✅ Подтвердить закрытие …», «Оставить …», «↩️ Вернуться к переезду», «✏️ Сменить порт» (the typed port checks the elevation again) |
 | Fallback mode: switch on / off / repeat ([docs/relay.md](relay.md#fallback-mode-hub)) | «✅ Да, …» of the confirmation, «🔁 Повторить» |
 | Fallback mode: the hub role | «🛟 Сделать hub» (the typed origin checks the elevation again), «🛟 Снять роль hub» |
 | Fallback mode: the DNS API token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |

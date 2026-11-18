@@ -115,6 +115,12 @@ class TotpStates(StatesGroup):
     reissue_code = State()
 
 
+class RelaySshPortStates(StatesGroup):
+    """«🔑 SSH-порт relay» (bot/handlers/ssh_port.py): the new port, typed."""
+
+    port = State()
+
+
 class AdminFallbackStates(StatesGroup):
     """«🛟 Режим фолбэка» typed steps (bot/handlers/admin_fallback.py)."""
 
