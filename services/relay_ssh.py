@@ -447,6 +447,12 @@ def _ssh_failure(stderr: str, *, via: JumpHost | None, target: str) -> RelaySshE
                 f"hub {via.host} не пускает к {target}", key="relay_ssh_jump_refused",
                 params={"hub": via.host, "value": target},
             )
+        if f"@{via.host}: Permission denied" in stderr:
+            # The HUB refused the jump key (ssh names the host it was given): its jump
+            # line is gone or holds another key — the hub's agent can write it again.
+            return RelaySshError(
+                f"hub {via.host} не принял jump-ключ", key="relay_ssh_jump_denied", params={"hub": via.host},
+            )
         if "open failed: connect failed" in stderr or "stdio forwarding failed" in stderr:
             return RelaySshError(
                 f"hub {via.host} не достучался до {target}", key="relay_ssh_jump_connect",

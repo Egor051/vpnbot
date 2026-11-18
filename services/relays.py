@@ -133,7 +133,7 @@ INPUT_PENDING = "PENDING CONFIRM"
 # the input filter's own complaints (16-18) — judged by the FAIL lines.
 CHECK_OK_CODES = frozenset({0, 16, 17, 18})
 # Why an ssh through the hub may just need the hub's jump line written again.
-_JUMP_RESYNC_KEYS = frozenset({"relay_ssh_jump_refused"})
+_JUMP_RESYNC_KEYS = frozenset({"relay_ssh_jump_refused", "relay_ssh_jump_denied"})
 _ADDRESS = re.compile(r"(?P<host>[A-Za-z0-9.-]{1,253})(?::(?P<port>[0-9]{1,5}))?")
 
 
@@ -565,6 +565,8 @@ class RelayService:
         self._busy: set[int] = set()
         # The hub's jump line as the bot last wrote it: hub id -> (jump key, opens).
         self._jump_written: dict[int, tuple[str, tuple[tuple[str, int], ...]]] = {}
+        # Addresses opened on the hub for a pairing that is running (complete()).
+        self._jump_pairing: set[tuple[str, int]] = set()
         self._jump_lock = asyncio.Lock()
 
     def attach_key_deleters(self, key_deleters: Mapping[VpnKeyType, KeyDeleter]) -> None:
@@ -1129,12 +1131,18 @@ class RelayService:
             else:
                 await self._ensure_name_free(pairing.name)
             # Behind the hub (the fallback mode, or an attach to a relay «через hub»):
-            # the hub's jump line opens this address too, for the pairing.
+            # the hub's jump line opens this address too, for as long as the pairing
+            # runs — kept in the set every sync builds, so a health poll syncing the
+            # line meanwhile does not close it under the hello or the check.
             via: JumpHost | None = None
+            opened: tuple[str, int] | None = None
             if await self.relays.fallback_mode_on() or (target is not None and target.via_hub):
-                via = await self._jump_to((ssh_host.lower(), ssh_port))
-            alias = f"vpn-relay-pairing-{pairing.id}"
+                opened = (ssh_host.lower(), ssh_port)
+                self._jump_pairing.add(opened)
             try:
+                if opened is not None:
+                    via = await self._jump_to(None)
+                alias = f"vpn-relay-pairing-{pairing.id}"
                 reply = await _agent_call(
                     client,
                     ssh_host,
@@ -1156,43 +1164,38 @@ class RelayService:
                     checks = await self.checks(target.host if target is not None else ssh_host)
                 else:
                     checks = await self._checks_through(ssh_host, ssh_port, alias, reply.learned_host_key, via)
-            except BaseException:
-                if via is not None:
-                    # The address was opened for this pairing only.
-                    await self.sync_hub_jump_quietly()
-                raise
-            if not checks.passed:
-                await self._audit(
-                    actor_user_id, "relay_pairing_check_failed", target.id if target else None,
-                    {"pairing_id": pairing.id, "host": ssh_host, "checks": checks.describe()},
+                if not checks.passed:
+                    await self._audit(
+                        actor_user_id, "relay_pairing_check_failed", target.id if target else None,
+                        {"pairing_id": pairing.id, "host": ssh_host, "checks": checks.describe()},
+                    )
+                    raise PairingCheckFailed(checks)
+                found = await self._source_ips(ssh_host, reply.payload)
+                now = self.clock.now()
+                agent = RelayAgent(
+                    ssh_host=ssh_host,
+                    ssh_port=ssh_port,
+                    host_key=reply.learned_host_key,
+                    target_host=pairing.target_host,
+                    tcp_ports=pairing.tcp_ports,
+                    udp_ports=pairing.udp_ports,
+                    agent_version=str(reply.payload.get("agent", "")),
+                    paired_at=now,
+                    last_status=_slim(reply.payload),
+                    last_status_at=now,
                 )
-                if via is not None:
+                if target is None:
+                    relay, added, mismatch = await self._complete_new(actor_user_id, pairing, agent, found, now)
+                else:
+                    relay, added = await self._complete_attach(actor_user_id, pairing, target, agent, found, now)
+                    mismatch = None
+                await self.refresh_catalog()
+            finally:
+                if opened is not None:
+                    # Paired: the relay itself is behind the hub now (the same set, nothing
+                    # to write). Not paired: the address is closed again.
+                    self._jump_pairing.discard(opened)
                     await self.sync_hub_jump_quietly()
-                raise PairingCheckFailed(checks)
-            found = await self._source_ips(ssh_host, reply.payload)
-            now = self.clock.now()
-            agent = RelayAgent(
-                ssh_host=ssh_host,
-                ssh_port=ssh_port,
-                host_key=reply.learned_host_key,
-                target_host=pairing.target_host,
-                tcp_ports=pairing.tcp_ports,
-                udp_ports=pairing.udp_ports,
-                agent_version=str(reply.payload.get("agent", "")),
-                paired_at=now,
-                last_status=_slim(reply.payload),
-                last_status_at=now,
-            )
-            if target is None:
-                relay, added, mismatch = await self._complete_new(actor_user_id, pairing, agent, found, now)
-            else:
-                relay, added = await self._complete_attach(actor_user_id, pairing, target, agent, found, now)
-                mismatch = None
-            await self.refresh_catalog()
-        if via is not None:
-            # Now one of the relays behind the hub: the same set, nothing to write
-            # unless something else changed meanwhile.
-            await self.sync_hub_jump_quietly()
         if target is None:
             await self._audit(
                 actor_user_id,
@@ -1568,6 +1571,7 @@ class RelayService:
             for relay in await self.relays.list_all()
             if relay.agent is not None and self.behind_hub(relay, mode_on=mode_on)
         }
+        opens |= self._jump_pairing
         if extra is not None:
             opens.add(extra)
         return tuple(sorted(opens))

@@ -199,6 +199,9 @@ if not pinned:
     with open(opts["UserKnownHostsFile"], "a") as fh:
         fh.write(f"{alias} {presented}\n")
 if hop == "hub":
+    if state.get("hub_denies"):
+        print(f"root@{info['host']}: Permission denied (publickey).", file=sys.stderr)
+        sys.exit(255)
     if info["-W"] not in state["permit"]:
         print("channel 0: open failed: administratively prohibited: open failed\nstdio forwarding failed",
               file=sys.stderr)
@@ -357,6 +360,16 @@ async def test_the_hubs_permitopen_refusal_is_named(tmp_path: Path, fake_ssh: Fa
         await client.call(RU2_IP, 22, "status", alias="vpn-relay-8", host_key=RELAY_KEY,
                           via=_via((RU_IP, 22), (RU2_IP, 22)))
     assert exc.value.key == "relay_ssh_jump_refused" and exc.value.params["value"] == f"{RU2_IP}:22"
+
+
+async def test_a_hub_that_lost_the_jump_line_is_named(tmp_path: Path, fake_ssh: FakeSsh) -> None:
+    """ssh names the host it was given: the hub's refusal of the jump key is told apart."""
+    fake_ssh.state["hub_denies"] = True
+    fake_ssh.save()
+    client = _client(tmp_path, fake_ssh)
+    with pytest.raises(RelaySshError) as exc:
+        await client.call(RU_IP, 22, "status", alias="vpn-relay-7", host_key=RELAY_KEY, via=_via())
+    assert exc.value.key == "relay_ssh_jump_denied" and exc.value.params == {"hub": HUB_IP}
 
 
 async def test_a_call_via_the_hub_needs_the_jump_key(tmp_path: Path, fake_ssh: FakeSsh) -> None:
@@ -752,6 +765,44 @@ async def test_a_refused_forward_rewrites_the_hubs_line_once(world: World) -> No
     reply = await world.service.agent_status(ADMIN, world.ru1.id)
     assert reply.ok
     assert [r for _, r, _ in world.client.requests()] == ["status", f"jump key={BLOB_OF(world)} open={RU_IP}:22", "status"]
+
+
+async def test_a_hub_that_lost_the_line_gets_it_written_again_once(world: World) -> None:
+    """The bot's cache says the line is there; the hub refuses the jump key: rewrite, retry."""
+    await world.service.set_via_hub(ADMIN, world.ru1.id, True)
+    world.client.calls.clear()
+    world.client.errors = [RelaySshError("no", key="relay_ssh_jump_denied")]
+    assert (await world.service.agent_status(ADMIN, world.ru1.id)).ok
+    assert [r for _, r, _ in world.client.requests()] == ["status", f"jump key={BLOB_OF(world)} open={RU_IP}:22", "status"]
+
+
+async def test_a_health_poll_during_a_pairing_keeps_its_address_open(world: World) -> None:
+    """The hub's line is synced by anyone (a health poll) while a pairing runs through
+    the hub: the address opened for the pairing stays in it until the pairing ends."""
+    await world.mode(True)
+    issued = await world.service.issue_new(ADMIN, name="ru3", host="ru3.example.net", target_host="vpn.example.com")
+    new_ip = "203.0.113.70"
+    real_call = world.client.call
+
+    async def hello_with_a_poll(host: str, port: int, request: str, **kwargs: Any) -> AgentReply:
+        if request.startswith("hello"):
+            # A health poll of ru1 lands in the middle of the pairing: its route
+            # rewrites the hub's line (forced, as after a refused forward).
+            await world.service.sync_hub_jump(force=True)
+        return await real_call(host, port, request, **kwargs)
+
+    world.client.call = hello_with_a_poll  # type: ignore[method-assign]
+    world.client.answer("hello", AgentReply(0, {
+        "ok": True, "protocol": 1, "agent": "1", "target_host": "vpn.example.com", "tcp": [443], "udp": [443],
+        "egress": {"src": new_ip, "dev": "eth0"},
+    }, learned_host_key=RELAY_KEY))
+    world.client.answer("status", AgentReply(0, {"ok": True, "check": {"rc": 0, "lines": []}}))
+    await world.service.complete(ADMIN, issued.pairing.id, new_ip)
+    jumps = [_open_of(r) for r in _jump_requests(world)]
+    assert len(jumps) == 2, "the pairing's write and the poll's"
+    assert set(jumps) == {f"{RU_IP}:22,{RU2_IP}:22,{new_ip}:22"}, "never rewritten without the pairing's address"
+    check = [c for c in world.client.calls if c["request"] == "status" and c["host"] == new_ip][0]
+    assert (new_ip, 22) in check["via"].opens
 
 
 async def test_the_switch_of_the_fallback_mode_follows_on_the_hubs_line(world: World) -> None:

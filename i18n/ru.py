@@ -2041,6 +2041,7 @@ STRINGS: dict[str, str] = {
     "relay_ssh_not_behind_hub": "{value} не в списке hub {hub} — вызов через hub туда не уходит.",
     "relay_ssh_jump_refused": "Hub {hub} не пускает к {value} (permitopen): строка jump на hub не та, что записал бот.",
     "relay_ssh_jump_connect": "Hub {hub} не достучался до {value}: {error}",
+    "relay_ssh_jump_denied": "Hub {hub} не принял jump-ключ бота: его строки jump на hub нет или в ней другой ключ.",
     "relay_hub_route_no_hub": "Этот relay управляется через hub, а hub нет (или у него нет агента) — назначьте hub в «🛟 Режим фолбэка».",
     "relay_jump_too_many": "За hub слишком много relay ({count}): строка jump вмещает не больше 32.",
     "relay_via_hub_is_hub": "«{name}» — сам hub: к нему бот ходит напрямую.",

@@ -2030,6 +2030,7 @@ STRINGS: dict[str, str] = {
     "relay_ssh_not_behind_hub": "{value} is not on hub {hub}'s list — a call through the hub does not go there.",
     "relay_ssh_jump_refused": "Hub {hub} does not let the bot through to {value} (permitopen): the hub's jump line is not the one the bot wrote.",
     "relay_ssh_jump_connect": "Hub {hub} could not reach {value}: {error}",
+    "relay_ssh_jump_denied": "Hub {hub} did not accept the bot's jump key: its jump line is missing or holds another key.",
     "relay_hub_route_no_hub": "This relay is managed through the hub, but there is no hub (or it has no agent) — assign one in «🛟 Fallback mode».",
     "relay_jump_too_many": "Too many relays behind the hub ({count}): the jump line holds at most 32.",
     "relay_via_hub_is_hub": "«{name}» is the hub itself: the bot reaches it directly.",
