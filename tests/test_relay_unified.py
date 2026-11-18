@@ -1077,3 +1077,115 @@ async def test_a_successful_update_shows_the_deploys_warning(prod: Env) -> None:
     await ui.relay_agent_update(cb, fsm(), _services(prod))  # type: ignore[arg-type]
     text = cb.message.edits[-1]
     assert "updated to v9.1.0" in text and t("deploy_warn_upstream_preexisting") in text
+
+
+# ── «🔑 SSH-порт relay» and the buttons of a relay's migration (B) ─────────────
+
+PHASE1 = {"ssh_port": "54321", "current": "22,54321", "state": "phase1", "action": "wait", "from": "22",
+          "to": "54321", "since": "1763460000", "hold": "0", "proof": "none", "status": "migrating 22 -> 54321"}
+
+
+@pytest.fixture
+def sshp(monkeypatch: pytest.MonkeyPatch) -> Any:
+    from bot.handlers import ssh_port as handlers
+
+    async def ok(*_: Any) -> bool:
+        return True
+
+    async def edit(message: Any, text: str, reply_markup: Any = None, **_: Any) -> bool:
+        message.edits.append(text)
+        message.markups.append(reply_markup)
+        return True
+
+    monkeypatch.setattr(handlers, "ensure_private_callback", ok)
+    monkeypatch.setattr(handlers, "ensure_private_message", ok)
+    monkeypatch.setattr(handlers, "safe_edit_message_text", edit)
+    return handlers
+
+
+async def _relay_in_phase1(prod: Env) -> None:
+    issued = await prod.service.issue_attach(ADMIN, 1, target_host=TARGET)
+    await prod.service.complete(ADMIN, issued.pairing.id, RU1_IP)
+    prod.client.replies["status"] = AgentReply(0, {"ok": True, "agent": "3", "check": {"rc": 0},
+                                                   "ssh_migration": PHASE1})
+    await prod.service.agent_status(ADMIN, 1)
+
+
+def test_the_wizard_menu_has_the_relay_ssh_port() -> None:
+    assert "admin:sshp" in _buttons(menu_keyboard(active=None, daily=False))
+
+
+async def test_the_screen_lists_the_relay_and_offers_close_and_keep(prod: Env, sshp: Any) -> None:
+    await _relay_in_phase1(prod)
+    services = _services(prod)
+    cb = Callback("admin:sshp")
+    await sshp.relay_ssh_port_list(cb, fsm(), services)
+    assert t("relay_ssh_port_line_phase1", name="relay", old="22", new=54321) in cb.message.edits[-1]
+    card = Callback("admin:sshp:1")
+    await sshp.relay_ssh_port_card(card, services)
+    buttons = _buttons(card.message.markups[-1])
+    assert buttons[:2] == ["sshport:r:ok:1:54321:1763460000", "sshport:r:keep:1:1763460000"]
+    assert "admin:sshp:1:set" in buttons
+
+
+async def test_confirm_is_totp_gated_then_closes_over_the_new_port(prod: Env, sshp: Any) -> None:
+    await _relay_in_phase1(prod)
+    prod.client.replies["ssh-port-finish"] = AgentReply(0, {"ok": True})
+    totp = FakeTotp(enabled=True)
+    state = fsm()
+    await sshp.relay_ssh_port_button(Callback("sshport:r:ok:1:54321:1763460000"), state, _services(prod, totp))
+    assert await state.get_state() == TotpStates.gate_code.state
+    assert not [c for c in prod.client.calls if c["request"].startswith("ssh-port")]
+    totp.elevated = True
+    cb = Callback("sshport:r:ok:1:54321:1763460000")
+    await sshp.relay_ssh_port_button(cb, fsm(), _services(prod, totp))
+    finish = [c for c in prod.client.calls if c["request"].startswith("ssh-port-finish")]
+    assert [(c["port"], c["request"]) for c in finish] == [(54321, "ssh-port-finish port=54321 since=1763460000")]
+    assert t("relay_ssh_port_finished", port=54321) in cb.message.edits[-1]
+    assert (await prod.relay()).agent.ssh_port == 54321  # type: ignore[union-attr]
+
+
+async def test_a_new_port_that_does_not_answer_closes_nothing(prod: Env, sshp: Any) -> None:
+    await _relay_in_phase1(prod)
+    prod.client.replies["ssh-port-finish"] = AgentReply(255, {})
+    cb = Callback("sshport:r:ok:1:54321:1763460000")
+    await sshp.relay_ssh_port_button(cb, fsm(), _services(prod))
+    assert t("relay_ssh_port_failed", error="").split(":")[0] in cb.message.edits[-1]
+    assert (await prod.relay()).agent.ssh_port != 54321  # type: ignore[union-attr]
+
+
+async def test_keep_holds_it_on_the_relay(prod: Env, sshp: Any) -> None:
+    await _relay_in_phase1(prod)
+    prod.client.replies["ssh-port-keep"] = AgentReply(0, {"ok": True})
+    cb = Callback("sshport:r:keep:1:1763460000")
+    await sshp.relay_ssh_port_button(cb, fsm(), _services(prod))
+    assert [c["request"] for c in prod.client.calls if c["request"].startswith("ssh-port")] == [
+        "ssh-port-keep since=1763460000"
+    ]
+    assert t("relay_ssh_port_kept") in cb.message.edits[-1]
+
+
+async def test_change_the_port_asks_it_and_runs_set(prod: Env, sshp: Any) -> None:
+    await _relay_in_phase1(prod)
+    prod.client.replies["ssh-port-set"] = AgentReply(0, {"ok": True})
+    services = _services(prod)
+    state = fsm()
+    start = Callback("admin:sshp:1:set")
+    await sshp.relay_ssh_port_set_start(start, state, services)
+    assert await state.get_state() == sshp.RelaySshPortStates.port.state
+    bad = Msg("abc")
+    await sshp.relay_ssh_port_set_input(bad, state, services)
+    assert t("relay_ssh_port_bad", value="abc") in bad.answers[-1].body
+    good = Msg("60022")
+    await sshp.relay_ssh_port_set_input(good, state, services)
+    assert "ssh-port-set port=60022" in [c["request"] for c in prod.client.calls]
+    assert t("relay_ssh_port_set_done", port=60022) in good.answers[-1].edits[-1]
+    assert await state.get_state() is None
+
+
+async def test_a_stale_relay_button_changes_nothing(prod: Env, sshp: Any) -> None:
+    await _relay_in_phase1(prod)
+    cb = Callback("sshport:r:ok:1:0:5")
+    await sshp.relay_ssh_port_button(cb, fsm(), _services(prod))
+    assert cb.alerts and cb.alerts[-1][1] is True
+    assert not [c for c in prod.client.calls if c["request"].startswith("ssh-port")]

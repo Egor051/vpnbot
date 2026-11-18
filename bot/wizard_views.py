@@ -142,6 +142,8 @@ def menu_keyboard(*, active: WizardRun | None, daily: bool) -> InlineKeyboardMar
         rows.insert(0, _row(t("btn_wizard_active", id=active.id, mode=mode_title(active.mode)), f"wiz:run:{active.id}"))
     # «🛰 Relay» opens THE relay screen of the admin panel (no list of its own).
     rows.append(_row(t("btn_wizard_relay"), "admin:relays"))
+    # The relays' SSH port: back to a held migration, or another port (bot/handlers/ssh_port.py).
+    rows.append(_row(t("btn_wizard_relay_ssh_port"), "admin:sshp"))
     rows.append(_row(t("btn_wizard_history"), "wiz:hist:0"))
     rows.append(_row(t("btn_wizard_daily_on") if daily else t("btn_wizard_daily_off"), "wiz:sched"))
     rows.append(_row(t("btn_admin_panel"), "admin:panel"))

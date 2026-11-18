@@ -778,6 +778,8 @@ async def _build_app(
         admin_ids=settings.admin_ids,
         runner=PrivilegedHelperRunner(shell=shell, use_sudo=settings.privilege_helpers_enabled),
     )
+    # A relay in phase 1 of its migration (its agent's status says so): asked once.
+    relay_service.status_listeners.append(ssh_port_monitor.relay_status)
     # A UFW policy change waiting for its proof (docs/host-state.md#the-firewall-ufw):
     # one message with «Подтвердить», one when it was confirmed or reverted.
     ufw_deadman_monitor = UfwDeadmanMonitor(

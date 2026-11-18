@@ -461,6 +461,101 @@ def test_the_bots_confirmation_is_a_proof_and_a_stale_button_is_refused(tmp_path
 
 
 # --------------------------------------------------------------------------- #
+# 3b. A relay without a deploy: the bot's confirmation, the hold, a new port
+# --------------------------------------------------------------------------- #
+def test_the_agents_session_on_the_new_port_is_the_proof_and_runs_phase2(tmp_path: Path) -> None:
+    host = Host(tmp_path, "relay")
+    since = host.phase1()
+    proc = host.helper("confirm-session", "--port", "54321", "--since", str(since), "--local-port", "54321",
+                       "--addr", "203.0.113.5", "--listen-wait", "0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert host.h(OVERRIDE).read_text(encoding="utf-8") == render(SOCKET_TPL, 54321)
+    assert (host.sd / "listening").read_text(encoding="utf-8").split() == ["54321"]
+    assert host.log("vpn-relay-apply") == ["vpn-relay-apply apply"]
+    state = host.state()
+    assert state is not None and state["phase"] == 2 and state["proof"]["kind"] == "agent"
+    assert "203.0.113.5" in state["proof"]["detail"]
+
+
+@pytest.mark.parametrize(
+    ("args", "why"),
+    [
+        (("--local-port", "22"), "came in on 22, not on 54321"),
+        (("--since", "1"), "stale"),
+        (("--port", "60022", "--local-port", "60022"), "goes to 54321"),
+        (("--addr", "not-an-ip"), "not an address"),
+    ],
+)
+def test_a_confirmation_that_did_not_come_over_the_new_port_closes_nothing(
+    tmp_path: Path, args: tuple[str, ...], why: str
+) -> None:
+    host = Host(tmp_path, "relay")
+    since = host.phase1()
+    base = {"--port": "54321", "--since": str(since), "--local-port": "54321", "--addr": "203.0.113.5"}
+    base.update(dict(zip(args[::2], args[1::2], strict=True)))
+    before = host.h(OVERRIDE).read_text(encoding="utf-8")
+    proc = host.helper("confirm-session", *[x for kv in base.items() for x in kv], "--listen-wait", "0")
+    assert proc.returncode == 3 and why in proc.stderr, proc.stdout + proc.stderr
+    assert host.h(OVERRIDE).read_text(encoding="utf-8") == before
+    assert host.state()["phase"] == 1  # type: ignore[index]
+
+
+def test_confirm_session_is_for_a_relay(tmp_path: Path) -> None:
+    host = Host(tmp_path, "main", env="SSH_PORT=60022\n")
+    since = host.phase1((54321,), 60022)
+    proc = host.helper("confirm-session", "--port", "60022", "--since", str(since), "--local-port", "60022",
+                       "--addr", "203.0.113.5")
+    assert proc.returncode == 3 and "relay only" in proc.stderr
+
+
+def test_a_held_migration_keeps_the_old_port_against_every_proof(tmp_path: Path) -> None:
+    """«Оставить 22»: a proof the helper finds by itself must not close 22 either."""
+    host = Host(tmp_path, "relay")
+    since = host.phase1()
+    host.put(MARKER, f"tcp=22,54321\nconfirmed_at={_iso(since + 5)}\nconfirmed_by=main-probe\n")
+    assert host.plan()["action"] == "finish"
+    assert host.helper("hold", "--since", str(since)).returncode == 0
+    plan = host.plan()
+    assert plan["action"] == "wait" and plan["hold"] == "1" and plan["proof"] == "none", plan
+    assert "HELD by the bot" in plan["status"]
+    before = host.h(OVERRIDE).read_text(encoding="utf-8")
+    assert host.helper("advance", "--listen-wait", "0").returncode == 0
+    assert host.h(OVERRIDE).read_text(encoding="utf-8") == before, "the timer does not close a held port"
+    assert host.helper("unhold", "--since", str(since)).returncode == 0
+    assert host.plan()["action"] == "finish"
+    assert host.helper("hold", "--since", str(since - 1)).returncode == 3, "a stale button"
+
+
+def test_begin_moves_a_relay_to_a_new_port_without_a_deploy(tmp_path: Path) -> None:
+    host = Host(tmp_path, "relay", listening=(54321,), env="SSH_PORT=60022\n")
+    host.with_port_dropin(54321)
+    proc = host.helper("begin", "--listen-wait", "0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert host.h(OVERRIDE).read_text(encoding="utf-8") == render(SOCKET_TPL, 54321, 60022)
+    assert host.h(PORT_DROPIN).read_text(encoding="utf-8") == render(PORT_TPL, 54321, 60022)
+    assert (host.sd / "listening").read_text(encoding="utf-8").split() == ["54321", "60022"]
+    assert host.log("vpn-relay-apply") == ["vpn-relay-apply apply"]
+    state = host.state()
+    assert state is not None and state["phase"] == 1 and state["from"] == [54321] and state["to"] == 60022
+    assert state["hold"] is False and state["agent_confirm"] is None
+
+
+def test_begin_from_the_package_default_port(tmp_path: Path) -> None:
+    host = Host(tmp_path, "relay", listening=(22,))
+    proc = host.helper("begin", "--listen-wait", "0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (host.sd / "listening").read_text(encoding="utf-8").split() == ["22", "54321"]
+
+
+def test_begin_leaves_a_hand_edited_file_to_a_deploy(tmp_path: Path) -> None:
+    host = Host(tmp_path, "relay", listening=(54321,), env="SSH_PORT=60022\n")
+    host.put(OVERRIDE, "# edited by hand\n[Socket]\nListenStream=54321\n")
+    proc = host.helper("begin", "--listen-wait", "0")
+    assert proc.returncode == 3 and "a deploy decides" in proc.stderr
+    assert host.state() is None
+
+
+# --------------------------------------------------------------------------- #
 # 4. advance: phase 2 outside a deploy
 # --------------------------------------------------------------------------- #
 def test_advance_without_a_proof_changes_nothing(tmp_path: Path) -> None:
@@ -1045,3 +1140,58 @@ def test_the_sudoers_grant_is_the_confirm_verb_only() -> None:
     grants = [ln.strip().rstrip(",\\").strip() for ln in text.splitlines() if "vpn-bot-ssh-port" in ln and not ln.lstrip().startswith("#")]
     assert grants == ["/usr/local/sbin/vpn-bot-ssh-port confirm *"]
     assert "VPN_BOT_SSH_PORT" in text.split("vpn-bot ALL=(root) NOPASSWD:", 1)[1]
+
+
+# --------------------------------------------------------------------------- #
+# The bot and a relay's migration (its agent's status)
+# --------------------------------------------------------------------------- #
+RELAY_PLAN = {"ssh_port": "54321", "current": "22,54321", "state": "phase1", "action": "wait", "from": "22",
+              "to": "54321", "since": "1763460000", "hold": "0", "proof": "none", "status": "x"}
+
+
+class _Relay:
+    def __init__(self, relay_id: int = 7, name: str = "ru1") -> None:
+        self.id, self.name = relay_id, name
+
+
+def test_a_relay_in_phase1_is_asked_once_in_bold_with_both_buttons(tmp_path: Path) -> None:
+    from services.ssh_port import SshPortMonitor, parse_relay_callback
+
+    meta = _Meta()
+    sent: list[tuple[str, Any]] = []
+
+    async def send(text: str, markup: Any) -> None:
+        sent.append((text, markup))
+
+    monitor = SshPortMonitor(store=meta, admin_ids=frozenset({1}), path=tmp_path / "none.json", send=send)
+
+    async def go() -> None:
+        await monitor.relay_status(_Relay(), {"ssh_migration": RELAY_PLAN})
+        await monitor.relay_status(_Relay(), {"ssh_migration": RELAY_PLAN})       # told: not again
+        await monitor.relay_status(_Relay(8, "ru2"), {"ssh_migration": {**RELAY_PLAN, "hold": "1"}})  # kept
+        await monitor.relay_status(_Relay(9, "ru3"), {"ssh_migration": {**RELAY_PLAN, "state": "done", "action": "steady"}})
+        await monitor.relay_status(_Relay(10, "ru4"), {})                          # an older agent
+
+    asyncio.run(go())
+    assert len(sent) == 1
+    text, markup = sent[0]
+    assert text.startswith("<b>") and "ru1" in text and "22" in text and "54321" in text
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert data == ["sshport:r:ok:7:54321:1763460000", "sshport:r:keep:7:1763460000"]
+    assert parse_relay_callback(data[0]) == ("ok", 7, 54321, 1763460000)
+    assert parse_relay_callback(data[1]) == ("keep", 7, 0, 1763460000)
+    assert json.loads(meta.data["relay_ssh_port_alerted"]) == {"7": 1763460000}
+
+    # A NEW migration of the same relay is asked again.
+    asyncio.run(monitor.relay_status(_Relay(), {"ssh_migration": {**RELAY_PLAN, "since": "1763470000"}}))
+    assert len(sent) == 2
+
+
+@pytest.mark.parametrize(
+    "data", ["sshport:r:ok:7:0:1", "sshport:r:ok:7:54321", "sshport:r:drop:7:1", "sshport:r:keep:x:1",
+             "sshport:r:ok:7:70000:1", "sshport:ok:54321:1"],
+)
+def test_bad_relay_buttons_are_not_parsed(data: str) -> None:
+    from services.ssh_port import parse_relay_callback
+
+    assert parse_relay_callback(data) is None

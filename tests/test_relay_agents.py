@@ -1029,3 +1029,71 @@ async def test_a_refused_update_stays_a_refusal(world: World) -> None:
     with pytest.raises(RelayAgentError) as caught:
         await world.service.update_agent(ADMIN, relay_id)
     assert caught.value.key == "relay_agent_refused" and not hasattr(caught.value, "failure")
+
+
+# ── the SSH port of a relay: phase 2 only over the NEW port (B) ───────────────
+
+PHASE1_PLAN = {"ssh_port": "54321", "current": "22,54321", "state": "phase1", "action": "wait", "from": "22",
+               "to": "54321", "since": "1763460000", "hold": "0", "proof": "none", "status": "migrating"}
+
+
+async def test_finish_reaches_the_agent_on_the_new_port_and_moves_the_bot_there(world: World) -> None:
+    relay_id = await _paired(world)
+    world.client.replies["ssh-port-finish"] = AgentReply(0, {"ok": True, "ssh_port": {"rc": 0, "lines": []}})
+    world.client.replies["status"] = AgentReply(0, {"ok": True, "agent": "3", "check": {"rc": 0, "lines": []}})
+    await world.service.finish_ssh_port(ADMIN, relay_id, port=54321, since=1763460000)
+    finish = [c for c in world.client.calls if c["request"].startswith("ssh-port-finish")]
+    assert finish == [{"host": RELAY_IP, "port": 54321, "request": "ssh-port-finish port=54321 since=1763460000",
+                       "alias": f"vpn-relay-{relay_id}", "host_key": HOST_KEY}]
+    agent = await _agent(world, relay_id)
+    assert agent is not None and agent.ssh_port == 54321
+    status = [c for c in world.client.calls if c["request"] == "status"]
+    assert status and status[-1]["port"] == 54321, "every later call goes to the new port"
+    assert any(r["action"] == "relay_ssh_port_finished" for r in world.audit.rows)
+    assert relay_id not in world.service._busy
+
+
+async def test_a_failed_finish_keeps_the_old_port(world: World) -> None:
+    relay_id = await _paired(world)
+    world.client.replies["ssh-port-finish"] = AgentReply(2, {"ok": False, "error": "refused: this session came in on 22"})
+    with pytest.raises(RelayAgentError):
+        await world.service.finish_ssh_port(ADMIN, relay_id, port=54321, since=1763460000)
+    agent = await _agent(world, relay_id)
+    assert agent is not None and agent.ssh_port == 22
+
+
+async def test_keep_and_resume_go_to_the_current_port(world: World) -> None:
+    relay_id = await _paired(world)
+    world.client.replies["ssh-port-keep"] = AgentReply(0, {"ok": True})
+    world.client.replies["ssh-port-resume"] = AgentReply(0, {"ok": True})
+    await world.service.keep_ssh_port(ADMIN, relay_id, since=1763460000)
+    await world.service.keep_ssh_port(ADMIN, relay_id, since=1763460000, keep=False)
+    sent = [(c["port"], c["request"]) for c in world.client.calls if c["request"].startswith("ssh-port")]
+    assert sent == [(22, "ssh-port-keep since=1763460000"), (22, "ssh-port-resume since=1763460000")]
+
+
+@pytest.mark.parametrize("port", [0, 22, 443, 70000])
+async def test_set_refuses_a_port_that_cannot_be_the_ssh_port(world: World, port: int) -> None:
+    relay_id = await _paired(world)
+    with pytest.raises(InvalidOperation):
+        await world.service.set_ssh_port(ADMIN, relay_id, port=port)
+    assert not [c for c in world.client.calls if c["request"].startswith("ssh-port")]
+
+
+async def test_a_status_with_phase1_reaches_the_listeners(world: World) -> None:
+    relay_id = await _paired(world)
+    seen: list[tuple[int, Any]] = []
+
+    async def listener(relay: Any, payload: Any) -> None:
+        seen.append((relay.id, payload.get("ssh_migration")))
+
+    async def broken(relay: Any, payload: Any) -> None:
+        raise RuntimeError("boom")
+
+    world.service.status_listeners.extend([broken, listener])
+    world.client.replies["status"] = AgentReply(0, {"ok": True, "agent": "3", "check": {"rc": 0, "lines": []},
+                                                    "ssh_migration": PHASE1_PLAN})
+    await world.service.agent_status(ADMIN, relay_id)
+    assert seen == [(relay_id, PHASE1_PLAN)], "a failing listener does not stop the next"
+    agent = await _agent(world, relay_id)
+    assert agent is not None and (agent.last_status or {}).get("ssh_migration") == PHASE1_PLAN

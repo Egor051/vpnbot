@@ -83,6 +83,8 @@ _JUMP_OPEN = r"[A-Za-z0-9.-]{1,253}:[0-9]{1,5}"
 # tests/test_relay_jump.py runs both on the same requests.
 _REQUEST = re.compile(
     r"hello [A-Za-z0-9_-]{43}|status|update|uninstall|input-confirm|jump-off"
+    r"|ssh-port-finish port=[0-9]{1,5} since=[0-9]{1,12}|ssh-port-keep since=[0-9]{1,12}"
+    r"|ssh-port-resume since=[0-9]{1,12}|ssh-port-set port=[0-9]{1,5}"
     r"|apply target=[A-Za-z0-9.-]{1,253} tcp=[0-9]{1,5}(?:,[0-9]{1,5}){0,7} udp=[0-9]{1,5}(?:,[0-9]{1,5}){0,7}"
     rf"|jump key={_ED25519_BLOB} open={_JUMP_OPEN}(?:,{_JUMP_OPEN}){{0,{MAX_JUMP_OPEN - 1}}}"
 )

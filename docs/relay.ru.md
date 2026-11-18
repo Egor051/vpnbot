@@ -403,8 +403,11 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
   Вердикт читается по строкам FAIL, как `only_input_filter_failures` агента: `check` выходит с кодом
   только ПЕРВОГО провала. Вокруг файлов хоста двигается [SSH-порт](host-state.ru.md#ssh-порт),
   когда этого требует `SSH_PORT` (фаза 1: оба порта; reload `vpn-relay` пускает их, проба с main
-  их подтверждает); сразу после DEPLOY OK `vpn-bot-ssh-port.service` один раз ищет доказательство,
-  так что relay обычно заканчивает переезд в том же прогоне.
+  их подтверждает); сразу после DEPLOY OK `vpn-bot-ssh-port.service` один раз ищет доказательство —
+  если проба с main прошла, relay заканчивает переезд в том же прогоне; если нет (режим фолбэка,
+  заблокированный порт), бот просит суперадмина подтвердить закрытие старого порта и доказывает
+  новый собственным вызовом агента на нём, без redeploy
+  ([host-state.ru.md](host-state.ru.md#переезд-relay-из-бота)).
   В DEPLOY OK есть `ssh port: …` и `input filter : …` из
   `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)`, и делать ничего не нужно, или
   `PENDING CONFIRM (…) — <причина>`, за которым идут причина и инструкция выполнить
@@ -808,6 +811,9 @@ SSH, как выше, но:
 | `input-confirm` | Запускает `vpn-relay-apply input-confirm` прямым дочерним процессом — ssh-сессия бота (новая) среди его предков, а это и есть доказательство для той проверки ([dead-man](#как-не-потерять-доступ-dead-man-и-input-confirm)). Отвечает строками helper'а и новым `input-status`. Lock агента не берёт: фильтр ждёт подтверждения как раз пока `update` его держит. |
 | `jump key=<blob ed25519> open=<host>:<port>[,…]` | Hub: записать ОДНУ строку jump-ключа бота в authorized_keys root (`restrict,port-forwarding,permitopen="<host>:<port>"[,…],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump`) — [ниже](#управление-ru-relay-через-hub). DNS-имя или IPv4 (не loopback, link-local, multicast), порт 1..65535, без повторов, не больше 32; ключ, у которого в файле уже есть другая строка (сам ключ агента), — отказ; отказ и пока `sshd -T` разрешает удалённый проброс (не `allowtcpforwarding local`). Все остальные строки — байт-в-байт. Свой lock, поэтому `update` hub'а его не задерживает. |
 | `jump-off` | Hub: убрать эту строку. |
+| `ssh-port-finish port=<p> since=<s>` | Фаза 2 переезда SSH-порта — только из сессии, пришедшей на `<p>` (её `SSH_CONNECTION`): `vpn-bot-ssh-port confirm-session` пишет доказательство и закрывает старый порт ([host-state.ru.md](host-state.ru.md#переезд-relay-из-бота)). |
+| `ssh-port-keep since=<s>` / `ssh-port-resume since=<s>` | Удержать фазу 1 (старый порт остаётся, никакое доказательство её не завершает) / продолжить переезд. |
+| `ssh-port-set port=<p>` | `SSH_PORT=<p>` в `.env`, затем `vpn-bot-ssh-port begin`: оба порта слушают сразу, без деплоя; при неудаче `.env` возвращается. Проброшенный порт — отказ. |
 
 **Юниты** в агенте не перечислены. Он берёт их из checkout по тому же правилу, что deploy.sh,
 install.sh и проверка хоста (`relay_unit_names`): каждый `deploy/relay/*.service` и `*.timer` в
