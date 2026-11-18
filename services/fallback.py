@@ -777,12 +777,6 @@ class FallbackService:
         items: list[PreflightItem] = []
         origin = hub.agent.target_host
         tcp, udp = self.hub_ports()
-        forwards = set(tcp) <= set(hub.agent.tcp_ports) and set(udp) <= set(hub.agent.udp_ports)
-        items.append(PreflightItem(
-            "fb_pf_forward", forwards,
-            {"name": hub.name, "want": f"tcp={format_ports(tcp)} udp={format_ports(udp)}",
-             "have": f"tcp={format_ports(hub.agent.tcp_ports)} udp={format_ports(hub.agent.udp_ports)}"},
-        ))
         try:
             reply = await self.relays.agent_status(actor_user_id, hub.id)
             payload: Mapping[str, Any] = reply.payload
@@ -790,6 +784,21 @@ class FallbackService:
         except ServiceError as exc:
             items.append(PreflightItem("fb_pf_agent_failed", False, {"name": hub.name, "error": str(exc)[:200]}))
             payload = {}
+        # The ports the hub forwards NOW (its fresh status), not the bot's stored
+        # copy: a forward changed on the relay by hand still passes its own check,
+        # which compares the ruleset with its own .env and probes TCP only.
+        live_tcp = _ports_of(payload.get("tcp")) if payload else None
+        live_udp = _ports_of(payload.get("udp")) if payload else None
+        have_tcp = live_tcp if live_tcp is not None else tuple(hub.agent.tcp_ports)
+        have_udp = live_udp if live_udp is not None else tuple(hub.agent.udp_ports)
+        forwards = set(tcp) <= set(have_tcp) and set(udp) <= set(have_udp)
+        if live_tcp is not None and live_udp is not None:
+            forwards = forwards and set(tcp) <= set(hub.agent.tcp_ports) and set(udp) <= set(hub.agent.udp_ports)
+        items.append(PreflightItem(
+            "fb_pf_forward", forwards,
+            {"name": hub.name, "want": f"tcp={format_ports(tcp)} udp={format_ports(udp)}",
+             "have": f"tcp={format_ports(have_tcp)} udp={format_ports(have_udp)}"},
+        ))
         if payload:
             reached, missing = check_reaches(payload, main, tcp)
             items.append(PreflightItem(
@@ -910,6 +919,13 @@ class FallbackService:
             entity_id=relay_id,
             details=details,
         )
+
+
+def _ports_of(value: object) -> tuple[int, ...] | None:
+    """The port list of an agent's status (``[443, 2096]``), or None when absent/malformed."""
+    if not isinstance(value, list) or not all(type(port) is int for port in value):
+        return None
+    return tuple(sorted(value))
 
 
 def _seen(answers: Iterable[DohAnswer]) -> str:

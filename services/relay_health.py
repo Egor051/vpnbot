@@ -508,7 +508,10 @@ class RelayHealthSupervisor:
             return await self._run_probe(self._current[relay_id])
 
         async def on_change(before: str, after: str) -> None:
-            if LEVEL_HUB in (before, after):
+            # Silent: into «за hub», and back to ok from it (nothing was alerted).
+            # Out of it into down / warn alerts as usual: the fallback mode is off
+            # and the relay did not come back.
+            if after == LEVEL_HUB or (before == LEVEL_HUB and after == LEVEL_OK):
                 logger.info("Relay %s: %s -> %s (fallback mode, no alert)", self._current[relay_id].name, before, after)
                 return
             await self._broadcast(after, self._current[relay_id])

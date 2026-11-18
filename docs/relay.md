@@ -1153,7 +1153,8 @@ source IP. Both can be overridden with «Main IPv4» / «Hub IPv4» (while the m
    `SUBSCRIPTION_PUBLIC_PORT` **by itself** (the agent's `vpn-relay-apply check` lines; an exit
    16–18 counts only when **every** FAIL line is about the input filter, not `ip_forward` or the
    forward); no loop (the origin is outside the set and points at the main server — by DoH and by
-   the hub's own view — and the upstream name the hub reports **now** is the origin: a hub
+   the hub's own view — and the upstream name and ports the hub reports in its fresh `status`
+   **now** are the origin and the hub ports: a hub
    re-pointed by hand to a failover name resolves to main before the switch and would loop
    after it); the token is active; every name has **exactly one** A record that is **not proxied**
    (grey cloud) and points at the main server or the hub — a foreign address is never silently
@@ -1218,7 +1219,7 @@ There is no automatic switch on health — an admin switches the mode. The switc
   SSH session ([dead-man](#keeping-access-the-dead-man-and-input-confirm)).
 - **Health.** In the fallback mode, a relay forwarding to a name of the set (or a relay without an
   agent) whose hairpin probe fails gets the level **🛟 «behind the hub, not reachable directly»**:
-  moving into or out of it **alerts nobody**, and SSH to its agent is not tried (every pass would
+  moving into it, and from it back to 🟢, **alerts nobody**, and SSH to its agent is not tried (every pass would
   wait out the SSH timeout otherwise). The mode switched off and the relay still unreachable — an
   ordinary 🔴 with its alert.
 - **Anomaly detection** loses the IP signal: all traffic through the hub arrives from the hub's IP,

@@ -273,10 +273,12 @@ class Fallback:
         return self
 
     def status_reply(
-        self, *, lines: list[str] | None = None, rc: int = 0, live: str = MAIN, target: str = ORIGIN
+        self, *, lines: list[str] | None = None, rc: int = 0, live: str = MAIN, target: str = ORIGIN,
+        tcp: list[int] | None = None, udp: list[int] | None = None,
     ) -> AgentReply:
         return AgentReply(0, {
             "ok": True, "agent": "1", "live_target": live, "resolved": [live], "target_host": target,
+            "tcp": tcp if tcp is not None else [443, 2096], "udp": udp if udp is not None else [443],
             "check": {"rc": rc, "lines": lines if lines is not None else [
                 f"vpn-relay-apply: ok: TCP connect {MAIN}:443", f"vpn-relay-apply: ok: TCP connect {MAIN}:2096",
                 "vpn-relay-apply: check OK",
@@ -531,14 +533,15 @@ async def test_a_failed_preflight_touches_no_record_and_keeps_the_mode(fb: Fallb
 
 
 @pytest.mark.parametrize("breakage", ["loop_live", "origin_public", "origin_in_set", "token", "foreign", "count",
-                                      "agent", "forward", "no_hub", "upstream_by_hand", "ip_forward"])
+                                      "agent", "forward", "no_hub", "upstream_by_hand", "ip_forward",
+                                      "udp_by_hand"])
 async def test_every_preflight_blocker(fb: Fallback, breakage: str) -> None:
     hub = await _ready(fb)
     expected = {
         "loop_live": "fb_pf_loop", "origin_public": "fb_pf_loop", "origin_in_set": "fb_pf_loop",
         "token": "fb_pf_token", "foreign": "fb_pf_record_foreign", "count": "fb_pf_record_count",
         "agent": "fb_pf_agent_failed", "forward": "fb_pf_forward", "no_hub": "fb_pf_hub",
-        "upstream_by_hand": "fb_pf_loop", "ip_forward": "fb_pf_reach",
+        "upstream_by_hand": "fb_pf_loop", "ip_forward": "fb_pf_reach", "udp_by_hand": "fb_pf_forward",
     }[breakage]
     if breakage == "loop_live":
         fb.client.replies["status"] = fb.status_reply(live=HUB)
@@ -563,6 +566,10 @@ async def test_every_preflight_blocker(fb: Fallback, breakage: str) -> None:
         # Re-pointed on the relay by hand to a failover name: it resolves to main
         # today, so every address agrees — only the reported NAME tells.
         fb.client.replies["status"] = fb.status_reply(target=ZONE)
+    elif breakage == "udp_by_hand":
+        # The relay's .env changed by hand: its own check passes (it compares with
+        # that .env and probes TCP only); only the fresh status shows UDP is gone.
+        fb.client.replies["status"] = fb.status_reply(udp=[8443])
     elif breakage == "ip_forward":
         # The check's FIRST failure is the input filter's (rc 16), but forwarding is
         # off too: the hub would accept the names and forward nothing.
@@ -818,9 +825,48 @@ async def test_health_marks_a_relay_behind_the_hub_without_an_alert_or_an_ssh_wa
         now[0] = step * 10.0
         await supervisor.check_once()
     assert supervisor.level(ru1.id) == LEVEL_OK and sent == [] and agent_calls
-    # Off and unreachable: an ordinary «down», alerted as before.
+    # Off and unreachable: an ordinary «down», alerted as before.  (From «за hub»
+    # straight to «down» is covered by the test below.)
     traffic[0] = False
     for step in range(8, 12):
         now[0] = step * 10.0
         await supervisor.check_once()
+    assert len(sent) == 1 and "🔴" in sent[0]
+
+
+async def test_leaving_the_fallback_mode_unreachable_alerts_down() -> None:
+    """hub → down (the mode is off, the relay did not come back) is NOT silent."""
+    relay = Relay(
+        id=1, name="ru1", label="ru1", host="relay.example.net",
+        source_ips=validators.parse_ipv4_networks("s", "198.51.100.7/32"), enabled=True, in_subscriptions=True,
+        note=None, created_at=NOW, updated_at=NOW, created_by=None, updated_by=None,
+    )
+    sent: list[str] = []
+    now = [0.0]
+
+    async def probe(host: str, port: int, sni: str) -> bool:
+        return False
+
+    async def load() -> list[Relay]:
+        return [relay]
+
+    class _Bot:
+        async def send_message(self, chat_id: int, text: str) -> None:
+            sent.append(text)
+
+    supervisor = RelayHealthSupervisor(
+        load_relays=load, port=443, sni="example.com", admin_ids=frozenset({1}), window=10.0, probe=probe,
+        clock=lambda: now[0], bot=_Bot(),  # type: ignore[arg-type]
+    )
+    behind = [True]
+    supervisor.behind_hub = lambda r: behind[0]
+    for step in range(3):
+        now[0] = step * 10.0
+        await supervisor.check_once()
+    assert supervisor.level(relay.id) == LEVEL_HUB and sent == []
+    behind[0] = False
+    for step in range(3, 6):
+        now[0] = step * 10.0
+        await supervisor.check_once()
+    assert supervisor.level(relay.id) == "down"
     assert len(sent) == 1 and "🔴" in sent[0]

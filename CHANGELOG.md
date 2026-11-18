@@ -46,8 +46,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **DNS switch:** Cloudflare API adapter (`adapters/cloudflare_dns.py`: A records with
     `proxied=false`, TTL 60; DoH checks, never the system resolver). «Включить»: preflight (one
     enabled hub, its agent answers, it reaches the main server by its own check with only
-    input-filter failures tolerated, no loop — by the DNS record, DoH and the upstream name the hub
-    reports now — one non-proxied A record per name pointing at main or the hub, the token
+    input-filter failures tolerated, no loop — by the DNS record, DoH and the upstream name and
+    ports the hub reports now — one non-proxied A record per name pointing at main or the hub, the token
     active) → writes → DoH verification → a per-name report. «Выключить» writes main back.
     The asked mode and each name's last write are persistent: a partial switch is shown name by
     name and «🔁 Повторить» finishes it. Everything audited (`relay_hub_*`, `failover_*`).
@@ -67,7 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     a hub's source IPs** — a hub masquerades, so the main server would dial the hub's SSH ports and
     confirm somebody else's filter.
   - **Health:** in the fallback mode a relay behind the hub whose hairpin fails is
-    «🛟 за hub» — no alerts into or out of it, no SSH wait. Anomaly detection loses the IP signal
+    «🛟 за hub» — no alert into it or from it back to ok (leaving it for down still alerts), no SSH wait. Anomaly detection loses the IP signal
     while the mode is on (documented).
 
 - **Server visibility in basic subscriptions (docs/subscription.md#server-visibility-in-basic-subscriptions).**

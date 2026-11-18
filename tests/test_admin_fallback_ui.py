@@ -308,3 +308,16 @@ async def test_texts_of_a_partial_switch(world: Fallback) -> None:
     assert "⚠️" in fallback_text(overview) and "⚠️" in fallback_state_line(overview)
     assert "admin:fb:retry" in _callbacks(fallback_keyboard(overview))
     assert "relay.example.net" in names_text(overview, [])
+
+
+async def test_cancelling_the_origin_step_from_the_relay_card_clears_it() -> None:
+    """«Отмена» of «🛟 Сделать hub» opens the relay's page; the page abandons the
+    origin step, so the next message is not taken as an origin."""
+    from bot.handlers.admin_relays import _leave_relay_wizard
+
+    state = _fsm()
+    await state.set_state(AdminFallbackStates.origin)
+    await state.update_data({"relay_id": 7})
+    await _leave_relay_wizard(state)
+    assert await state.get_state() is None
+    assert await state.get_data() == {}

@@ -37,7 +37,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from bot.container import Services
-from bot.fsm.states import AdminRelayStates
+from bot.fsm.states import AdminFallbackStates, AdminRelayStates
 from bot.guards import require_superadmin
 from bot.handlers.admin_bundles import ProgressReporter, reconcile_issue_blocks, reconcile_report_text
 from bot.handlers.admin_bundles import runner as bundle_runner
@@ -117,11 +117,15 @@ def _pairing_id(data: str) -> int:
 
 
 async def _leave_relay_wizard(state: FSMContext | None) -> None:
-    """Navigating to the list or a page abandons any relay step in progress."""
+    """Navigating to the list or a page abandons any relay step in progress — the
+    fallback mode's typed steps included: «Отмена» of «🛟 Сделать hub» leads to the
+    relay's page, and a cancelled origin step must not take the next message."""
     if state is None:
         return
     current = await state.get_state()
-    if current is not None and current in AdminRelayStates.__all_states_names__:
+    if current is not None and (
+        current in AdminRelayStates.__all_states_names__ or current in AdminFallbackStates.__all_states_names__
+    ):
         await state.clear()
 
 
