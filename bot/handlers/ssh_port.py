@@ -35,7 +35,8 @@ from bot.totp_gate import require_totp
 from i18n import t
 from models.dto import Relay
 from services.errors import ServiceError
-from services.relays import agent_uninstalled
+from services.relay_hardening import warning_line as hardening_warning_line
+from services.relays import agent_uninstalled, hardening_of
 from services.ssh_port import (
     CALLBACK_PREFIX,
     RELAY_CALLBACK_PREFIX,
@@ -112,6 +113,10 @@ def relay_ssh_keyboard(relay: Relay) -> InlineKeyboardMarkup:
                                               callback_data=relay_callback_data("ok", relay.id, m))])
             rows.append([InlineKeyboardButton(text=t("btn_relay_ssh_port_keep", old=m.old),
                                               callback_data=relay_callback_data("keep", relay.id, m))])
+    hardening = hardening_of(relay)
+    if hardening is not None and hardening.needed:
+        # SSH on 22 / no input filter: «Довести» (bot/handlers/relay_hardening.py) — also after «Позже».
+        rows.append([InlineKeyboardButton(text=t("btn_relay_harden"), callback_data=f"rhard:go:{relay.id}")])
     rows.append([InlineKeyboardButton(text=t("btn_relay_ssh_port_set"), callback_data=f"admin:sshp:{relay.id}:set")])
     rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:sshp")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -137,6 +142,9 @@ async def _relay_screen(services: Services, actor: int, relay_id: int, notice: s
     relay = await services.relays.get(actor, relay_id)
     lines = [notice, ""] if notice else []
     lines += [t("relay_ssh_port_relay_title", name=h(relay.name)), relay_ssh_line(relay)]
+    warning = hardening_warning_line(relay)
+    if warning:
+        lines.append(warning)
     if relay.agent is not None:
         lines.append(t("relay_ssh_port_bot_port", port=code(str(relay.agent.ssh_port))))
         found = _migration(relay)

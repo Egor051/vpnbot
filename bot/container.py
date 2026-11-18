@@ -29,6 +29,7 @@ from services.relay_health import RelayHealthSupervisor
 from services.fallback import FallbackService
 from services.relays import RelayService
 from services.server_status import ServerStatusService
+from services.relay_hardening import RelayHardeningMonitor
 from services.ssh_port import SshPortMonitor
 from services.ufw import UfwDeadmanMonitor
 from services.socks5 import Socks5Service
@@ -109,6 +110,10 @@ class Services:
     # superadmins when phase 1 starts (with «Подтвердить») and when it is done; the
     # button runs the helper's confirm. None only in lightweight test doubles.
     ssh_port: SshPortMonitor | None = None
+    # «Довести relay до нормы» (services/relay_hardening.py): tells the superadmins once
+    # per pairing that a relay is on SSH 22 / without the input filter; remembers «Позже».
+    # None only in lightweight test doubles.
+    relay_hardening: RelayHardeningMonitor | None = None
     # The UFW dead-man (scripts/vpn-bot-ufw-apply): tells the superadmins when a change
     # of the incoming policy waits for its proof (with «Подтвердить») and how it ended.
     # None only in lightweight test doubles.

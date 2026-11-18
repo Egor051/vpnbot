@@ -884,6 +884,7 @@ die()  { printf '[deploy][FAIL] %s\n' "$*" >&2; deploy_result_failed >&2; exit 1
 #   [deploy:skip <name>] <why>                           a step is skipped (tests: a stamp)
 #   [deploy:tests total=<N>]                             the tests the gate collected
 #   [deploy:warn <code>] <text>                          DEPLOY OK with a finding to show
+#                                                        (upstream_preexisting, flaky_tests)
 #   [deploy:result ok|noop]                              green / nothing to deploy
 #   [deploy:result failed step=<name> reason=<class>]    why it stopped
 # Readers: the relay agent's `update` (scripts/vpn-relay-agent) and the setup wizard's
@@ -907,6 +908,9 @@ DEPLOY_STEP=""
 # Set right before a die/rollback_now whose cause the step alone does not tell.
 DEPLOY_FAIL_REASON=""
 DEPLOY_RESULT_DONE=0
+# Phase 1's tests that failed in the full run and passed when only they were run
+# again (phase1_pytest): the deploy goes on, DEPLOY OK and [deploy:warn flaky_tests] say so.
+declare -a PHASE1_FLAKY=()
 
 step() {
   local name="$1" i n=${#DEPLOY_STEPS[@]} at=0
@@ -941,7 +945,18 @@ deploy_result_failed() {
 
 deploy_result_ok() {   # $1: ok (default) | noop
   DEPLOY_RESULT_DONE=1
+  [[ "${1:-ok}" != "ok" ]] || phase1_flaky_report
   printf '[deploy:result %s]\n' "${1:-ok}"
+}
+
+# A green deploy whose Phase 1 re-ran flaky tests: loud, and one marker for the bot.
+phase1_flaky_report() {
+  (( ${#PHASE1_FLAKY[@]} )) || return 0
+  deploy_warn_marker flaky_tests "flaky: ${PHASE1_FLAKY[*]}"
+  printf '!! FLAKY TESTS — failed in the full Phase 1 run, PASSED when only they were run again:\n'
+  printf '!!     %s\n' "${PHASE1_FLAKY[@]}"
+  printf '!! The deploy went on. Fix them: such a test depends on timing or on the tests before it,\n'
+  printf '!! and the next failure of it may be a real one (docs/deployment.md#flaky-tests-in-phase-1).\n\n'
 }
 
 # HY2_AUTH_BIND_TIMEOUT feeds bash arithmetic, where a non-number is an error and a
@@ -5556,10 +5571,83 @@ run_checkout_tests() {
   total="$( (cd "$WT" && "${TEST_VENV}/bin/python" -m pytest --collect-only -q -p no:cacheprovider 2>/dev/null) \
             | sed -nE 's/^([0-9]+) tests? collected.*/\1/p' | tail -n 1 || true)"
   [[ -z "$total" ]] || printf '[deploy:tests total=%s]\n' "$total"
-  ( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider ) \
-    || die "Phase 1 gate: pytest failed on ${DEPLOY_TARGET_LABEL} (above) — nothing was changed"
+  phase1_pytest "$total"
   DEPLOY_FAIL_REASON=""
   TESTS_RAN=1
+}
+
+# --------------------------------------------------------------------------- #
+# Phase 1's pytest: ONE re-run of exactly what failed (docs/deployment.md#flaky-tests-in-phase-1)
+# --------------------------------------------------------------------------- #
+# A test that fails on the box and passes again by itself used to stop the deploy (he2,
+# v3.2.1, one vCPU: 1 failed, 5808 passed — a progress test racing the real clock). Now:
+#   * the full run is exactly what it always was (-q, -p no:cacheprovider; the cache stays
+#     off, so `--lf` is out — the failed node ids come from a 10-line plugin instead, every
+#     failed report's `nodeid`, exact for a parametrized id too: no parsing of pytest's text);
+#   * it failed with pytest's exit 1 (tests failed — never 2 interrupted / a collection
+#     error, 3 internal, 4 usage, 5 no tests) and at most PHASE1_RERUN_MAX tests failed:
+#     ONLY those run once more. Green -> the gate passed: a loud WARN «flaky: <ids>» now,
+#     the same in DEPLOY OK, and [deploy:warn flaky_tests] for the bot (deploy_warnings).
+#     Red -> it stops as before (reason=tests);
+#   * more than PHASE1_RERUN_MAX failures is a broken release, not a flake: it stops
+#     without a re-run.
+# [deploy:tests total=N] is printed again with the re-run added, so a progress reader's
+# «done of total» never goes past 100%.
+PHASE1_RERUN_MAX=5
+PHASE1_PLUGIN_NAME="vpnbot_phase1_failed"
+PHASE1_FAILED_IDS_PLUGIN='"""deploy.sh Phase 1: the node id of every failed test report, one per line."""
+import os
+
+
+def pytest_runtest_logreport(report):
+    out = os.environ.get("VPNBOT_PHASE1_FAILED_IDS")
+    if out and report.failed:
+        with open(out, "a", encoding="utf-8") as fh:
+            fh.write(report.nodeid + "\n")
+'
+
+# pytest in $WT with the plugin from $1 (a directory), the failed ids into $2; then
+# pytest's own arguments.
+phase1_pytest_run() {
+  local dir="$1" ids="$2"
+  shift 2
+  ( cd "$WT" && PYTHONPATH="${dir}${PYTHONPATH:+:${PYTHONPATH}}" VPNBOT_PHASE1_FAILED_IDS="$ids" \
+      "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider -p "$PHASE1_PLUGIN_NAME" "$@" )
+}
+
+phase1_pytest() {   # $1: the collected total ("" when unknown)
+  local total="${1:-}" dir rc=0 n
+  local -a failed=()
+  dir="$(mktemp -d)"
+  printf '%s' "$PHASE1_FAILED_IDS_PLUGIN" > "${dir}/${PHASE1_PLUGIN_NAME}.py"
+  phase1_pytest_run "$dir" "${dir}/failed" || rc=$?
+  if (( rc == 0 )); then
+    rm -rf "$dir"
+    return 0
+  fi
+  [[ ! -f "${dir}/failed" ]] || mapfile -t failed < <(awk 'NF && !seen[$0]++' "${dir}/failed")
+  n=${#failed[@]}
+  if (( rc != 1 || n == 0 )); then
+    rm -rf "$dir"
+    die "Phase 1 gate: pytest failed on ${DEPLOY_TARGET_LABEL} (above, exit ${rc}: not a test failure that can be re-run) — nothing was changed"
+  fi
+  if (( n > PHASE1_RERUN_MAX )); then
+    rm -rf "$dir"
+    die "Phase 1 gate: pytest failed on ${DEPLOY_TARGET_LABEL} (above): ${n} tests failed — more than ${PHASE1_RERUN_MAX}, a broken release rather than a flaky test; no re-run, nothing was changed"
+  fi
+  warn "pytest: ${n} test(s) failed — running ONLY them once more (a flaky test passes; a failure again stops here): ${failed[*]}"
+  [[ -z "$total" ]] || printf '[deploy:tests total=%s]\n' "$(( total + n ))"
+  rc=0
+  phase1_pytest_run "$dir" "${dir}/failed-again" -- "${failed[@]}" || rc=$?
+  rm -rf "$dir"
+  (( rc == 0 )) \
+    || die "Phase 1 gate: pytest failed on ${DEPLOY_TARGET_LABEL} — the ${n} failed test(s) failed again when re-run alone (above): ${failed[*]}; nothing was changed"
+  PHASE1_FLAKY=("${failed[@]}")
+  warn "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  warn "flaky: ${PHASE1_FLAKY[*]}"
+  warn "  failed in the full run, PASSED when only they were run again — the deploy goes on."
+  warn "  Fix them: DEPLOY OK repeats this, and the bot shows it with the result."
+  warn "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 }
 
 # =========================================================================== #

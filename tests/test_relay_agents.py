@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import wait_until_lock_contended
 from test_relay import ADMIN, _settings
 from test_relay_admin import MODERATOR, _Audit, _Users
 
@@ -928,18 +929,19 @@ async def test_udp_relay_probe_judges_the_relay_only_after_the_local_control(
 
 async def test_a_cancel_waits_for_a_completion_in_flight(world: World) -> None:
     issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
-    gate = asyncio.Event()
+    gate, entered = asyncio.Event(), asyncio.Event()
     original = world.client.call
 
     async def slow_call(*args: Any, **kwargs: Any) -> AgentReply:
+        entered.set()
         await gate.wait()
         return await original(*args, **kwargs)
 
     world.client.call = slow_call  # type: ignore[method-assign]
     completing = asyncio.create_task(world.service.complete(ADMIN, issued.pairing.id, RELAY_IP))
-    await asyncio.sleep(0.05)
+    await entered.wait()  # the completion holds the lock and talks to the relay
     cancelling = asyncio.create_task(world.service.cancel(ADMIN, issued.pairing.id))
-    await asyncio.sleep(0.05)
+    await wait_until_lock_contended(world.service._lock)  # the cancel parked on it — no sleep
     assert not cancelling.done(), "the cancel must wait for the completion's lock"
     gate.set()
     outcome = await completing

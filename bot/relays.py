@@ -14,6 +14,7 @@ from config.validators import format_ipv4_networks
 from i18n import t
 from models.dto import Relay, RelayAgent, RelayPairing
 from repositories.relays import RelayUsage
+from services.relay_hardening import warning_line as hardening_warning_line
 from services.relay_health import LEVEL_ICONS, ProbeResult
 from services.relay_pairing import format_port_specs
 from services.relays import IssuedPairing, PairingOutcome, RelayOverview, RouteInfo, agent_uninstalled, host_is_ipv4
@@ -202,6 +203,10 @@ def relay_card_text(
             ports=h(format_port_specs(agent.tcp_ports, agent.udp_ports)),
         )
     )
+    warning = hardening_warning_line(relay)
+    if warning:
+        # SSH on 22 / no input filter (what install.sh leaves a new relay with), until «Довести».
+        lines.append(warning)
     if route is not None and route.via_hub and not agent_uninstalled(agent):
         if route.hub is None:
             lines.append(t("relay_route_no_hub"))

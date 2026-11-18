@@ -45,6 +45,8 @@ DANGEROUS_ACTIONS: dict[str, str] = {
     "relay_uninstall": "dangerous_relay_uninstall",
     # The relay's SSH port (bot/handlers/ssh_port.py): close the old port, keep it, move.
     "relay_ssh_port": "dangerous_relay_ssh_port",
+    # «Довести relay до нормы» (bot/handlers/relay_hardening.py): the input filter on, SSH off 22.
+    "relay_harden": "dangerous_relay_harden",
     # The fallback mode (bot/handlers/admin_fallback.py): the switch itself, the hub
     # role, the DNS API token and the settings the switch writes.
     "fallback_switch": "dangerous_fallback_switch",

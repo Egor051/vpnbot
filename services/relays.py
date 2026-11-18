@@ -59,6 +59,30 @@ behind the hub says ``hello`` through it too; the outside checks from here canno
 pass then, so the relay's own ``vpn-relay-apply check`` (``status``, through the
 hub) stands in for them.
 
+BRINGING A RELAY TO THE DEFAULTS («Довести», :meth:`RelayService.harden`).
+scripts/install.sh writes a NEW relay ``SSH_PORT=<the port sshd listens on>`` and
+``RELAY_INPUT_FILTER=off`` — on purpose, so its first deploy cannot cut the bot off —
+and nothing moved them on afterwards (he2, the hub all traffic goes through, ran SSH on
+22 with no input filter). :func:`hardening_of` reads what is left from the agent's last
+status; ``harden`` does it in two atomic steps, each rolled back when it fails:
+
+1. the input filter: ``input-filter on`` (the agent applies it from a staged .env, the
+   helper's dead-man armed), confirmed by ``input-confirm`` from a NEW ssh session of
+   the bot (through the hub for a relay behind it), then ``input-filter on`` again
+   commits .env. Not confirmed → ``input-filter off`` (or, when the relay cannot be
+   reached at all, the dead-man within 5 minutes; .env never said on).
+2. SSH off 22: ``ssh-port-set port=54321`` (phase 1: both ports), then
+   :meth:`finish_ssh_port` — the bot's call ON 54321 is the proof, phase 2 closes 22.
+   The new port not answering → ``ssh-port-set port=22`` cancels phase 1.
+
+The filter goes FIRST: it is the bigger protection (every listener but sshd closed on
+the host that carries the traffic) and the step that heals itself (the dead-man), so a
+port move that cannot finish — a provider's firewall dropping 54321 — leaves the relay
+filtered, on 22. The move then runs the path every default relay takes (filter on; the
+filter follows the listeners; main's probe or the bot's new session confirms each TCP
+set, and main's probe of {22, 54321} is a proof for phase 2 too). The price: two more
+dead-man rounds, each confirmed by the bot itself.
+
 THE INPUT FILTER. A ``status`` that reports ``PENDING CONFIRM`` (a deploy applied a
 TCP set main's probe could not confirm — in the fallback mode main cannot reach the
 relay at all) is answered with ``input-confirm``: the agent runs ``vpn-relay-apply
@@ -69,6 +93,7 @@ that check wants. After ``update``, in the health loop, and from the card.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import logging
 import re
@@ -128,6 +153,16 @@ DEFAULT_SSH_PORT = 22
 # long, plus a minute for SSH and the agent itself.
 AGENT_UPDATE_TIMEOUT = 2760.0
 UNINSTALLED_KEY = AGENT_UNINSTALLED_KEY
+# The agent's AGENT_VERSION from which it knows a request (scripts/vpn-relay-agent:
+# 3 — update-status and the progress of an update; 4 — input-filter on|off).
+AGENT_SSH_PORT = 3
+AGENT_UPDATE_STATUS = 3
+AGENT_INPUT_FILTER = 4
+# «Довести relay до нормы» (docs/relay.md#bringing-a-relay-to-the-defaults): the defaults a
+# relay is brought to — SSH_PORT's default (DEFAULT_PORT of scripts/vpn-bot-ssh-port,
+# deploy/relay/relay.env.example) away from 22, and RELAY_INPUT_FILTER=on.
+HARDEN_SSH_PORT = 54321
+HARDEN_FROM_PORT = 22
 # How `vpn-relay-apply input-status` starts while a TCP set waits for input-confirm.
 INPUT_PENDING = "PENDING CONFIRM"
 # `vpn-relay-apply check` exit codes a relay may report and still forward: 0, or only
@@ -297,6 +332,102 @@ def _audit_view(relay: Relay) -> dict[str, object]:
             "udp": list(relay.agent.udp_ports),
         }
     return view
+
+
+def agent_version_number(agent: RelayAgent | None) -> int | None:
+    """The agent's AGENT_VERSION (scripts/vpn-relay-agent) as its last answer said it,
+    None when it is not known (no answer kept yet, not a number)."""
+    raw = agent.agent_version.strip() if agent is not None else ""
+    return int(raw) if raw.isdigit() and len(raw) <= 6 else None
+
+
+def agent_older_than(agent: RelayAgent | None, version: int) -> bool:
+    """The agent is KNOWN to be older than *version* (an unknown version is not)."""
+    number = agent_version_number(agent)
+    return number is not None and number < version
+
+
+def agent_release(agent: RelayAgent | None) -> str:
+    """How the agent is named to a superadmin: the release its checkout is on
+    (``git describe`` of the last status, «v3.2.0»), else its AGENT_VERSION («#2»)."""
+    status = (agent.last_status or {}) if agent is not None else {}
+    checkout = status.get("checkout")
+    describe = str(checkout.get("describe") or "") if isinstance(checkout, dict) else ""
+    if re.fullmatch(r"v[0-9][A-Za-z0-9.+-]{0,60}", describe):
+        return describe
+    number = agent_version_number(agent)
+    return f"#{number}" if number is not None else "?"
+
+
+@dataclass(frozen=True, slots=True)
+class RelayHardening:
+    """What is left to bring a relay to the defaults (see the module docstring)."""
+
+    ssh_on_22: bool    # SSH_PORT is 22 and no migration is under way
+    filter_off: bool   # RELAY_INPUT_FILTER=off (input-status «off …»)
+
+    @property
+    def needed(self) -> bool:
+        return self.ssh_on_22 or self.filter_off
+
+    @property
+    def agent_version(self) -> int:
+        """The agent «Довести» needs: ``input-filter`` (4), else ``ssh-port-set`` (3)."""
+        return AGENT_INPUT_FILTER if self.filter_off else AGENT_SSH_PORT
+
+
+def hardening_of_status(status: Mapping[str, Any], ssh_port: int) -> RelayHardening | None:
+    """What a ``status`` (or a pairing's ``hello``) answer says is left; None when it
+    tells nothing about either (no answer kept, an agent too old to say)."""
+    filt = status.get("input_status")
+    plan = status.get("ssh_migration")
+    ports = status.get("ssh_ports")
+    if not (isinstance(filt, str) and filt) and not (isinstance(plan, dict) and plan) and not isinstance(ports, list):
+        return None
+    filter_off = isinstance(filt, str) and filt.startswith("off")
+    if isinstance(plan, dict) and plan.get("ssh_port"):
+        ssh_on_22 = str(plan.get("ssh_port")) == str(HARDEN_FROM_PORT) and str(plan.get("state") or "") != "phase1"
+    else:
+        listening = [str(p) for p in ports] if isinstance(ports, list) else []
+        ssh_on_22 = ssh_port == HARDEN_FROM_PORT and listening in ([], [str(HARDEN_FROM_PORT)])
+    return RelayHardening(ssh_on_22=ssh_on_22, filter_off=filter_off)
+
+
+def hardening_of(relay: Relay) -> RelayHardening | None:
+    """:func:`hardening_of_status` of the relay's last kept status (None: no agent, an
+    uninstalled one, nothing kept)."""
+    agent = relay.agent
+    if agent is None or agent_uninstalled(agent) or not agent.last_status:
+        return None
+    return hardening_of_status(agent.last_status, agent.ssh_port)
+
+
+def _phase1_since(relay: Relay, port: int) -> int | None:
+    """The start of the relay's migration to *port* (phase 1, from its kept status)."""
+    plan = (relay.agent.last_status or {}).get("ssh_migration") if relay.agent is not None else None
+    if not isinstance(plan, dict) or str(plan.get("state") or "") != "phase1" or str(plan.get("to") or "") != str(port):
+        return None
+    since = str(plan.get("since") or "")
+    return int(since) if since.isdigit() and 0 < int(since) < 10**12 else None
+
+
+def _ssh_failed(rollback: str, error: str) -> RelayAgentError:
+    """Step 2 of «Довести» failed; *rollback* — «restored» or why not."""
+    if rollback == "restored":
+        return RelayAgentError("переезд SSH не удался, откачен", key="relay_harden_ssh_failed",
+                               params={"port": HARDEN_SSH_PORT, "error": error[:300]})
+    return RelayAgentError("переезд SSH не удался, откат тоже", key="relay_harden_ssh_failed_stuck",
+                           params={"port": HARDEN_SSH_PORT, "error": error[:300], "rollback": rollback[:300]})
+
+
+def _filter_committed(reply: AgentReply) -> bool:
+    state = reply.payload.get("input_filter")
+    return reply.ok and isinstance(state, dict) and state.get("committed") is True
+
+
+def unknown_request(reply: AgentReply) -> bool:
+    """The agent refused the request as one it does not know (an agent from before it)."""
+    return not reply.ok and reply.returncode == 2 and "not an agent command" in reply.error
 
 
 def agent_uninstalled(agent: RelayAgent) -> bool:
@@ -1230,6 +1361,9 @@ class RelayService:
                  "added_source_ips": list(added), "checks": checks.describe(), "pairing_id": pairing.id,
                  **({"via_hub": True} if via is not None else {})},
             )
+        # The pairing's hello is the relay's first status: the listeners hear it too
+        # (a relay the installer left on SSH 22 without the input filter is told now).
+        await self._tell_listeners(relay, reply.payload)
         return PairingOutcome(
             relay=relay,
             attached=target is not None,
@@ -1366,13 +1500,17 @@ class RelayService:
             logger.info("Relay %s: status after update not received", relay.name)
         return reply
 
-    async def update_progress(self, actor_user_id: int, relay_id: int) -> dict[str, Any]:
+    async def update_progress(self, actor_user_id: int, relay_id: int) -> dict[str, Any] | None:
         """``update-status``: the relay's update.json as it is now — the progress of
         a running ``update`` (its deploy's steps and tests). A light call, made next to
-        the long one; {} from an agent that does not know it."""
+        the long one. None from an agent that does not know the request (older than
+        :data:`AGENT_UPDATE_STATUS`: it refuses it as «not an agent command»), {} when
+        the answer carries nothing usable."""
         await self.users.require_superadmin(actor_user_id)
         relay = await self._require_managed(relay_id)
         reply = await self._call(relay, "update-status", timeout=30.0)
+        if unknown_request(reply):
+            return None
         update = reply.payload.get("update") if reply.ok else None
         return dict(update) if isinstance(update, Mapping) else {}
 
@@ -1446,6 +1584,145 @@ class RelayService:
             await self.refresh_catalog()
         await self.sync_hub_jump_quietly()
         return DetachReport(relay=after, uninstalled=uninstalled)
+
+    # ── «Довести»: the input filter on, then SSH off 22 (module docstring) ────
+
+    async def harden(
+        self, actor_user_id: int, relay_id: int,
+        on_progress: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> tuple[str, ...]:
+        """«Довести»: what :func:`hardening_of` says is left, step by step (keys
+        ``filter_on``, ``filter_confirm``, ``ssh_set``, ``ssh_finish`` to *on_progress*).
+        Returns what was done ("filter", "ssh"). A failed step was rolled back and raises
+        (its error says how); a step before it stays done."""
+        await self.users.require_superadmin(actor_user_id)
+        relay = await self._require_managed(relay_id)
+        hardening = hardening_of(relay)
+        if hardening is None or not hardening.needed:
+            raise InvalidOperation("relay уже в норме", key="relay_harden_nothing", params={"name": relay.name})
+        if agent_older_than(relay.agent, hardening.agent_version):
+            raise InvalidOperation(
+                "агент relay устарел для этого", key="relay_harden_agent_old",
+                params={"name": relay.name, "version": agent_release(relay.agent)},
+            )
+
+        async def step(name: str, state: str) -> None:
+            if on_progress is not None:
+                await on_progress(name, state)
+
+        done: list[str] = []
+        if hardening.filter_off:
+            await self._harden_filter(actor_user_id, relay, step)
+            done.append("filter")
+        if hardening.ssh_on_22:
+            await self._harden_ssh(actor_user_id, relay_id, step)
+            done.append("ssh")
+        return tuple(done)
+
+    async def _harden_filter(
+        self, actor_user_id: int, relay: Relay, step: Callable[[str, str], Awaitable[None]]
+    ) -> None:
+        """Step 1: ``input-filter on`` → ``input-confirm`` (a NEW ssh session) →
+        ``input-filter on`` (commits). Rolled back with ``input-filter off``."""
+        await step("filter_on", "run")
+        claimed = await self._claim(relay.id)
+        rollback = ""
+        try:
+            try:
+                reply = await self._call(claimed, "input-filter on", timeout=300.0)
+            except ServiceError:
+                await step("filter_on", "fail")
+                raise
+            if not reply.ok:
+                await step("filter_on", "fail")
+                self._require_ok(reply, claimed)  # the agent put .env back itself
+            committed = _filter_committed(reply)
+            await step("filter_on", "ok")
+            await step("filter_confirm", "run")
+            error = ""
+            if not committed:
+                try:
+                    confirm = await self._input_confirm(actor_user_id, claimed, auto=False)
+                    if confirm.ok:
+                        reply = await self._call(claimed, "input-filter on", timeout=300.0)
+                        committed = _filter_committed(reply)
+                        error = "" if committed else (reply.error or str(reply.payload.get("input_status") or ""))
+                    else:
+                        error = confirm.error
+                except ServiceError as exc:
+                    error = str(exc)
+            if not committed:
+                rollback = await self._filter_off(claimed)
+                await step("filter_confirm", "fail")
+                await self._audit(actor_user_id, "relay_input_filter_on", relay.id,
+                                  {"name": relay.name, "ok": False, "error": error[:300], "rollback": rollback})
+                raise RelayAgentError(
+                    "входной фильтр не подтверждён",
+                    key="relay_harden_filter_failed" if rollback == "restored" else "relay_harden_filter_failed_deadman",
+                    params={"name": relay.name, "error": error[:300] or "—"},
+                )
+            await step("filter_confirm", "ok")
+        finally:
+            self._busy.discard(relay.id)
+        await self._audit(actor_user_id, "relay_input_filter_on", relay.id, {"name": relay.name, "ok": True})
+        await self._status_after(actor_user_id, relay.id)
+
+    async def _filter_off(self, relay: Relay) -> str:
+        """The rollback of step 1: «restored», or why the dead-man does it."""
+        try:
+            reply = await self._call(relay, "input-filter off", timeout=300.0)
+        except ServiceError as exc:
+            logger.warning("Relay %s: input-filter off failed: %s", relay.name, exc)
+            return "deadman"
+        return "restored" if reply.ok else "deadman"
+
+    async def _harden_ssh(self, actor_user_id: int, relay_id: int, step: Callable[[str, str], Awaitable[None]]) -> None:
+        """Step 2: ``ssh-port-set port=54321`` (phase 1), then :meth:`finish_ssh_port` on
+        54321. Rolled back with ``ssh-port-set port=22`` (phase 1 cancelled)."""
+        await step("ssh_set", "run")
+        try:
+            await self.set_ssh_port(actor_user_id, relay_id, port=HARDEN_SSH_PORT)
+        except ServiceError:
+            await step("ssh_set", "fail")
+            raise
+        since = _phase1_since(await self._require(relay_id), HARDEN_SSH_PORT)
+        if since is None:
+            # The status after the set was not kept (a health call ran next to it): ask.
+            with contextlib.suppress(ServiceError):
+                await self.agent_status(actor_user_id, relay_id)
+            since = _phase1_since(await self._require(relay_id), HARDEN_SSH_PORT)
+        if since is None:
+            rollback = await self._ssh_port_back(actor_user_id, relay_id)
+            await step("ssh_set", "fail")
+            raise _ssh_failed(rollback, "no phase 1 of the migration in the relay's status")
+        await step("ssh_set", "ok")
+        await step("ssh_finish", "run")
+        try:
+            await self.finish_ssh_port(actor_user_id, relay_id, port=HARDEN_SSH_PORT, since=since)
+        except ServiceError as exc:
+            rollback = await self._ssh_port_back(actor_user_id, relay_id)
+            await step("ssh_finish", "fail")
+            raise _ssh_failed(rollback, str(exc)) from exc
+        await step("ssh_finish", "ok")
+
+    async def _ssh_port_back(self, actor_user_id: int, relay_id: int) -> str:
+        """The rollback of step 2: SSH_PORT=22 again, phase 1 cancelled (22 alone)."""
+        relay = await self._require(relay_id)
+        try:
+            claimed = await self._claim(relay_id)
+        except ServiceError as exc:
+            return f"FAILED: {exc}"[:300]
+        try:
+            reply = await self._call(claimed, f"ssh-port-set port={HARDEN_FROM_PORT}", timeout=300.0)
+        except ServiceError as exc:
+            reply = AgentReply(255, {"ok": False, "error": str(exc)})
+        finally:
+            self._busy.discard(relay_id)
+        await self._audit(actor_user_id, "relay_ssh_port_set", relay.id,
+                          {"name": relay.name, "to": HARDEN_FROM_PORT, "rollback": True, "ok": reply.ok,
+                           **({} if reply.ok else {"error": reply.error[:300]})})
+        await self._status_after(actor_user_id, relay_id)
+        return "restored" if reply.ok else f"FAILED: {reply.error}"[:300]
 
     # ── the SSH port of a relay (docs/host-state.md#the-ssh-port) ──────────────
 
@@ -1855,12 +2132,15 @@ class RelayService:
         migration). A listener that fails is logged; the answer is kept anyway."""
         recorded = await self._record_answer(relay, reply)
         if recorded:
-            for listener in self.status_listeners:
-                try:
-                    await listener(relay, reply.payload)
-                except Exception as exc:  # a listener never breaks the health loop
-                    logger.warning("Relay %s: a status listener failed: %s: %s", relay.name, type(exc).__name__, exc)
+            await self._tell_listeners(relay, reply.payload)
         return recorded
+
+    async def _tell_listeners(self, relay: Relay, payload: Mapping[str, Any]) -> None:
+        for listener in self.status_listeners:
+            try:
+                await listener(relay, payload)
+            except Exception as exc:  # a listener never breaks the health loop
+                logger.warning("Relay %s: a status listener failed: %s: %s", relay.name, type(exc).__name__, exc)
 
     async def _record_answer(self, relay: Relay, reply: AgentReply) -> bool:
         """Keep a ``status`` answer on the relay's row — only if it still describes it.
@@ -1888,7 +2168,7 @@ class RelayService:
     @staticmethod
     def _require_ok(reply: AgentReply, relay: Relay | None = None) -> AgentReply:
         if not reply.ok:
-            if relay is not None and reply.returncode == 2 and "not an agent command" in reply.error:
+            if relay is not None and unknown_request(reply):
                 # An agent from before the request existed (input-confirm, jump): update it.
                 raise RelayAgentError(
                     "агент relay устарел", key="relay_agent_outdated", params={"name": relay.name}

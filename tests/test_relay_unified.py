@@ -35,6 +35,7 @@ from test_schema_upgrade_path import _materialise
 from adapters.clock import ClockProvider
 from bot.fsm.states import AdminRelayStates, TotpStates
 from bot.handlers import admin_relays as ui
+from bot.progress import PROGRESS_EDIT_INTERVAL_SECONDS
 from bot.relays import outcome_text, pairing_text
 from bot.wizard_views import menu_keyboard
 from db.database import Database
@@ -441,18 +442,19 @@ async def test_a_long_agent_call_marks_the_relay_busy(prod: Env) -> None:
 
     issued = await prod.service.issue_attach(ADMIN, 1, target_host=TARGET)
     await prod.service.complete(ADMIN, issued.pairing.id, RU1_IP)
-    gate = asyncio.Event()
+    gate, entered = asyncio.Event(), asyncio.Event()
     original = prod.client.call
 
     async def slow(*args: Any, **kwargs: Any) -> AgentReply:
         if args[2] == "update":
+            entered.set()
             await gate.wait()
             return AgentReply(0, {"ok": True, "update": {"state": "ok"}})
         return await original(*args, **kwargs)
 
     prod.client.call = slow  # type: ignore[method-assign]
     updating = asyncio.create_task(prod.service.update_agent(ADMIN, 1))
-    await asyncio.sleep(0.05)
+    await entered.wait()  # the update runs on the relay (claimed: busy) — no sleep
     with pytest.raises(InvalidOperation) as exc:
         await prod.service.detach_agent(ADMIN, 1, uninstall=False)
     assert exc.value.key == "relay_busy"
@@ -608,6 +610,8 @@ class FakeTotp:
 
 class Msg:
     def __init__(self, text: str = "") -> None:
+        import asyncio
+
         self.message_id = 10
         self.text = text
         self.chat = SimpleNamespace(id=ADMIN, type="private")
@@ -616,6 +620,16 @@ class Msg:
         self.answers: list[Msg] = []
         self.markups: list[Any] = []
         self.body = ""
+        self.edited = asyncio.Event()  # set by every edit (the _patch fixture)
+
+    async def until_edit(self, predicate: Any) -> str:
+        """The first edit *predicate* accepts — waited for edit by edit, never by time."""
+        while True:
+            for text in self.edits:
+                if predicate(text):
+                    return text
+            self.edited.clear()
+            await self.edited.wait()
 
     async def answer(self, text: str, reply_markup: Any = None, **_: Any) -> Msg:
         reply = Msg()
@@ -652,6 +666,8 @@ def _patch(monkeypatch: pytest.MonkeyPatch) -> None:
     async def edit(message: Any, text: str, reply_markup: Any = None, **_: Any) -> bool:
         message.edits.append(text)
         message.markups.append(reply_markup)
+        if hasattr(message, "edited"):
+            message.edited.set()
         return True
 
     monkeypatch.setattr(ui, "ensure_private_callback", ok)
@@ -1005,11 +1021,12 @@ async def test_a_late_status_answer_never_erases_the_uninstall_mark(prod: Env) -
     import asyncio
 
     await _attached(prod)
-    gate = asyncio.Event()
+    gate, entered = asyncio.Event(), asyncio.Event()
     original = prod.client.call
 
     async def racing(*args: Any, **kwargs: Any) -> AgentReply:
         if args[2] == "status":
+            entered.set()
             await gate.wait()  # still running on the relay while uninstall goes through
             return AgentReply(0, {"ok": True, "agent": "1", "check": {"rc": 0}})
         return await original(*args, **kwargs)
@@ -1017,7 +1034,7 @@ async def test_a_late_status_answer_never_erases_the_uninstall_mark(prod: Env) -
     prod.client.call = racing  # type: ignore[method-assign]
     prod.client.replies["uninstall"] = AgentReply(0, {"ok": True})
     polling = asyncio.create_task(prod.service.poll_agent(await prod.relay()))
-    await asyncio.sleep(0.05)
+    await entered.wait()  # the status call is on the relay — no sleep
 
     # No key deleters are wired in this world, so with_keys=True stops at the first
     # key right after the uninstall: an interrupted delete.
@@ -1081,43 +1098,210 @@ async def test_a_successful_update_shows_the_deploys_warning(prod: Env) -> None:
     assert "✅ " + t("deploy_step_verify") in text
 
 
-async def test_update_shows_the_plan_first_then_runs_with_progress(prod: Env, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D: the plan (every step ⚪, «Подтвердить»), then the run; `update-status` next to
-    the long call moves the steps and counts the tests."""
-    import asyncio
+class _UpdateOnRelay:
+    """The relay's side of a long ``update``: it starts, waits for the test, answers.
+    ``update-status`` answers the progress below, or waits on ``poll_gate`` when set."""
 
+    def __init__(self, world: Env, *, final: AgentReply | None = None) -> None:
+        import asyncio
+
+        self.started, self.finish = asyncio.Event(), asyncio.Event()
+        self.poll_entered = asyncio.Event()
+        self.poll_gate: asyncio.Event | None = None
+        self.final = final or AgentReply(0, {"ok": True, "update": {"state": "succeeded", "message": "updated to v9.1.0"}})
+        self.original = world.client.call
+        world.client.call = self.call  # type: ignore[method-assign]
+
+    async def call(self, *args: Any, **kwargs: Any) -> AgentReply:
+        if args[2] == "update":
+            self.started.set()
+            await self.finish.wait()
+            return self.final
+        if args[2] == "update-status" and self.poll_gate is not None:
+            self.poll_entered.set()
+            await self.poll_gate.wait()
+        return await self.original(*args, **kwargs)
+
+
+PROGRESS = {"step": "tests", "steps": {"preflight": "ok", "fetch": "ok", "tests": "run"},
+            "tests": {"done": 2802, "total": 5604}}
+
+
+async def _agent_v(prod: Env, version: str, describe: str = "") -> None:
+    """Pair ru1 with an agent that says AGENT_VERSION=*version* in its status."""
     issued = await prod.service.issue_attach(ADMIN, 1, target_host=TARGET)
     await prod.service.complete(ADMIN, issued.pairing.id, RU1_IP)
+    status: dict[str, Any] = {"ok": True, "agent": version, "check": {"rc": 0}}
+    if describe:
+        status["checkout"] = {"commit": SHA, "describe": describe}
+    prod.client.replies["status"] = AgentReply(0, status)
+    await prod.service.agent_status(ADMIN, 1)
+
+
+async def test_update_shows_the_plan_first_then_runs_with_progress(prod: Env, fake_timer: Any) -> None:
+    """D: the plan (every step ⚪, «Подтвердить»), then the run; `update-status` next to
+    the long call moves the steps and counts the tests. Explicit steps on the fake clock
+    (tests/fake_timer.py): the relay's update waits for the test, time moves only when
+    the test moves it — the outcome cannot depend on how loaded the host is."""
+    import asyncio
+
+    await _agent_v(prod, "3")
     plan = Callback("admin:relay:1:ag:up")
     await ui.relay_agent_update(plan, fsm(), _services(prod))  # type: ignore[arg-type]
     assert plan.message.edits[-1].count("⚪") == 8
     assert "admin:relay:1:ag:up:ok" in _buttons(plan.message.markups[-1])
     assert not [c for c in prod.client.calls if c["request"] == "update"], "nothing ran before the confirmation"
 
-    monkeypatch.setattr(ui, "UPDATE_POLL_SECONDS", 0.01)
-    progress = {"step": "tests", "steps": {"preflight": "ok", "fetch": "ok", "tests": "run"},
-                "tests": {"done": 2802, "total": 5604}}
-    prod.client.replies["update-status"] = AgentReply(0, {"ok": True, "update": {"state": "running", "progress": progress}})
-    seen: list[str] = []
-    original = prod.client.call
-
-    async def slow(*args: Any, **kwargs: Any) -> AgentReply:
-        if args[2] == "update":
-            for _ in range(50):
-                await asyncio.sleep(0.01)
-                if any(c["request"] == "update-status" for c in prod.client.calls):
-                    break
-            await asyncio.sleep(0.05)
-            seen.append(run.message.edits[-1] if run.message.edits else "")
-            return AgentReply(0, {"ok": True, "update": {"state": "succeeded", "message": "updated to v9.1.0"}})
-        return await original(*args, **kwargs)
-
-    prod.client.call = slow  # type: ignore[method-assign]
+    prod.client.replies["update-status"] = AgentReply(0, {"ok": True, "update": {"state": "running", "progress": PROGRESS}})
+    relay = _UpdateOnRelay(prod)
     run = Callback("admin:relay:1:ag:up:ok")
-    await ui.relay_agent_update_run(run, fsm(), _services(prod))  # type: ignore[arg-type]
-    assert any(c["request"] == "update-status" for c in prod.client.calls)
+    task = asyncio.create_task(ui.relay_agent_update_run(run, fsm(), _services(prod)))  # type: ignore[arg-type]
+    await relay.started.wait()
+    await fake_timer.parked(2)  # the animation and the poller wait on the clock
+    assert run.message.edits[-1].startswith(t("relay_update_title", name="ru1") + "\n\n🔄 " + t("deploy_step_preflight"))
+    assert not [c for c in prod.client.calls if c["request"] == "update-status"], "no poll before its interval"
+
+    # The animation ticks every PROGRESS_EDIT_INTERVAL_SECONDS; the first poll comes at
+    # UPDATE_POLL_SECONDS (10 s): move to just before it, then onto it.
+    interval = PROGRESS_EDIT_INTERVAL_SECONDS
+    await fake_timer.advance(ui.UPDATE_POLL_SECONDS - 1)
+    assert not [c for c in prod.client.calls if c["request"] == "update-status"]
+    assert await fake_timer.advance(1) == 1, "only the poller wakes at 10 s"
+    assert [c["request"] for c in prod.client.calls].count("update-status") == 1
+    before = len(run.message.edits)
+    await fake_timer.advance(interval)  # the next animation tick shows the polled progress
+    assert len(run.message.edits) == before + 1
+    frame = run.message.edits[-1]
+    assert "✅ " + t("deploy_step_fetch") in frame and "🔄 " + t("deploy_step_tests") + " — 2802/5604" in frame
+    assert frame.rstrip().endswith("50%"), "a measurable step: its percentage"
+
+    relay.finish.set()
+    await task
     final = run.message.edits[-1]
-    assert "updated to v9.1.0" in final and final.count("✅") >= 8
+    assert "updated to v9.1.0" in final and final.count("✅") >= 8 and "🔄" not in final
+    assert fake_timer.waiting == 0, "the animation and the poller are gone"
+
+
+async def test_a_poll_answered_after_the_update_never_reopens_the_steps(prod: Env, fake_timer: Any) -> None:
+    """THE flake of deploy.sh's Phase 1 on he2 (1 vCPU): an ``update-status`` still in
+    flight when the update finished answered afterwards, and «🔄 тесты — 2802/5604» was
+    drawn over the result's ✅. Forced here deterministically: the poll is held on the
+    relay until the result is on the screen, then answers «running»."""
+    import asyncio
+
+    await _agent_v(prod, "3")
+    prod.client.replies["update-status"] = AgentReply(0, {"ok": True, "update": {"state": "running", "progress": PROGRESS}})
+    relay = _UpdateOnRelay(prod)
+    relay.poll_gate = asyncio.Event()
+    run = Callback("admin:relay:1:ag:up:ok")
+    task = asyncio.create_task(ui.relay_agent_update_run(run, fsm(), _services(prod)))  # type: ignore[arg-type]
+    await relay.started.wait()
+    await fake_timer.parked(2)
+    await fake_timer.advance(ui.UPDATE_POLL_SECONDS, settle=False)  # the poll starts…
+    await relay.poll_entered.wait()  # …and hangs on the relay
+    relay.finish.set()  # the update ends first
+    await run.message.until_edit(lambda text: "updated to v9.1.0" in text)  # the result is drawn
+    relay.poll_gate.set()  # now the late «running» answer arrives
+    await task
+    final = [text for text in run.message.edits if "updated to v9.1.0" in text]
+    assert len(final) == 1 and final[0] == run.message.edits[-1], "nothing was drawn after the result"
+    assert "🔄" not in final[0] and final[0].count("✅") >= 8
+
+
+async def test_an_agent_without_update_status_shows_one_line_not_a_frozen_list(prod: Env, fake_timer: Any) -> None:
+    """he2 on agent v3.2.0 (AGENT_VERSION 2): no `update-status`, so no list of ⚪ steps
+    that cannot move — one line «агент v3.2.0 — прогресс по шагам появится после этого
+    обновления» with the activity line; no poll is sent to it at all."""
+    import asyncio
+
+    await _agent_v(prod, "2", describe="v3.2.0")
+    line = t("relay_update_legacy", version="v3.2.0")
+    plan = Callback("admin:relay:1:ag:up")
+    await ui.relay_agent_update(plan, fsm(), _services(prod))  # type: ignore[arg-type]
+    assert line in plan.message.edits[-1] and "⚪ " + t("deploy_step_tests") not in plan.message.edits[-1]
+
+    relay = _UpdateOnRelay(prod)
+    run = Callback("admin:relay:1:ag:up:ok")
+    task = asyncio.create_task(ui.relay_agent_update_run(run, fsm(), _services(prod)))  # type: ignore[arg-type]
+    await relay.started.wait()
+    await fake_timer.parked(1)  # the animation only: no poller for this agent
+    await fake_timer.advance(PROGRESS_EDIT_INTERVAL_SECONDS)
+    frame = run.message.edits[-1]
+    assert "🔄 " + line in frame and frame.rstrip().endswith("**")
+    for step in ("preflight", "fetch", "tests", "checks"):
+        assert t(f"deploy_step_{step}") not in frame, "no frozen list of steps"
+    await fake_timer.advance(ui.UPDATE_POLL_SECONDS)
+    assert not [c for c in prod.client.calls if c["request"] == "update-status"]
+    relay.finish.set()
+    await task
+    assert "updated to v9.1.0" in run.message.edits[-1]
+
+
+async def test_an_unknown_agent_that_refuses_update_status_turns_into_the_one_line(prod: Env, fake_timer: Any) -> None:
+    """The version is not known (no status kept): the first poll's «not an agent
+    command» turns the list into the one line, and polling stops."""
+    import asyncio
+
+    issued = await prod.service.issue_attach(ADMIN, 1, target_host=TARGET)
+    await prod.service.complete(ADMIN, issued.pairing.id, RU1_IP)
+    await prod.repo.record_agent_status(1, {}, now="t", agent_version="")
+    prod.client.replies["update-status"] = AgentReply(2, {"ok": False, "error": "refused: not an agent command"})
+    relay = _UpdateOnRelay(prod)
+    run = Callback("admin:relay:1:ag:up:ok")
+    task = asyncio.create_task(ui.relay_agent_update_run(run, fsm(), _services(prod)))  # type: ignore[arg-type]
+    await relay.started.wait()
+    await fake_timer.parked(2)
+    assert "🔄 " + t("deploy_step_preflight") in run.message.edits[-1]
+    await fake_timer.advance(ui.UPDATE_POLL_SECONDS - 1)  # the animation's tick only
+    assert await fake_timer.advance(1, settle=False) == 1  # the poll: refused, the poller ends
+    line = t("relay_update_legacy", version="?")
+    frame = await run.message.until_edit(lambda text: line in text)
+    assert t("deploy_step_preflight") not in frame, "the list is gone, the one line is shown at once"
+    await fake_timer.advance(ui.UPDATE_POLL_SECONDS * 3)
+    assert [c["request"] for c in prod.client.calls].count("update-status") == 1, "asked once"
+    relay.finish.set()
+    await task
+
+
+async def test_an_old_agents_pytest_failure_is_marked_on_the_tests(prod: Env) -> None:
+    """he2: the old agent answers only its message — «Phase 1 gate: pytest failed on tag
+    v3.2.1» — and the bot put ❌ on «проверки перед деплоем» (fail_running). The step now
+    comes from the text: ❌ on «тесты», the ones before ✅, the rest ⚪."""
+    await _agent_v(prod, "2", describe="v3.2.0")
+    prod.client.replies["update"] = AgentReply(4, {
+        "ok": False,
+        "error": "the deploy of v3.2.1 stopped before any change (exit 1): Phase 1 gate: pytest failed on tag "
+                 "v3.2.1 (above) — nothing was changed",
+    })
+    cb = Callback("admin:relay:1:ag:up:ok")
+    await ui.relay_agent_update_run(cb, fsm(), _services(prod))  # type: ignore[arg-type]
+    text = cb.message.edits[-1]
+    assert "❌ " + t("deploy_step_tests") in text
+    assert "✅ " + t("deploy_step_preflight") in text and "✅ " + t("deploy_step_fetch") in text
+    assert "⚪ " + t("deploy_step_checks") in text and "❌ " + t("deploy_step_preflight") not in text
+    assert t("deploy_reason_tests") in text and t("deploy_fail_step", step=t("deploy_step_tests")) in text
+
+
+async def test_a_result_marker_in_the_text_names_the_step(prod: Env) -> None:
+    await _agent_v(prod, "2")
+    prod.client.replies["update"] = AgentReply(4, {
+        "ok": False, "error": "deploy failed\n[deploy:result failed step=checks reason=checks]",
+    })
+    cb = Callback("admin:relay:1:ag:up:ok")
+    await ui.relay_agent_update_run(cb, fsm(), _services(prod))  # type: ignore[arg-type]
+    assert "❌ " + t("deploy_step_checks") in cb.message.edits[-1]
+
+
+async def test_a_failure_nobody_can_place_marks_no_step(prod: Env) -> None:
+    """Neither a marker nor a text that tells the step, and no progress was reported:
+    no ❌ on the first step, no list — «шаг неизвестен»."""
+    await _agent_v(prod, "2")
+    prod.client.replies["update"] = AgentReply(4, {"ok": False, "error": "something odd happened"})
+    cb = Callback("admin:relay:1:ag:up:ok")
+    await ui.relay_agent_update_run(cb, fsm(), _services(prod))  # type: ignore[arg-type]
+    text = cb.message.edits[-1]
+    assert "❌ " + t("deploy_step_preflight") not in text and t("deploy_step_preflight") not in text
+    assert t("deploy_fail_step_unknown") in text
 
 
 # ── «🔑 SSH-порт relay» and the buttons of a relay's migration (B) ─────────────

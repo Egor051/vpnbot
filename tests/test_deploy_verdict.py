@@ -32,9 +32,11 @@ from i18n import t
 from services.deploy_result import (
     DEPLOY_REASONS,
     DEPLOY_STEPS,
+    REASON_STEPS,
     DeployWarning,
     deploy_failure_from,
     deploy_warnings_from,
+    reason_from_text,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -200,6 +202,86 @@ def test_the_failure_block_escapes_and_names_cause_step_lines_and_log() -> None:
     assert "FAIL: &lt;TCP&gt; &amp; co" in text and "<pre>" in text and "/root/deploy-1.log" in text
     assert "⚠️" in deploy_warnings_text((DeployWarning("upstream_preexisting", "a<b"),))
     assert "a&lt;b" in deploy_warnings_text((DeployWarning("unknown_code", "a<b"),))
+
+
+# --------------------------------------------------------------------------- #
+# 3b. The step of a failure that names none (an agent older than the markers)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("message", "reason", "step"),
+    [
+        # he2, agent v3.2.0, bot v3.2.1: only this line reached the bot.
+        ("the deploy of v3.2.1 stopped before any change (exit 1): Phase 1 gate: pytest failed on tag v3.2.1 "
+         "(above) — nothing was changed", "tests", "tests"),
+        ("… stopped before any change (exit 1): Phase 1 gate: ruff check failed on tag v3.2.1 (above)", "tests", "tests"),
+        ("the deploy of v3.2.1 failed and rolled back (exit 1): vpn-relay-apply check failed after the restart "
+         "(exit 13: the upstream does not answer)", "upstream", "verify"),
+        ("the deploy of v3.2.1 failed and rolled back (exit 1): unit vpn-relay.service did not start", "rolled_back",
+         "verify"),
+        ("… (exit 1): another deploy already holds /run/vpn-bot-deploy.lock", "busy", "preflight"),
+        ("… (exit 1): relay: git fetch failed (above) — nothing was changed", "fetch", "fetch"),
+        ("… (exit 1): python3 -m venv /var/lib/x failed (above) — the test venv cannot be built", "no_venv", "tests"),
+        ("the deploy of v3.2.1 did not finish within 2580s (it may still run)", "timeout", ""),
+        ("something odd", "failed", ""),
+        # The marker wins over the text, wherever it is.
+        ("rolled back\n[deploy:result failed step=install reason=rolled_back]", "rolled_back", "install"),
+    ],
+)
+def test_an_old_agents_text_tells_the_reason_and_the_step(message: str, reason: str, step: str) -> None:
+    failure = deploy_failure_from(None, message=message)
+    assert (failure.reason, failure.step) == (reason, step)
+
+
+def test_a_known_reason_without_a_step_takes_the_step_from_the_table() -> None:
+    assert deploy_failure_from({"reason": "tests"}).step == "tests"
+    assert deploy_failure_from({"reason": "failed"}).step == "", "no guess for a reason that names no step"
+    assert deploy_failure_from({"reason": "checks", "step": "fetch"}).step == "fetch", "the caller's step wins"
+
+
+def test_an_unknown_step_says_so() -> None:
+    text = deploy_failure_text(deploy_failure_from(None, message="something odd"))
+    assert t("deploy_fail_step_unknown") in text and t("deploy_reason_failed") in text
+
+
+def _fail_reason(tmp_path: Path, step: str, *, armed: bool) -> str:
+    proc = _deploy(tmp_path, f"DEPLOY_STEP={step}\n{'PHASE=armed' if armed else ''}\ndeploy_fail_reason\n")
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+@pytest.mark.parametrize("armed", [False, True])
+def test_the_step_table_is_the_inverse_of_deploy_fail_reason(tmp_path: Path, armed: bool) -> None:
+    """ONE table: whatever reason deploy.sh's deploy_fail_reason gives a step, the bot's
+    REASON_STEPS sends that reason back to a step for which deploy.sh gives it again."""
+    for step in DEPLOY_STEPS:
+        reason = _fail_reason(tmp_path, step, armed=armed)
+        assert reason in DEPLOY_REASONS
+        if reason in REASON_STEPS:
+            assert _fail_reason(tmp_path, REASON_STEPS[reason], armed=armed) == reason, (step, reason)
+    assert set(REASON_STEPS) == set(_bash_array("DEPLOY_FAIL_REASONS")) - {"failed"}, (
+        "every reason deploy.sh names a step for has one here"
+    )
+    assert set(REASON_STEPS.values()) <= set(DEPLOY_STEPS)
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["[deploy][FAIL] another deploy already holds /run/vpn-bot-deploy.lock"],
+        ["The virtual environment was not created successfully because ensurepip is not",
+         "    apt install python3.12-venv"],
+        ["[deploy][WARN] vpn-relay-apply check failed after the restart (exit 13: the upstream does not answer)",
+         "[deploy][WARN] ROLLBACK (relay): restoring PREV_SHA=abc", "===== ROLLBACK REPORT (relay) ====="],
+        ["[deploy][WARN] vpn-relay-apply check failed after the restart (exit 11: differs)",
+         "[deploy][WARN] ROLLBACK (relay): restoring PREV_SHA=abc", "===== ROLLBACK REPORT (relay) ====="],
+        ["FAILED tests/test_a.py::test_b - boom", "==== 1 failed, 2 passed in 1.00s ===="],
+        ["[deploy][FAIL] relay: git fetch failed (above) — nothing was changed"],
+        ["[deploy][FAIL] unit drift detected (set ALLOW_UNIT_DRIFT=1 ...)"],
+    ],
+)
+def test_the_bots_text_reading_agrees_with_the_agents(lines: list[str]) -> None:
+    """The bot reads a text the way the DEPLOY VERDICT block's _dv_guess does."""
+    assert reason_from_text("\n".join(lines)) == agent.deploy_verdict("\n".join(lines), 1)["reason"]
 
 
 # --------------------------------------------------------------------------- #

@@ -757,10 +757,20 @@ deploy). The relay's agent reports the migration in every `status` (`ssh_migrati
   when `vpn-relay-apply apply` fails (the old input filter would drop the new port) it puts the ssh
   files and the listeners back and records nothing (exit 4). A failed `begin` puts the old `.env`
   back. The old port closes later, on «Подтвердить».
+* **A relay the installer left on 22.** `install.sh` writes a new relay `SSH_PORT=<the port sshd
+  listens on>` (22 on a fresh VPS) and `RELAY_INPUT_FILTER=off`, so the first deploy cannot cut the
+  bot off; no deploy moves such a relay, because 22 IS its `SSH_PORT`. The bot asks the superadmins
+  once per pairing — «relay X: SSH на 22, входной фильтр выключен — довести до нормы?» with
+  «🛡 Довести до нормы» / «Позже» — and «Довести» runs the input filter first, then this same
+  migration to 54321: `ssh-port-set port=54321`, then «Подтвердить» on 54321 by itself; 54321 not
+  answering → `ssh-port-set port=22` cancels phase 1. The relay's screen here shows the warning and
+  the button while it is not done (also after «Позже»); the details, the order and the rollbacks:
+  [relay.md](relay.md#bringing-a-relay-to-the-defaults).
 
 Agent requests (`services/relay_ssh.py` `_REQUEST` and the agent's WHITELIST, run on the same
 requests by `tests/test_relay_jump.py`): `ssh-port-finish port=<1..65535> since=<epoch>`,
-`ssh-port-keep since=<epoch>`, `ssh-port-resume since=<epoch>`, `ssh-port-set port=<1..65535>`. The
+`ssh-port-keep since=<epoch>`, `ssh-port-resume since=<epoch>`, `ssh-port-set port=<1..65535>`, and
+for the input filter of «Довести» `input-filter on|off` (agent 4). The
 relay's helper also refuses a button of another migration (`since`), and the agent a forwarded port.
 
 ### The post-check of each phase

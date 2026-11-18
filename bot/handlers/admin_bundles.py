@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -49,7 +48,7 @@ from bot.keyboards.admin_bundles import (
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
 from bot.progress import PROGRESS_EDIT_INTERVAL_SECONDS as PROGRESS_INTERVAL
-from bot.progress import ProgressMessage, steps_of
+from bot.progress import ProgressMessage, Timer, current_timer, steps_of
 from i18n import t
 from models.enums import KeyBundleKind
 from services.key_bundles import ReconcileOutcome, ReconcileResult, ReconcileSummary
@@ -224,11 +223,11 @@ class ProgressReporter:
         title: str,
         *,
         interval: float = PROGRESS_EDIT_INTERVAL_SECONDS,
-        clock: Callable[[], float] = time.monotonic,
+        timer: Timer | None = None,
     ) -> None:
         self.view = ProgressMessage(
             message, f"<b>{h(title)}</b>",
-            steps_of(reconcile_steps(), plan="ok"), interval=interval, clock=clock,
+            steps_of(reconcile_steps(), plan="ok"), interval=interval, timer=timer or current_timer(),
         )
 
     @property
@@ -268,7 +267,7 @@ async def run_reconcile(
     actor_user_id: int,
     mode: str,
     *,
-    clock: Callable[[], float] = time.monotonic,
+    timer: Timer | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """The bulk run: progress while it goes, the report when it is done.
@@ -277,7 +276,7 @@ async def run_reconcile(
     «exception was never retrieved» log line; the admin gets the error instead.
     """
     title = _mode_title(mode)
-    progress = ProgressReporter(message, title, clock=clock)
+    progress = ProgressReporter(message, title, timer=timer)
     try:
         await progress.start()
         summary = await progress.view.run(services.key_bundles.reconcile_all(

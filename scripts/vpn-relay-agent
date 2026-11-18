@@ -25,6 +25,8 @@ everything else is refused with exit 2 before anything is read or changed:
     input-confirm                         run `vpn-relay-apply input-confirm` from THIS
                                           ssh session (a new one: the bot's own proof
                                           that the input filter lets ssh in)
+    input-filter on|off                   RELAY_INPUT_FILTER in .env, through a
+                                          confirmation (below)
     jump key=<ed25519 blob> open=<host>:<port>[,<host>:<port>...]
                                           a hub: write the bot's ONE jump line (below)
     jump-off                              a hub: remove that line
@@ -85,6 +87,21 @@ among its ancestors — the check «the session began after the filter was appli
 the proof. It does not take the agent's lock: the filter waits for its confirmation
 exactly while `update` (the deploy that applied it) holds that lock.
 
+`input-filter on` (docs/relay.md «Входной фильтр relay») turns the filter on WITHOUT a
+moment where the relay's .env says on and the filter is unproven. It applies from a
+STAGED copy of .env with RELAY_INPUT_FILTER=on (/etc/vpn-relay/input-filter.env:
+`RELAY_ENV=<stage> vpn-relay-apply apply`); the live .env is not touched yet. A TCP set
+not confirmed before arms the helper's dead-man (5 minutes) and main's probe may confirm
+it in that very apply. Confirmed (`input-status` OK / CONFIRMED) → .env gets
+RELAY_INPUT_FILTER=on and the stage goes ("committed"). Still PENDING → the answer says
+so; the bot runs `input-confirm` from a NEW ssh session (through the hub for a relay
+behind it) and asks `input-filter on` again, which then finds the set confirmed and
+commits. No confirmation → the dead-man removes the table and .env never said on: the
+relay is exactly as it was. A failed apply → the live .env is applied again, refused.
+`input-filter off`: RELAY_INPUT_FILTER=off in .env and apply (the table goes, a waiting
+dead-man is disarmed) — the bot's rollback, and the setting; a failed apply puts the old
+.env back and applies it.
+
 `update` and `uninstall` run in a transient systemd unit (systemd-run --wait), so a
 dropped SSH connection cannot cut them in half. Their bodies are the internal entry
 points `--internal-update` / `--internal-uninstall`, which only root can start and
@@ -129,9 +146,9 @@ from typing import Any
 
 # 2: input-confirm, jump, jump-off; input_status and jump in the facts.
 # 3: ssh-port-finish / -keep / -resume / -set; ssh_migration in the facts; update-status
-# and update.json's `progress`. The protocol
-# (what `hello` answers) is unchanged.
-AGENT_VERSION = "3"
+# and update.json's `progress`.
+# 4: input-filter on|off. The protocol (what `hello` answers) is unchanged.
+AGENT_VERSION = "4"
 PROTOCOL = 1
 # A `jump` list is the longest request (up to 32 host:port entries).
 MAX_REQUEST = 4096
@@ -158,6 +175,8 @@ INSTALL_FILE = P("/etc/vpn-relay/install.json")
 UPSTREAM_STATE = P("/etc/vpn-relay/upstream.resolved")
 VAR_DIR = P("/var/lib/vpn-relay")
 UPDATE_FILE = P("/var/lib/vpn-relay/update.json")
+# `input-filter on`: .env with RELAY_INPUT_FILTER=on, applied before it is committed.
+INPUT_STAGE = P("/etc/vpn-relay/input-filter.env")
 LOCK_FILE = P("/run/vpn-relay-agent.lock")
 # authorized_keys has its own lock: a hub's `update` holds LOCK_FILE for minutes and the
 # jump list must still follow the relays behind it.
@@ -217,6 +236,7 @@ WHITELIST: dict[str, re.Pattern[str]] = {
     "update-status": re.compile(r"update-status"),
     "uninstall": re.compile(r"uninstall"),
     "input-confirm": re.compile(r"input-confirm"),
+    "input-filter": re.compile(r"input-filter (?P<state>on|off)"),
     "jump": re.compile(
         rf"jump key=(?P<key>{_ED25519_BLOB}) open=(?P<open>{_OPEN}(?:,{_OPEN}){{0,{MAX_JUMP_OPEN - 1}}})"
     ),
@@ -637,10 +657,11 @@ def egress(target: str | None) -> dict[str, str]:
     return {"src": src.group(1) if src else "", "dev": dev.group(1) if dev else ""}
 
 
-def input_status() -> str:
+def input_status(env_file: Path | None = None) -> str:
     """`vpn-relay-apply input-status` — one line (off | OK … | PENDING CONFIRM … — why |
-    ABSENT …), "" when it could not tell."""
-    out = run([APPLY_HELPER, "input-status"], timeout=20)
+    ABSENT …), "" when it could not tell. *env_file*: read the knob from it (a stage)."""
+    out = run([APPLY_HELPER, "input-status"], timeout=20,
+              env={"RELAY_ENV": str(env_file)} if env_file is not None else None)
     lines = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
     return lines[-1][:600] if out.returncode == 0 and lines else ""
 
@@ -813,6 +834,52 @@ def cmd_apply(args: dict[str, str]) -> dict[str, Any]:
                 f"({restored}): {tail(failed.stdout + failed.stderr)}"
             )
         return {"applied": {"target": target, "tcp": tcp, "udp": udp}, **facts(with_check=False)}
+
+
+def _input_confirmed(status: str) -> bool:
+    """An `input-status` line of a live filter whose TCP set is confirmed."""
+    return status.startswith(("OK", "CONFIRMED"))
+
+
+def cmd_input_filter(args: dict[str, str]) -> dict[str, Any]:
+    """`input-filter on|off` — see the module docstring («`input-filter on`»)."""
+    state = args["state"]
+    require_paired()
+    with exclusive():
+        before = read_env()
+        if state == "off":
+            with contextlib.suppress(FileNotFoundError):
+                INPUT_STAGE.unlink()
+            write_atomic(ENV_FILE, env_with(before, {"RELAY_INPUT_FILTER": "off"}))
+            done = run([APPLY_HELPER, "apply"], timeout=180)
+            if done.returncode != 0:
+                write_atomic(ENV_FILE, before)
+                back = run([APPLY_HELPER, "apply"], timeout=180)
+                restored = "restored" if back.returncode == 0 else f"RESTORE FAILED, rc {back.returncode}"
+                raise Failed(f"vpn-relay-apply apply exit {done.returncode} with RELAY_INPUT_FILTER=off — .env put "
+                             f"back ({restored}): {tail(done.stdout + done.stderr)}")
+            return {"input_filter": {"state": "off", "committed": True}, "input_status": input_status()}
+        staged = env_with(before, {"RELAY_INPUT_FILTER": "on"})
+        write_atomic(INPUT_STAGE, staged)
+        done = run([APPLY_HELPER, "apply"], timeout=180, env={"RELAY_ENV": str(INPUT_STAGE)})
+        lines = [ln for ln in (done.stdout + done.stderr).splitlines() if ln.strip()][-12:]
+        if done.returncode != 0:
+            with contextlib.suppress(FileNotFoundError):
+                INPUT_STAGE.unlink()
+            # nft applies in one transaction, but a dead-man may be armed: the live .env
+            # (the filter as it was) is applied again, which disarms it.
+            back = run([APPLY_HELPER, "apply"], timeout=180)
+            restored = "restored" if back.returncode == 0 else f"RESTORE FAILED, rc {back.returncode}"
+            raise Failed(f"vpn-relay-apply apply exit {done.returncode} with RELAY_INPUT_FILTER=on — the live .env "
+                         f"applied again ({restored}): {tail(done.stdout + done.stderr)}",
+                         extra={"input_filter": {"state": "off", "committed": False, "lines": lines}})
+        status = input_status(INPUT_STAGE)
+        committed = _input_confirmed(status)
+        if committed:
+            write_atomic(ENV_FILE, staged)
+            with contextlib.suppress(FileNotFoundError):
+                INPUT_STAGE.unlink()
+        return {"input_filter": {"state": "on", "committed": committed, "lines": lines}, "input_status": status}
 
 
 def _transient(unit: str, internal: str, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -1096,6 +1163,7 @@ COMMANDS = {
     "update-status": cmd_update_status,
     "uninstall": cmd_uninstall,
     "input-confirm": cmd_input_confirm,
+    "input-filter": cmd_input_filter,
     "jump": cmd_jump,
     "jump-off": cmd_jump_off,
     "ssh-port-finish": cmd_ssh_port_finish,

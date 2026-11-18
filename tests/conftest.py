@@ -434,6 +434,25 @@ def captured_cli_output() -> Callable[[], contextlib.AbstractContextManager[io.S
 
 
 @pytest.fixture(autouse=True)
+def fake_timer(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Every progress message of every test runs on a fake clock (tests/fake_timer.py).
+
+    A progress view's edit throttle, its animation tick and the pollers next to an
+    operation (a relay's ``update-status``) wait through ``bot.progress.TIMER``; here
+    that timer only moves when a test calls ``fake_timer.advance(...)``. Without it a
+    test's outcome depended on how many real milliseconds a step took — on deploy.sh's
+    Phase 1 gate (one vCPU, the whole suite) a poll answered after the update had
+    finished and the final card still showed «🔄 тесты».
+    """
+    from bot import progress
+    from fake_timer import FakeTimer
+
+    timer = FakeTimer()
+    monkeypatch.setattr(progress, "TIMER", timer)
+    return timer
+
+
+@pytest.fixture(autouse=True)
 def _isolate_i18n_locale() -> Generator[None, None, None]:
     """Restore global i18n locale state after every test.
 
