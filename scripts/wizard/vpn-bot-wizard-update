@@ -73,8 +73,120 @@ MAX_COMMITS = 30
 DEPLOY_OK = "===== DEPLOY OK ====="
 ROLLBACK_REPORT = "===== ROLLBACK REPORT ====="
 PHASE1_REPORT = "===== PHASE 1 REPORT"
+# deploy_verdict of the apply step, for verify/rollback (they run as later steps).
+VERDICT_FILE = "deploy-verdict.json"
 NOTHING_TO_DEPLOY = "nothing to deploy"
 _SCHEMA_RE = re.compile(r"^CURRENT_SCHEMA_VERSION\s*=\s*(\d+)", re.MULTILINE)
+
+
+# --------------------------------------------------------------------------- #
+# DEPLOY VERDICT — one rule, carried VERBATIM by scripts/vpn-relay-agent (`update`)
+# and scripts/wizard/vpn-bot-wizard-update (the main server's «Обновить бота»);
+# tests/test_deploy_verdict.py pins the two blocks byte-identical, the reasons
+# against deploy.sh's DEPLOY_FAIL_REASONS and the bot's i18n.
+# --------------------------------------------------------------------------- #
+# deploy.sh's reason=<class> (its DEPLOY_FAIL_REASONS), plus the waiter's own:
+# "timeout" — the deploy did not finish while the caller waited for it.
+DEPLOY_REASONS = (
+    "busy", "fetch", "preflight", "no_venv", "tests", "checks", "upstream", "rolled_back", "failed", "timeout",
+)
+_DV_RESULT = re.compile(
+    r"\[deploy:result (?:ok|noop|failed step=(?P<step>[a-z_]{1,32}) reason=(?P<reason>[a-z_]{1,32}))\]"
+)
+_DV_WARN = re.compile(r"^\[deploy:warn (?P<code>[a-z_]{1,48})\] ?(?P<text>.*)$", re.MULTILINE)
+_DV_LOG = re.compile(r"^redeploy: launching \S+ \(log: (?P<log>/\S+)\)$", re.MULTILINE)
+_DV_PYTEST_SUMMARY = re.compile(r"^=+ .*\b[0-9]+ (?:failed|errors?)\b.* in [0-9.]+s.*=+$")
+_DV_PYTEST_NODE = re.compile(r"^(?:FAILED|ERROR) tests/")
+DV_EXCERPT_LINES = 8
+DV_EXCERPT_CHARS = 300
+
+
+def _dv_guess(lines: list[str], rc: int) -> str:
+    """The reason of a deploy.sh that printed no result line (one that predates the
+    markers), read from its text the way an operator reads it."""
+    text = "\n".join(lines)
+    if rc == 124:
+        return "timeout"
+    if "another deploy already holds" in text:
+        return "busy"
+    if "ensurepip is not available" in text or re.search(r"\bpython3\.[0-9]+-venv\b", text):
+        return "no_venv"
+    if "===== ROLLBACK REPORT" in text:
+        if re.search(r"vpn-relay-apply check failed after the restart \(exit 1[34]\b", text):
+            return "upstream"
+        return "rolled_back"
+    if any(_DV_PYTEST_SUMMARY.match(ln) or _DV_PYTEST_NODE.match(ln) for ln in lines):
+        return "tests"
+    fails = [ln for ln in lines if "[deploy][FAIL] " in ln]
+    if fails:
+        return "fetch" if "git fetch" in fails[-1] else "checks"
+    return "failed"
+
+
+def _dv_excerpt(lines: list[str]) -> list[str]:
+    """The lines an operator looks at first: the rollback's reason, deploy.sh's FAIL
+    lines, the relay check's FAIL lines, the failed tests and pytest's summary, the
+    ensurepip hint — the last DV_EXCERPT_LINES of them, each capped."""
+    picked: list[str] = []
+    for i, line in enumerate(lines):
+        rollback_reason = (
+            "[deploy][WARN] " in line and i + 1 < len(lines) and "[deploy][WARN] ROLLBACK" in lines[i + 1]
+        )
+        if (
+            rollback_reason
+            or "[deploy][FAIL] " in line
+            or "FAIL: " in line
+            or _DV_PYTEST_NODE.match(line)
+            or _DV_PYTEST_SUMMARY.match(line)
+            or "ensurepip is not available" in line
+            or re.search(r"\bapt install python3\.[0-9]+-venv\b", line)
+        ):
+            text = line.strip()[:DV_EXCERPT_CHARS]
+            if text not in picked:
+                picked.append(text)
+    return picked[-DV_EXCERPT_LINES:]
+
+
+def deploy_verdict(output: str, rc: int) -> dict[str, Any]:
+    """Why a deploy (redeploy.sh -> deploy.sh) ended as it did, for the bot.
+
+    ``{"reason", "step", "excerpt", "warnings", "log"}``: reason is one of
+    DEPLOY_REASONS, or "" when the deploy did not fail (ok, noop); step is deploy.sh's
+    step it failed in ("" when unknown); excerpt the significant lines; warnings the
+    ``[deploy:warn]`` findings of a deploy that succeeded ({"code", "text"}); log the
+    deploy log redeploy.sh named. deploy.sh's own result line decides when there is
+    one; without it the text does (a deploy.sh that predates the markers).
+    """
+    lines = [ln.rstrip() for ln in output.splitlines() if ln.strip()]
+    found = None
+    for match in _DV_RESULT.finditer(output):
+        found = match
+    reason = step = ""
+    if rc == 124:
+        reason = "timeout"
+    elif found is not None:
+        if found.group("reason") is not None:
+            reason = found.group("reason") if found.group("reason") in DEPLOY_REASONS else "failed"
+            step = found.group("step") or ""
+        elif rc != 0:
+            reason = "failed"
+    elif rc != 0:
+        reason = _dv_guess(lines, rc)
+    if not step:
+        steps = re.findall(r"\[deploy:step [0-9]+/[0-9]+ ([a-z_]{1,32})\]", output)
+        step = steps[-1] if reason and steps else ""
+    log = _DV_LOG.search(output)
+    return {
+        "reason": reason,
+        "step": step,
+        "excerpt": _dv_excerpt(lines) if reason else [],
+        "warnings": [
+            {"code": m.group("code"), "text": m.group("text").strip()[:DV_EXCERPT_CHARS]}
+            for m in _DV_WARN.finditer(output)
+        ],
+        "log": log.group("log") if log else "",
+    }
+# --- DEPLOY VERDICT (end) ---
 
 
 def app() -> str:
@@ -184,6 +296,7 @@ def step_plan(ctx: Any) -> int:
     rc, out = redeploy(ctx, check=True, timeout=lib.mode_of(MODE).timeout("plan") - 120)
     save(ctx, CHECK_LOG, out)
     phase1_ok = rc == 0 and PHASE1_REPORT in out
+    verdict = deploy_verdict(out, rc)
     if phase1_ok:
         lines.append("CHECK (deploy.sh Phase 1): OK — the full report is in the run log")
     else:
@@ -197,8 +310,19 @@ def step_plan(ctx: Any) -> int:
         schema_from=schema_head,
         schema_to=schema_tip,
         check_ok=phase1_ok,
+        **({} if phase1_ok else _failure_fields(verdict, "failed")),
     )
     return 0 if phase1_ok else 1
+
+
+def _failure_fields(verdict: dict[str, Any], default: str) -> dict[str, Any]:
+    """The cause of a failed deploy for the bot (the event's reason/step/excerpt/log)."""
+    return {
+        "reason": verdict["reason"] or default,
+        "fail_step": verdict["step"],
+        "excerpt": verdict["excerpt"],
+        "deploy_log": verdict["log"],
+    }
 
 
 def save_plan(ctx: Any, target: str) -> None:
@@ -238,10 +362,23 @@ def step_apply(ctx: Any) -> int:
         )
     rc, out = redeploy(ctx, check=False, timeout=lib.mode_of(MODE).timeout("apply") - 120)
     save(ctx, DEPLOY_LOG, out)
+    save(ctx, VERDICT_FILE, json.dumps(deploy_verdict(out, rc)))
     if DEPLOY_OK in out or NOTHING_TO_DEPLOY in out:
         return 0
     print(f"redeploy did not report DEPLOY OK (exit {rc})", file=sys.stderr)
     return 1
+
+
+def saved_verdict(ctx: Any) -> dict[str, Any]:
+    """deploy_verdict of the apply step (saved next to the deploy log), or a blank one."""
+    try:
+        data = json.loads(read_artifact(ctx, VERDICT_FILE) or "{}")
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    blank: dict[str, Any] = {"reason": "", "step": "", "excerpt": [], "warnings": [], "log": ""}
+    return {**blank, **{k: v for k, v in data.items() if k in blank}}
 
 
 def step_verify(ctx: Any) -> int:
@@ -261,7 +398,8 @@ def step_verify(ctx: Any) -> int:
     if state.strip() != "active":
         print(f"{BOT_UNIT} is {state.strip() or 'unknown'} after the deploy", file=sys.stderr)
         return 1
-    ctx.event("result", text=block, verdict="deploy_ok")
+    warnings = saved_verdict(ctx)["warnings"]
+    ctx.event("result", text=block, verdict="deploy_ok", **({"warnings": warnings} if warnings else {}))
     return 0
 
 
@@ -272,13 +410,15 @@ def step_rollback(ctx: Any) -> int:
     block = report_block(out, ROLLBACK_REPORT)
     _, state = ctx.run(["systemctl", "is-active", BOT_UNIT])
     running = state.strip() == "active"
+    cause = _failure_fields(saved_verdict(ctx), "rolled_back" if block else "failed")
     if block:
-        ctx.event("result", text=block + f"\n{BOT_UNIT}: {state.strip() or 'unknown'}", verdict="rolled_back")
+        ctx.event("result", text=block + f"\n{BOT_UNIT}: {state.strip() or 'unknown'}", verdict="rolled_back", **cause)
         return 0 if running else 1
     ctx.event(
         "result",
         text=f"no ROLLBACK REPORT: deploy.sh stopped before Phase 2 (nothing changed) or did not finish — read the run log. {BOT_UNIT}: {state.strip() or 'unknown'}",
         verdict="no_report",
+        **cause,
     )
     return 1
 

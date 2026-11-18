@@ -542,6 +542,8 @@ if [[ "$1" == "input-status" ]]; then
   exit 0
 fi
 echo "vpn-relay-apply: fake $*"
+# The check's FAIL lines, as the real helper prints them (one per failure).
+[[ "$1" == "check" && -f "$SD/check_out" ]] && cat "$SD/check_out" >&2
 exit "$(cat "$SD/check_rc" 2>/dev/null || echo 0)"
 """
 
@@ -1396,3 +1398,127 @@ def test_relay_rollback_names_every_input_filter_step() -> None:
     assert body.index("re-apply the saved table ip") < i_table, "after the forwarding table"
     assert i_table < body.index('systemctl stop "$RELAY_DEADMAN_TIMER"') < body.index('rm -f "$RELAY_INPUT_PENDING"')
     assert body.index('rm -f "$RELAY_INPUT_PENDING"') < body.index("net.ipv4.ip_forward pre-deploy"), "before sysctls"
+
+
+# --------------------------------------------------------------------------- #
+# 7. An upstream that did not answer BEFORE the deploy does not roll it back (A1)
+# --------------------------------------------------------------------------- #
+# ru1, v3.2.0: the main server is blocked on the relay's path (TSPU). Phase 1's check of
+# the live relay already failed with exit 13; Phase 2's verify got the same 13 and the
+# deploy rolled back — a failure no deploy can cause or fix. Now: the same upstream
+# failure before and after, and nothing else failing, is DEPLOY OK with a WARN; anything
+# new — another failure class, an upstream that answered before, another address or
+# port — rolls back as before.
+TCP_FAIL = "vpn-relay-apply: FAIL: TCP connect 203.0.113.5:443 failed: timed out"
+TLS_FAIL = "vpn-relay-apply: FAIL: TLS handshake 203.0.113.5:443 sni=vpn.example.net failed: timed out"
+TABLE_FAIL = "vpn-relay-apply: FAIL: table ip vpnrelay differs from the ruleset rendered from .env (diff above, counters ignored)"
+INPUT_FAIL = "vpn-relay-apply: FAIL: table inet vpnrelay_input is absent although RELAY_INPUT_FILTER=on"
+
+
+def _pre(rc: int, *lines: str) -> str:
+    text = "\n".join(lines).replace("'", "'\\''")
+    return f"RELAY_LIVE_RC={rc}; RELAY_LIVE_OUT='{text}'\n"
+
+
+def _phase2_after(host: RelayHost, pre: str) -> subprocess.CompletedProcess[str]:
+    return host.run(
+        pre + 'relay_snapshot_prestate\nRELAY_UNIT_STATE="$(relay_unit_state "$APP_DIR")"\n'
+        "relay_phase2\necho PHASE2-RETURNED\n"
+    )
+
+
+def _post(host: RelayHost, rc: int, *lines: str) -> None:
+    host.fail_check(rc)
+    (host.sd / "check_out").write_text("\n".join([*lines, f"vpn-relay-apply: check FAILED (exit {rc})"]) + "\n", encoding="utf-8")
+
+
+def test_a_preexisting_unreachable_upstream_does_not_roll_back(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    _post(host, 13, TCP_FAIL, TLS_FAIL)
+    proc = _phase2_after(host, _pre(13, "vpn-relay-apply: FAIL: table ip vpnrelay is absent", TCP_FAIL, TLS_FAIL))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PHASE2-RETURNED" in proc.stdout and "DEPLOY OK (relay)" in proc.stdout
+    assert "ROLLBACK" not in proc.stderr
+    assert "upstream unreachable before and after (pre-existing): TCP connect 203.0.113.5:443; TLS handshake 203.0.113.5:443 sni=vpn.example.net" in proc.stderr
+    assert "verify           : vpn-relay-apply check: tables, input filter, sysctls OK; upstream unreachable before and after (pre-existing)" in proc.stdout
+    assert "[deploy:warn upstream_preexisting] upstream unreachable before and after (pre-existing): TCP connect 203.0.113.5:443" in proc.stdout
+    assert "[deploy:result ok]" in proc.stdout
+    assert host.log("helper") == ["helper check", "helper input-status"]
+
+
+def test_a_new_upstream_failure_still_rolls_back(tmp_path: Path) -> None:
+    """The upstream answered before the deploy: after it, it does not — the deploy's."""
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    _post(host, 13, TCP_FAIL)
+    proc = _phase2_after(host, _pre(0))
+    assert proc.returncode == 1 and "ROLLBACK REPORT (relay)" in proc.stderr
+    assert "the upstream answered before the deploy: a new failure" in proc.stderr
+    assert "[deploy:result failed step=verify reason=upstream]" in proc.stderr
+
+
+def test_another_failure_next_to_the_preexisting_one_rolls_back(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    _post(host, 13, INPUT_FAIL, TCP_FAIL)
+    proc = _phase2_after(host, _pre(13, TCP_FAIL))
+    assert proc.returncode == 1 and "ROLLBACK REPORT (relay)" in proc.stderr
+    assert "not only the upstream failed (input,upstream)" in proc.stderr
+
+
+def test_a_table_failure_rolls_back_whatever_the_upstream_did(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    _post(host, 11, TABLE_FAIL, TCP_FAIL)
+    proc = _phase2_after(host, _pre(13, TCP_FAIL))
+    assert proc.returncode == 1 and "ROLLBACK REPORT (relay)" in proc.stderr
+    assert "[deploy:result failed step=verify reason=rolled_back]" in proc.stderr
+
+
+@pytest.mark.parametrize(
+    "post",
+    [
+        "vpn-relay-apply: FAIL: TCP connect 198.51.100.7:443 failed: timed out",   # another target
+        "vpn-relay-apply: FAIL: TCP connect 203.0.113.5:8443 failed: timed out",   # another port
+    ],
+    ids=["target-changed", "port-changed"],
+)
+def test_an_upstream_failure_on_another_target_or_port_rolls_back(tmp_path: Path, post: str) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    _post(host, 13, post)
+    proc = _phase2_after(host, _pre(13, TCP_FAIL))
+    assert proc.returncode == 1 and "ROLLBACK REPORT (relay)" in proc.stderr
+    assert "not the failure Phase 1 saw (before: TCP connect 203.0.113.5:443)" in proc.stderr
+
+
+def test_a_phase1_check_that_could_not_run_proves_nothing(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    _post(host, 13, TCP_FAIL)
+    proc = _phase2_after(host, _pre(5, TCP_FAIL))
+    assert proc.returncode == 1 and "ROLLBACK REPORT (relay)" in proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("line", "cls"),
+    [
+        (TCP_FAIL, "upstream"), (TLS_FAIL, "upstream"), (TABLE_FAIL, "table"), (INPUT_FAIL, "input"),
+        ("vpn-relay-apply: FAIL: tcp/8080 listening but filtered: nginx listens on 0.0.0.0", "input"),
+        ("vpn-relay-apply: FAIL: net.ipv4.ip_forward = 0, expected 1", "forward"),
+        ("vpn-relay-apply: FAIL: net.netfilter.nf_conntrack_max = 1, expected 65536 (RELAY_CONNTRACK_MAX)", "conntrack"),
+        ("vpn-relay-apply: FAIL: something new", "other"),
+    ],
+)
+def test_check_fail_lines_are_classified(tmp_path: Path, line: str, cls: str) -> None:
+    proc = _source_and_run(tmp_path, f"relay_check_fail_class '{line}'\n")
+    assert proc.stdout.strip() == cls
+
+
+def test_the_phase1_report_no_longer_says_a_preexisting_upstream_rolls_back() -> None:
+    text = _read(DEPLOY_SH)
+    body = text[text.index("relay_live_rc_text() {"):]
+    body = body[: body.index("\n}\n")]
+    assert "would ROLL BACK; fix that first" not in body
+    assert "accepts this same failure" in body

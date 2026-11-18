@@ -147,3 +147,33 @@ async def test_the_scheduled_alert_reaches_every_superadmin() -> None:
     snap = StatusSnapshot(items=[Item("yellow", "reboot", "a reboot is required")])
     assert await notifier.scheduled_alert(run(origin="scheduled", state="succeeded", active=False), snap)
     assert sorted(chat for chat, _ in bot.sent) == [9, 10]
+
+
+def test_a_failed_update_shows_the_deploys_cause() -> None:
+    """«Обновить бота» (the main server): the cause deploy.sh reported, not just «failed»."""
+    status = "\n".join([
+        '{"event": "launched", "phase": "execute"}',
+        '{"event": "result", "text": "no ROLLBACK REPORT", "verdict": "no_report", "reason": "tests", '
+        '"fail_step": "tests", "excerpt": ["FAILED tests/test_a.py::test_b - <boom>"], '
+        '"deploy_log": "/root/deploy-20261118T120000Z.log"}',
+        '{"event": "finished", "outcome": "failed"}',
+    ])
+    snap = parse_status(status)
+    with use_locale("ru"):
+        from i18n import t
+
+        text = final_text(run(mode="update", state="failed", active=False), snap)
+        assert t("deploy_reason_tests") in text and t("deploy_step_tests") in text
+    assert "FAILED tests/test_a.py::test_b - &lt;boom&gt;" in text
+    assert "/root/deploy-20261118T120000Z.log" in text
+
+
+def test_a_successful_update_shows_the_deploys_warning() -> None:
+    status = "\n".join([
+        '{"event": "launched", "phase": "execute"}',
+        '{"event": "result", "text": "===== DEPLOY OK =====", "verdict": "deploy_ok", '
+        '"warnings": [{"code": "upstream_preexisting", "text": "x"}]}',
+        '{"event": "finished", "outcome": "succeeded"}',
+    ])
+    text = final_text(run(mode="update", state="succeeded", active=False), parse_status(status))
+    assert "⚠️" in text

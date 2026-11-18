@@ -37,6 +37,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from bot.container import Services
+from bot.deploy_views import deploy_failure_text, deploy_warnings_text
 from bot.fsm.states import AdminFallbackStates, AdminRelayStates
 from bot.guards import require_superadmin
 from bot.handlers.admin_bundles import ProgressReporter, reconcile_issue_blocks, reconcile_report_text
@@ -69,6 +70,7 @@ from bot.totp_gate import require_totp
 from config.validators import format_ipv4_networks, ipv4_address
 from i18n import t
 from models.dto import Relay, RelayPairing
+from services.deploy_result import deploy_warnings_from
 from services.errors import AccessDenied, InvalidOperation, NotFound, ServiceError
 from services.key_bundles import ReconcileOutcome, ReconcileSummary, RelayMembersAction
 from services.relay_health import LEVEL_ICONS
@@ -77,6 +79,7 @@ from services.relays import (
     IssuedPairing,
     PairingCheckFailed,
     RelayDeletionReport,
+    RelayUpdateFailed,
     RelayUpdateResult,
     agent_uninstalled,
     host_is_ipv4,
@@ -1159,9 +1162,14 @@ async def relay_agent_update(callback: CallbackQuery, state: FSMContext, service
             notice = t(
                 "relay_agent_updated", state=h(str(update.get("state", "?"))), message=h(str(update.get("message", "")))
             )
+            warnings = deploy_warnings_from(update.get("warnings"))
+            if warnings:
+                notice += "\n" + deploy_warnings_text(warnings)
         except NotFound:
             await _show_card(callback, services, relay_id)
             return
+        except RelayUpdateFailed as exc:
+            notice = t("relay_agent_update_failed_cause") + "\n" + deploy_failure_text(exc.failure)
         except ServiceError as exc:
             notice = t("relay_agent_update_failed", error=h(service_error_text(exc)))
         await _show_card(callback, services, relay_id, notice)

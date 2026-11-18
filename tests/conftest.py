@@ -354,9 +354,19 @@ def _isolate_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # for THAT deploy reaches every test — `CHECK=1 redeploy` exports PHASE1_ONLY=1,
 # `FORCE=1` and the ALLOW_* are passed through as given. tests/test_deploy_knob_isolation.py
 # fails when deploy.sh gains a knob that is missing here, or drops one listed here.
+#
+# DEPLOY_REF and DEPLOY_HANDOVER_SHA too: the relay agent's `update` (the bot's path)
+# runs `DEPLOY_REF=<tag> redeploy.sh`, and a relay's handover exports
+# DEPLOY_HANDOVER_SHA — so the bot's path handed the Phase 1 suite an environment the
+# operator's `redeploy.sh` never did. Stripped, both paths test the same thing.
 DEPLOY_ENV_KNOBS: tuple[str, ...] = (
     "PHASE1_ONLY",
     "FORCE",
+    "FORCE_TESTS",
+    "PHASE1_STAMP",
+    "PHASE1_STAMP_TTL",
+    "DEPLOY_REF",
+    "DEPLOY_HANDOVER_SHA",
     "ALLOW_MODEL_SWITCH",
     "ALLOW_UNIT_DRIFT",
     "ALLOW_BACKEND_CONFIG_DRIFT",

@@ -371,3 +371,84 @@ Xray REALITY.
 > для non-root privilege-helper модели. В root+api mode он сообщает `FAIL: User=root`, что
 > ожидаемо — пропустите его и используйте `systemctl status vpn-bot` плюс диагностику
 > администратора в боте. См. [Эксплуатация → Healthcheck-инструмент](operations.ru.md).
+
+## `deploy.sh`: тестовый гейт, отметка Phase 1 и маркеры шагов
+
+Обе роли гоняют в Phase 1 один и тот же гейт — ruff, compileall и весь pytest ревизии, которую
+деплоят, в test venv под `/var/lib/vpn-bot-deploy/` (никогда не в prod venv).
+
+### ensurepip
+
+`python3 -m venv` нужен `ensurepip`, который Debian и Ubuntu поставляют отдельно от `python3`, в
+`python3.X-venv`. Свежий relay на Ubuntu 24.04 на этом остановился («ensurepip is not available …
+apt install python3.12-venv»): `scripts/install.sh --relay` никогда не ставил `python3-venv` (его
+список пакетов relay был `git ca-certificates curl nftables`; режим main-сервера ставил всегда).
+Теперь:
+
+- до сборки test venv `deploy.sh` проверяет `python3 -m ensurepip --version`; если его нет — ставит
+  `python3.X-venv` для найденного `python3` (`apt-get -y`, `DEBIAN_FRONTEND=noninteractive`, один
+  `apt-get update` и повтор, если индекс пакетов его не знает) и проверяет снова — и в `CHECK=1`
+  тоже: без него гейт не запустить, а в самом деплое ещё ничего не изменено. Если поставить не
+  удалось — деплой останавливается здесь же с командой, которую выполнить (`apt install
+  python3.12-venv`), `reason=no_venv`;
+- `install.sh --relay` ставит `python3-venv` вместе с остальными пакетами relay.
+
+### Отметка Phase 1
+
+На relay с одним vCPU гейт идёт ~13 минут, а рекомендованный порядок гонял его дважды: `CHECK=1`,
+потом деплой. **Полностью зелёный** прогон `CHECK=1` — тесты прошли и не было ничего, на чём
+настоящий деплой остановился бы (дрейф юнитов или бэкендов, хостовые файлы, ssh, ufw, инварианты
+хоста, …) — пишет `/var/lib/vpn-bot-deploy/phase1-ok` (root, 0600, атомарно):
+
+```
+version=1
+sha=<проверенный коммит>
+constraints=<sha256 constraints-hashed.txt + constraints-dev-hashed.txt>
+python=<версия python3>
+role=<main|relay>
+at=<epoch>
+```
+
+Настоящий деплой того же коммита, constraints, `python3` и роли в пределах `PHASE1_STAMP_TTL`
+секунд (по умолчанию 7200) пропускает ruff / compileall / pytest и пишет, на какую отметку опёрся:
+
+```
+[deploy:skip tests] Phase 1 stamp: commit 61f291aeda88, role relay, written 2026-11-18 10:02:11 UTC (4 min ago)
+[deploy] tests: SKIPPED — the Phase 1 stamp /var/lib/vpn-bot-deploy/phase1-ok vouches for them (…); FORCE_TESTS=1 runs them anyway
+```
+
+Все остальные гейты Phase 1 идут заново, как всегда: отметка ручается за тесты и только за них.
+Отметка, которая не обычный файл root с режимом 0600, игнорируется с `WARN`. `FORCE_TESTS=1`
+гоняет тесты всегда; `PHASE1_STAMP_TTL=0` выключает отметку. Обе ручки пробрасывает `redeploy.sh`:
+
+```bash
+sudo FORCE_TESTS=1 bash scripts/redeploy.sh
+```
+
+Relay, который деплоит релиз старше отметки, запускает `deploy.sh` этого релиза (handover), а тот
+отметки не знает: тестирует, как раньше.
+
+### Маркеры шагов и результата
+
+`deploy.sh` печатает машиночитаемые строки, без перевода:
+
+| Строка | Когда |
+|---|---|
+| `[deploy:step <i>/<n> <name>]` | начался шаг: `preflight`, `fetch`, `tests`, `checks`, `backup`, `install`, `restart`, `verify` (`CHECK=1`: первые четыре) |
+| `[deploy:skip <name>] <why>` | шаг пропущен (тесты — по отметке) |
+| `[deploy:warn <code>] <text>` | находка успешного деплоя (`upstream_preexisting`: [relay.ru.md](relay.ru.md#что-делает-scriptsredeploysh-на-relay)) |
+| `[deploy:result ok]` / `[deploy:result noop]` | зелёный / нечего деплоить |
+| `[deploy:result failed step=<name> reason=<class>]` | почему остановился — на любом выходе: `FAIL`, ошибка под `set -e`, откат |
+
+`<class>` — один из `busy` (lock держит другой деплой), `fetch`, `preflight` (предусловие до
+тестов), `no_venv` (нет ensurepip / test venv не собрать), `tests`, `checks` (гейт Phase 1),
+`upstream` (relay: после рестарта upstream перестал отвечать), `rolled_back`, `failed`. Handover
+relay запускает `deploy.sh` целевой ревизии, и шаги начинаются заново: читающий берёт последнюю
+строку шага как текущую.
+
+Их читает бот: «⬆️ Обновить агент» relay ([relay.ru.md](relay.ru.md#агент-vpn-relay-agent)) и
+«⬆️ Обновить бота» main-сервера ([wizard.ru.md](wizard.ru.md#️-обновить-бота)) показывают причину
+словами, шаг, строки деплой-лога, которые её объясняют, и где лежит полный лог — а не голое
+«не удалось». У обоих читателей ОДИН классификатор (блок DEPLOY VERDICT в `scripts/vpn-relay-agent`
+и `scripts/wizard/vpn-bot-wizard-update`, их идентичность закреплена
+`tests/test_deploy_verdict.py`); `deploy.sh` без маркеров классифицируется по тексту.

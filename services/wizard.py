@@ -41,6 +41,7 @@ from models.dto import WizardRun
 from models.enums import AuditEntityType
 from repositories.wizard_runs import WizardBusy, WizardRunRepository
 from services.audit import AuditService
+from services.deploy_result import DeployFailure, DeployWarning, deploy_failure_from, deploy_warnings_from
 from services.errors import InvalidOperation, NotFound
 from services.wizard_modes import WizardMode, get_mode
 from utils.redact import redact_text, redact_value
@@ -131,6 +132,10 @@ class StatusSnapshot:
     finish_summary: str = ""
     failed_step_text: str = ""
     events: int = 0
+    # «Обновить бота»: why the deploy failed (the plan's CHECK or the apply), and the
+    # findings of one that succeeded — services/deploy_result.py.
+    deploy_failure: DeployFailure | None = None
+    deploy_warnings: tuple[DeployWarning, ...] = ()
 
     @property
     def finished(self) -> bool:
@@ -175,6 +180,8 @@ def parse_status(text: str) -> StatusSnapshot:
         elif kind == "plan":
             snap.plan_text = str(rec.get("text") or "")
             snap.plan_noop = bool(rec.get("noop"))
+            if rec.get("reason"):
+                snap.deploy_failure = deploy_failure_from(rec)
         elif kind == "item":
             level = str(rec.get("level") or "")
             if level in ("green", "yellow", "red"):
@@ -187,6 +194,9 @@ def parse_status(text: str) -> StatusSnapshot:
         elif kind == "result":
             snap.result_text = str(rec.get("text") or "")
             snap.result_verdict = str(rec.get("verdict") or "") or None
+            if rec.get("reason"):
+                snap.deploy_failure = deploy_failure_from(rec)
+            snap.deploy_warnings = deploy_warnings_from(rec.get("warnings"))
         elif kind == "finished":
             outcome = str(rec.get("outcome") or "")
             if outcome in ("planned", "succeeded", "rolled_back", "failed"):

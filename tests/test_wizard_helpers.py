@@ -849,6 +849,11 @@ case "{outcome}" in
   ok) printf '===== DEPLOY OK =====\n  deployed         : aaaaaaa -> bbbbbbb\n  schema_version   : 41 -> 42 (target 42)\n=====================\n' ;;
   rollback) printf '===== ROLLBACK REPORT =====\n  - start vpn-bot: rc=0\n===========================\n'; exit 1 ;;
   die) echo "[deploy] FATAL: unit drift detected"; exit 1 ;;
+  marked)
+    echo "redeploy: launching vpn-bot-deploy (log: /root/deploy-20261118T120000Z.log)"
+    printf '%s\n' "[deploy:step 4/8 checks]" "[deploy][FAIL] unit drift detected (set ALLOW_UNIT_DRIFT=1 ...)" \
+      "[deploy:result failed step=checks reason=checks]"
+    exit 1 ;;
 esac
 ''')
 
@@ -928,6 +933,29 @@ def test_update_without_a_report_is_failed_not_rolled_back(host: Host) -> None:
     events = host.events(26)
     assert finished(events)["outcome"] == "failed"
     assert [e for e in events if e["event"] == "result"][0]["verdict"] == "no_report"
+
+
+def test_update_failure_carries_the_cause_for_the_bot(host: Host) -> None:
+    """«Обновить бота»: the cause deploy.sh reported, its step, the lines and the log."""
+    _redeploy_stub(host, "marked")
+    _git_stub(host)
+    _planned(host, 28)
+    host.launcher("run", "--mode", "update", "--run", "28", "--phase", "execute")
+    events = host.events(28)
+    assert finished(events)["outcome"] == "failed"
+    result = [e for e in events if e["event"] == "result"][0]
+    assert result["reason"] == "checks" and result["fail_step"] == "checks"
+    assert result["excerpt"] == ["[deploy][FAIL] unit drift detected (set ALLOW_UNIT_DRIFT=1 ...)"]
+    assert result["deploy_log"] == "/root/deploy-20261118T120000Z.log"
+
+
+def test_update_rollback_carries_rolled_back_without_markers(host: Host) -> None:
+    _redeploy_stub(host, "rollback")
+    _git_stub(host)
+    _planned(host, 29)
+    host.launcher("run", "--mode", "update", "--run", "29", "--phase", "execute")
+    result = [e for e in host.events(29) if e["event"] == "result"][0]
+    assert result["reason"] == "rolled_back"
 
 
 def test_update_verify_needs_the_bot_running(host: Host) -> None:

@@ -365,7 +365,10 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
   `origin/main` и тегов, выбор [ревизии для деплоя](#какую-ревизию-деплоит-relay) — по умолчанию
   самый новый релиз, только вперёд — и передача управления `deploy.sh` ЭТОЙ ревизии; на ней тот же
   гейт ruff / compileall / pytest, что и на основном сервере (тестовый venv собирается в `/var/lib/vpn-bot-deploy/`, поэтому relay нужен
-  `python3-venv` и ~1 ГиБ свободного места), `vpn-relay-apply check --dry-run` из checkout,
+  `python3-venv` — если `ensurepip` нет, `deploy.sh` сам ставит `python3.X-venv`
+  ([deployment.ru.md](deployment.ru.md#ensurepip)) — и ~1 ГиБ свободного места; полностью зелёный
+  `CHECK=1` позволяет деплою сразу после него не гонять тесты:
+  [отметка Phase 1](deployment.ru.md#отметка-phase-1)), `vpn-relay-apply check --dry-run` из checkout,
   исходное состояние relay (включая `nf_conntrack_max` и
   `nf_conntrack_tcp_timeout_established` в рантайме), сравнение каждого unit'а
   [набора relay](#какие-unitы-ставит-деплой-relay) с его копией в `deploy/relay/` (`absent`,
@@ -389,7 +392,16 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
   main), `start` таймера, который не активен;
   проверка `vpn-relay-apply check` и **ровно одного DNAT на каждый проброшенный порт во всём
   ruleset** (второй в другой таблице — например, из `/etc/nftables.conf` при загрузке — конкурировал
-  бы с relay; установщик проверял это всегда). Вокруг файлов хоста двигается [SSH-порт](host-state.ru.md#ssh-порт),
+  бы с relay; установщик проверял это всегда). **Upstream, который не отвечал и до деплоя, его
+  не откатывает**: если единственные провалы `check` в verify — пробы upstream (`FAIL: TCP connect …`
+  / `FAIL: TLS handshake …`, exit 13/14 — таблицы, входной фильтр и sysctl прошли) и каждый из них
+  был среди провалов проверки живого relay в Phase 1 (тот же адрес и порты), деплой — DEPLOY OK с
+  `WARN` `upstream unreachable before and after (pre-existing)` и маркером
+  `[deploy:warn upstream_preexisting]`: main, заблокированный на пути relay (ТСПУ), деплой ни вызвать,
+  ни исправить не может. Любой другой провал, upstream, который до деплоя отвечал, или другой адрес
+  или порт, чем видел Phase 1, откатывают как всегда (`reason=upstream` — если дело в upstream).
+  Вердикт читается по строкам FAIL, как `only_input_filter_failures` агента: `check` выходит с кодом
+  только ПЕРВОГО провала. Вокруг файлов хоста двигается [SSH-порт](host-state.ru.md#ssh-порт),
   когда этого требует `SSH_PORT` (фаза 1: оба порта; reload `vpn-relay` пускает их, проба с main
   их подтверждает); сразу после DEPLOY OK `vpn-bot-ssh-port.service` один раз ищет доказательство,
   так что relay обычно заканчивает переезд в том же прогоне.
@@ -791,7 +803,7 @@ SSH, как выше, но:
 | `hello <token>` | Завершает pairing; отвечает фактами о relay. Единственный запрос до pairing. |
 | `status` | Факты: цель, порты, текущая цель DNAT, во что имя резолвится сейчас, `ip_forward`, юниты (`vpn-relay.service` и каждый таймер набора ниже), ssh-порты, source-адрес исходящего трафика, checkout, последнее обновление, `vpn-relay-apply check`, `vpn-relay-apply input-status` (`input_status`) и на hub — его строка jump (`jump`: какие relay она открывает, отпечаток ключа). |
 | `apply target=<dns-имя> tcp=<порты> udp=<порты>` | Сменить цель/порты: отказ для имени, которое не имя или не резолвится на relay, порта вне 1..65535, больше 8 портов, TCP-порта, на котором слушает sshd. Переписывает только `RELAY_UPSTREAM_HOST` / `RELAY_FORWARD_*`, применяет, проверяет; возвращает `.env` и применяет заново, если ruleset или проверка (таблица, sysctl, upstream не отвечает) не прошли. |
-| `update` | В transient-юните (`systemd-run --wait`): забирает теги релизов, выбирает самый новый релиз ([то же правило, что у деплоя](#какую-ревизию-деплоит-relay)) — только вперёд, никогда назад или вбок — и запускает для него деплой relay: `scripts/redeploy.sh` с `DEPLOY_REF=<тег>` (`deploy.sh` этого тега в своём transient-юните, лог `/root/deploy-<ts>.log`): гейт pytest, helper'ы, юниты и файлы хоста, reload vpn-relay, проверки; откатывается `deploy.sh` сам. Сам агент ничего не checkout'ит. Итог (`running` / `noop` / `failed` / `succeeded`, `from_commit`, `to_commit`, `release`, `log`) — в `/var/lib/vpn-relay/update.json` и в `status`. Это минуты: агент ждёт до 45 минут. |
+| `update` | В transient-юните (`systemd-run --wait`): забирает теги релизов, выбирает самый новый релиз ([то же правило, что у деплоя](#какую-ревизию-деплоит-relay)) — только вперёд, никогда назад или вбок — и запускает для него деплой relay: `scripts/redeploy.sh` с `DEPLOY_REF=<тег>` (`deploy.sh` этого тега в своём transient-юните, лог `/root/deploy-<ts>.log`): гейт pytest, helper'ы, юниты и файлы хоста, reload vpn-relay, проверки; откатывается `deploy.sh` сам. Сам агент ничего не checkout'ит. Итог (`running` / `noop` / `failed` / `succeeded`, `from_commit`, `to_commit`, `release`, `log`; для провала `reason`, `step`, `excerpt` — причина из [строки результата](deployment.ru.md#маркеры-шагов-и-результата) deploy.sh, её шаг и строки, которые её объясняют; для успеха `warnings`) — в `/var/lib/vpn-relay/update.json` и в `status`; проваленный `update` отвечает всем итогом, и бот показывает причину, шаг, эти строки и путь к логу вместо «relay отказал». Это минуты: агент ждёт до 45 минут. |
 | `uninstall` | В transient-юните: юниты набора ниже остановлены и удалены (сначала таймеры, `vpn-relay.service` последним), обе таблицы удалены, sysctl-файл удалён и `ip_forward` возвращён к значению до установки, удалены helper'ы, `/etc/vpn-relay`, `/var/lib/vpn-relay`, checkout (если его создал установщик), строка ключа агента и строка jump. Бэкап adoption остаётся. Отказ на хосте без `/etc/vpn-relay/install.json` установщика. |
 | `input-confirm` | Запускает `vpn-relay-apply input-confirm` прямым дочерним процессом — ssh-сессия бота (новая) среди его предков, а это и есть доказательство для той проверки ([dead-man](#как-не-потерять-доступ-dead-man-и-input-confirm)). Отвечает строками helper'а и новым `input-status`. Lock агента не берёт: фильтр ждёт подтверждения как раз пока `update` его держит. |
 | `jump key=<blob ed25519> open=<host>:<port>[,…]` | Hub: записать ОДНУ строку jump-ключа бота в authorized_keys root (`restrict,port-forwarding,permitopen="<host>:<port>"[,…],command="/bin/false" ssh-ed25519 <blob> vpn-bot-relay-jump`) — [ниже](#управление-ru-relay-через-hub). DNS-имя или IPv4 (не loopback, link-local, multicast), порт 1..65535, без повторов, не больше 32; ключ, у которого в файле уже есть другая строка (сам ключ агента), — отказ; отказ и пока `sshd -T` разрешает удалённый проброс (не `allowtcpforwarding local`). Все остальные строки — байт-в-байт. Свой lock, поэтому `update` hub'а его не задерживает. |

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.deploy_views import deploy_failure_text, deploy_warnings_text
 from i18n import t
 from models.dto import WizardRun
 from services.wizard import Item, StatusSnapshot
@@ -113,6 +114,10 @@ def final_text(run: WizardRun, snap: StatusSnapshot) -> str:
         lines += ["", _pre(snap.result_text)]
     elif run.summary:
         lines += ["", _pre(run.summary)]
+    if run.mode == "update" and snap.deploy_warnings:
+        lines += ["", deploy_warnings_text(snap.deploy_warnings)]
+    if run.mode == "update" and run.state in ("failed", "rolled_back") and snap.deploy_failure is not None:
+        lines += ["", deploy_failure_text(snap.deploy_failure)]
     if run.state in ("failed", "rolled_back"):
         lines += ["", t("wizard_failed_hint")]
     return "\n".join(lines)
