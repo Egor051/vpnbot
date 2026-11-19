@@ -45,11 +45,51 @@ def _pre(text: str) -> str:
     return f"<pre>{h(body)}</pre>"
 
 
-def header(run: WizardRun) -> str:
+def _current_step(snap: StatusSnapshot | None) -> str:
+    """The step a run is in, as the reader names it: the deploy's step («тесты»), else
+    the helper's (plan / apply / verify / rollback); "" before the first marker."""
+    if snap is None:
+        return ""
+    progress = snap.deploy_progress
+    step = progress.get("step") if isinstance(progress, dict) else None
+    if isinstance(step, str) and step in DEPLOY_STEPS:
+        return t(f"deploy_step_{step}")
+    return t(f"wizard_step_{snap.step}") if snap.step in STEP_ORDER else ""
+
+
+def run_state_label(run: WizardRun, snap: StatusSnapshot | None) -> str:
+    """«Состояние:» as it IS: a plan waiting for its confirmation, running (and in which
+    step), or how it ended — never «план» once the run has started moving."""
+    if not run.active:
+        return state_label(run.state)
+    if run.state == "planned" and run.plan_ready:
+        return state_label("planned")
+    step = _current_step(snap)
+    label = f"{STATE_ICONS['running']} {t('wizard_state_running')}"
+    return f"{label} ({t('wizard_state_step', step=h(step))})" if step else label
+
+
+def header(run: WizardRun, snap: StatusSnapshot | None = None) -> str:
     who = t("wizard_origin_scheduled") if run.origin == "scheduled" else ""
-    return t("wizard_run_header", mode=h(mode_title(run.mode)), id=run.id, state=state_label(run.state)) + (
+    return t("wizard_run_header", mode=h(mode_title(run.mode)), id=run.id, state=run_state_label(run, snap)) + (
         f"\n{who}" if who else ""
     )
+
+
+def update_plan_text(*, needs_code: bool = False) -> str:
+    """«⬆️ Обновить бота» before the run exists: the deploy's steps, all ⚪, and the one
+    confirmation (or, with TOTP, the code that is it)."""
+    head = t("wizard_run_header_new", mode=h(mode_title("update")), state=state_label("planned"))
+    steps = render_steps(t("wizard_update_steps_title"), deploy_steps_view(None)).strip()
+    hint = t("wizard_update_confirm_code") if needs_code else t("wizard_update_confirm_hint")
+    return "\n".join([head, "", steps, "", t("wizard_update_plan_note"), "", hint])
+
+
+def update_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t("btn_relay_update_confirm"), callback_data="wiz:go:update")],
+        [InlineKeyboardButton(text=t("btn_wizard_cancel"), callback_data="wiz:menu")],
+    ])
 
 
 def _steps_line(snap: StatusSnapshot) -> str:
@@ -60,17 +100,26 @@ def _steps_line(snap: StatusSnapshot) -> str:
 
 def deploy_steps_view(snap: StatusSnapshot | None, *, phase1_only: bool = False) -> list[Step]:
     """«Обновить бота»: the deploy's steps (bot/progress.py) from the helper's last
-    ``deploy`` event — all ⚪ before it ran. The plan (CHECK=1) has the first four."""
+    ``deploy`` event — all ⚪ before it ran. *phase1_only*: the first four (a plan that
+    waits for «Применить»). The execute phase keeps what the plan's CHECK already got
+    through: a step it passed stays ✅ until the deploy reaches it again — never back to ⚪."""
     names = DEPLOY_STEPS[:4] if phase1_only else DEPLOY_STEPS
     steps = steps_of([(name, t(f"deploy_step_{name}")) for name in names])
+    earlier = snap.earlier_deploy_progress if snap is not None else None
+    earlier_states = earlier.get("steps") if isinstance(earlier, dict) else None
+    if isinstance(earlier_states, dict):
+        for step in steps:
+            if earlier_states.get(step.key) == "ok":
+                step.state = "ok"
     progress = snap.deploy_progress if snap is not None else None
     if isinstance(progress, dict):
         states = progress.get("steps")
         if isinstance(states, dict):
             for step in steps:
                 state = states.get(step.key)
-                if state in STATES:
-                    step.state = str(state)
+                if state not in STATES or (step.state == "ok" and state in ("wait", "skip")):
+                    continue
+                step.state = str(state)
         tests = progress.get("tests")
         if isinstance(tests, dict):
             for step in steps:
@@ -82,13 +131,12 @@ def deploy_steps_view(snap: StatusSnapshot | None, *, phase1_only: bool = False)
 
 
 def progress_text(run: WizardRun, snap: StatusSnapshot) -> str:
-    if run.mode == "update" and snap.deploy_progress is not None:
-        # The deploy's own steps, the activity line moving with every new event.
-        body = render_steps(header(run), deploy_steps_view(snap, phase1_only=run.phase == "plan"), tick=snap.events)
-        if run.phase == "execute":
-            body += "\n\n" + t("wizard_update_restart_note")
-        return body
-    lines = [header(run)]
+    if run.mode == "update":
+        # The deploy's own steps (all of them: the plan's CHECK is the run's first
+        # half), the activity line moving with every new event.
+        body = render_steps(header(run, snap), deploy_steps_view(snap), tick=snap.events)
+        return body + "\n\n" + t("wizard_update_restart_note")
+    lines = [header(run, snap)]
     steps = _steps_line(snap)
     if steps:
         lines.append(steps)
@@ -102,7 +150,7 @@ def progress_text(run: WizardRun, snap: StatusSnapshot) -> str:
 
 def plan_text(run: WizardRun, snap: StatusSnapshot | None = None) -> str:
     body = (snap.plan_text if snap is not None and snap.plan_text else run.summary) or "—"
-    lines = [header(run), "", t("wizard_plan_title"), _pre(body)]
+    lines = [header(run, snap), "", t("wizard_plan_title"), _pre(body)]
     if run.mode == "update":
         # What «Применить» runs: the deploy's steps, all ⚪ (bot/progress.py).
         lines.append(render_steps(t("wizard_update_steps_title"), deploy_steps_view(None)).strip())
@@ -137,7 +185,7 @@ def _items_block(items: list[Item]) -> str:
 
 
 def final_text(run: WizardRun, snap: StatusSnapshot) -> str:
-    lines = [header(run)]
+    lines = [header(run, snap)]
     if run.mode == "selfcheck" and snap.items:
         counts = snap.counts or {
             level: sum(1 for i in snap.items if i.level == level) for level in ("green", "yellow", "red")
@@ -150,9 +198,17 @@ def final_text(run: WizardRun, snap: StatusSnapshot) -> str:
         lines += ["", _pre(snap.result_text)]
     elif run.summary:
         lines += ["", _pre(run.summary)]
-    if run.mode == "update" and snap.deploy_progress is not None and run.phase == "execute":
+    if run.mode == "update" and (snap.deploy_progress is not None or snap.earlier_deploy_progress is not None):
         # The steps as the deploy left them — closed with ✅ / ❌.
         steps = deploy_steps_view(snap)
+        if run.state in ("failed", "rolled_back") and snap.deploy_failure is not None:
+            failed = snap.deploy_failure.step
+            if failed in DEPLOY_STEPS and not any(step.state == "fail" for step in steps):
+                for step in steps:
+                    if step.key == failed:
+                        step.state = "fail"
+                    elif step.state == "run":
+                        step.state = "wait"
         if run.state == "succeeded":
             for step in steps:
                 if step.state in ("wait", "run"):
@@ -196,14 +252,9 @@ def menu_keyboard(*, active: WizardRun | None, daily: bool) -> InlineKeyboardMar
 
 
 def progress_keyboard(run: WizardRun) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=t("btn_refresh"), callback_data=f"wiz:run:{run.id}"),
-                InlineKeyboardButton(text=t("btn_wizard_log"), callback_data=f"wiz:log:{run.id}"),
-            ]
-        ]
-    )
+    """While a run moves: only «📄 Лог» — the message updates itself, a second «Обновить»
+    or «Применить» would only start nothing or the same run again."""
+    return InlineKeyboardMarkup(inline_keyboard=[_row(t("btn_wizard_log"), f"wiz:log:{run.id}")])
 
 
 def plan_keyboard(run: WizardRun) -> InlineKeyboardMarkup:
@@ -217,10 +268,11 @@ def plan_keyboard(run: WizardRun) -> InlineKeyboardMarkup:
 
 
 def final_keyboard(run: WizardRun, *, artifact: bool = False) -> InlineKeyboardMarkup:
+    """The result: its log (and the dump's file), and «⬅️ Назад» to the wizard."""
     rows = [_row(t("btn_wizard_log"), f"wiz:log:{run.id}")]
     if artifact:
         rows.append(_row(t("btn_wizard_artifact"), f"wiz:art:{run.id}"))
-    rows.append(_row(t("btn_wizard_menu"), "wiz:menu"))
+    rows.append(_row(t("btn_wizard_back"), "wiz:menu"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

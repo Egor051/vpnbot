@@ -54,6 +54,8 @@ Sender = Callable[[str, InlineKeyboardMarkup | None], Awaitable[None]]
 def what_text(hardening: RelayHardening) -> str:
     """«SSH на 22, входной фильтр выключен» — or one of the two."""
     parts = []
+    if hardening.overrides:
+        parts.append(t("relay_harden_what_sshd", count=len(hardening.overrides)))
     if hardening.ssh_on_22:
         parts.append(t("relay_harden_what_ssh"))
     if hardening.filter_off:
@@ -149,7 +151,9 @@ class RelayHardeningMonitor:
     async def _maybe_tell(self, relay: Relay, hardening: RelayHardening | None) -> bool:
         if self.bot is None and self._send_override is None:
             return False
-        if hardening is None or not hardening.needed or relay.agent is None or agent_uninstalled(relay.agent):
+        # A foreign sshd override has its own alert (services/relay_sshd_override.py).
+        if (hardening is None or not (hardening.ssh_on_22 or hardening.filter_off) or relay.agent is None
+                or agent_uninstalled(relay.agent)):
             return False
         mark = self._mark(relay)
         if (await self._meta(TOLD_META_KEY)).get(str(relay.id)) == mark or await self.postponed(relay):

@@ -2,7 +2,6 @@
 import asyncio
 import logging
 import secrets
-from urllib.parse import quote
 
 from adapters.clock import ClockProvider
 from adapters.dante_users import DanteUserAdapter
@@ -14,6 +13,7 @@ from repositories.proxy_accesses import ProxyAccessRepository
 from services.audit import AuditService
 from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
+from services.proxy_endpoint import ProxyEndpoints, socks5_tg_link, socks5_url
 from services.user_locks import UserLockManager
 from services.users import UserService
 
@@ -49,11 +49,15 @@ class Socks5Service:
         audit: AuditService,
         user_locks: UserLockManager | None = None,
         backend_health: BackendHealth | None = None,
+        endpoints: ProxyEndpoints | None = None,
     ) -> None:
         self.accesses = accesses
         self.users = users
         self.adapter = adapter
         self.settings = settings
+        # THE public address of the proxy now (services/proxy_endpoint.py): the hub's
+        # IPv4 in the fallback mode, SOCKS5_HOST otherwise.
+        self.endpoints = endpoints or ProxyEndpoints(settings)
         self.clock = clock
         self.audit = audit
         self.user_locks: UserLockManager = user_locks if user_locks is not None else getattr(users, "user_locks", UserLockManager())
@@ -128,7 +132,7 @@ class Socks5Service:
                     actor_user_id=actor_user_id,
                     action="socks5_proxy_created",
                     entity_id=access.id,
-                    details={"owner_user_id": profile.telegram_user_id, "login": login, "host": self.settings.socks5_host},
+                    details={"owner_user_id": profile.telegram_user_id, "login": login, "host": self.endpoints.socks5().host},
                 )
                 active = await self._get_access(access.id)
                 await self._mark_shown(active, actor_user_id)
@@ -141,7 +145,7 @@ class Socks5Service:
         if access is None:
             raise NotFound("SOCKS5-доступ не найден", key="err_socks5_access_not_found")
         await self._mark_shown(access, actor_user_id)
-        return await self._get_access(access.id)
+        return self.endpoints.current(await self._get_access(access.id))
 
     async def list_user_proxy_accesses(self, actor_user_id: int) -> list[ProxyAccess]:
         """Return all proxy accesses owned by the requesting user."""
@@ -392,24 +396,25 @@ class Socks5Service:
         raise InvalidOperation("Не удалось сгенерировать уникальный SOCKS5 login")
 
     def _payload(self, login: str, password: str) -> dict[str, object]:
-        host = self.settings.socks5_host
-        port = self._port()
-        url = f"socks5://{quote(login, safe='')}:{quote(password, safe='')}@{host}:{port}"
+        self._port()
+        endpoint = self.endpoints.socks5()
         return {
             "type": ProxyAccessType.SOCKS5.value,
-            "host": host,
-            "port": port,
+            "host": endpoint.host,
+            "port": endpoint.port,
             "login": login,
             "password": password,
-            "url": url,
+            "url": socks5_url(endpoint, login, password),
+            "tg_link": socks5_tg_link(endpoint, login, password),
             "public_name": self.settings.socks5_public_name,
             "note": self.settings.socks5_note,
         }
 
     def _public_payload(self, login: str) -> dict[str, object]:
+        endpoint = self.endpoints.socks5()
         return {
             "type": ProxyAccessType.SOCKS5.value,
-            "host": self.settings.socks5_host,
+            "host": endpoint.host,
             "port": self._port(),
             "login": login,
             "public_name": self.settings.socks5_public_name,

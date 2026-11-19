@@ -51,8 +51,9 @@ logger = logging.getLogger(__name__)
 
 
 def harden_steps(hardening: RelayHardening) -> list[tuple[str, str]]:
-    """The steps of «Довести» for what is left, in their order (filter first)."""
-    keys = (["filter_on", "filter_confirm"] if hardening.filter_off else []) + (
+    """The steps of «Довести» for what is left, in their order: the foreign sshd
+    override check first (always — a fresh host check), then the filter, then SSH."""
+    keys = ["sshd_check"] + (["filter_on", "filter_confirm"] if hardening.filter_off else []) + (
         ["ssh_set", "ssh_finish"] if hardening.ssh_on_22 else []
     )
     return [(key, t(f"relay_harden_step_{key}", port=HARDEN_SSH_PORT)) for key in keys]

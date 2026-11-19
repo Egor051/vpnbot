@@ -326,7 +326,9 @@ async def test_doveste_shows_the_plan_then_runs_with_progress(prod: Env) -> None
     plan = Callback("rhard:go:1")
     await ui.relay_harden_plan(plan, fsm(), _services(prod, totp))  # type: ignore[arg-type]
     text = plan.message.edits[-1]
-    assert text.count("⚪") == 4 and t("relay_harden_step_filter_on") in text
+    assert text.count("⚪") == 5 and t("relay_harden_step_filter_on") in text
+    # The foreign sshd override check is always the first step.
+    assert text.index(t("relay_harden_step_sshd_check")) < text.index(t("relay_harden_step_filter_on"))
     assert text.index(t("relay_harden_step_filter_on")) < text.index(t("relay_harden_step_ssh_set", port=HARDEN_SSH_PORT))
     assert _buttons(plan.message.markups[-1])[:2] == ["rhard:ok:1", "rhard:later:1"]
     assert sim.asked() == [], "nothing ran before the confirmation"

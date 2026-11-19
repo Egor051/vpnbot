@@ -199,6 +199,17 @@ for the TOTP code (it carries the host's topology off the box).
 
 ### ⬆️ Обновить бота
 
+**One message, one confirmation.** The button edits THIS message: the deploy's steps ⚪ and
+«✅ Подтвердить» / «✖️ Отменить» — no run exists yet. With TOTP the code prompt is in the same message
+and the code is the confirmation (no «▶️ Продолжить», no second confirmation after the plan). The run
+then starts *confirmed* (`WizardService.start(confirmed=True)`, `schema_meta` `wizard_confirmed_run`):
+its plan — `CHECK=1` below — goes on to apply by itself, also across a restart of the bot. While it
+runs the message carries only «📄 Лог»; «Состояние:» says what is: «⏳ выполняется (шаг: тесты)» from
+the first step marker on — never «📝 план» while the steps move — then «✅ готово» / «❌ ошибка» with
+«📄 Лог» and «⬅️ Назад». A second press while a run is active answers «уже идёт, запуск #N» and
+changes nothing. The plan's steps stay ✅ while apply's deploy (its tests skipped by the Phase 1
+stamp) gets to them again — no step goes back to ⚪.
+
 A thin wrapper around the one supported redeploy path, `scripts/redeploy.sh`:
 
 * **plan** — `git fetch origin main`; the commits `HEAD..origin/main`, the
@@ -208,7 +219,7 @@ A thin wrapper around the one supported redeploy path, `scripts/redeploy.sh`:
   the run ends there. A checkout *ahead* of `origin/main` (a local commit) is not a no-op:
   the plan warns that the deploy resets the checkout and those commits are gone.
   The plan records the exact `origin/main` revision it describes.
-* **confirm** (TOTP) → **apply** — only that revision: `git fetch origin main` again, and
+* **apply** (the run's one confirmation was given before it started) — only that revision: `git fetch origin main` again, and
   if `origin/main` moved since the plan (other commits, maybe another migration than the
   one confirmed) nothing is deployed and the run fails with "start the update again".
   Then `redeploy.sh`. `deploy.sh` stops and restarts the bot; the run keeps going in its
@@ -221,7 +232,7 @@ A thin wrapper around the one supported redeploy path, `scripts/redeploy.sh`:
   or never finished — is `failed`: read the log.
 
 **Progress.** The plan lists the deploy's steps ⚪ (preflight, fetch, tests, checks, backup,
-install, restart, verify) under «✅ Применить». While `CHECK=1` and the deploy run, the helper reads
+install, restart, verify) above «✅ Подтвердить». While `CHECK=1` and the deploy run, the helper reads
 redeploy.sh's output as it comes and writes a `deploy` event into the status file every 2 s
 (`deploy_progress` of the [step markers](deployment.md#step-and-result-markers): each step's state
 and the tests — done of `[deploy:tests total=N]`); the bot's message shows ⚪ 🔄 ✅ ❌ ⏭, «N/M» and
@@ -343,10 +354,11 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 | every change of a relay — on/off, «➕ Добавить в подписки» / «➖ Убрать из подписок», «👁 в базовых» (of a relay and of the main server), host, rename, source IPs, note, the source IP offer | the button on the relay's page or the relay list; «✅ Выполнить» under the subscriptions plan (a typed step checks the elevation again) |
 | deleting a relay (record only included) / together with its keys | «Relay → Удалить» (the final button) |
 | wizard: diagnostic dump | start, and the dump file from the history |
-| wizard: update the bot | start and «✅ Применить» |
+| wizard: update the bot | «✅ Подтвердить» of the plan — the code in the same message is the confirmation |
 | Relay: issue a pairing code — a new relay or an agent for an existing one | «➕ Добавить relay», «🔗 Подключить агент» |
 | Relay: complete a pairing | «🔌 Подключить» (the typed address checks the elevation again) |
-| Relay: update a relay's agent | «⬆️ Обновить агент» |
+| Relay: update a relay's agent | «⬆️ Обновить агент» — the code in the same message is the confirmation |
+| Relay: move a foreign sshd override to `/root/attic` ([relay.md](relay.md#a-foreign-sshd-override)) | «🧹 Убрать чужой override» — the code in the same message |
 | Relay: change a relay's ports / target | «⚙️ Порты / цель» (the typed step checks the elevation again) |
 | Relay: disconnect the agent | «🔌 Отключить агент» |
 | Relay: uninstall on the relay (delete of a relay with an agent, «🧹 Отключить и снять с relay») | the final button |
@@ -356,10 +368,15 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 | Fallback mode: the hub role | «🛟 Сделать hub» (the typed origin checks the elevation again), «🛟 Снять роль hub» |
 | Fallback mode: the DNS API token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |
 | Fallback mode: names, addresses, direct links' host, `fallback-url` | each button; a typed value checks the elevation again |
+| Fallback mode: broadcast of the new proxy address ([relay.md](relay.md#the-proxies-through-the-hub)) | «✅ Разослать» |
 
 A correct code **elevates** the user for 5 minutes: inside that window nothing is asked
 again. Elevations live in the bot process only — a restart drops them. The prompt
-turns into «▶️ Продолжить», which presses the original button again. Future dangerous
+turns into «▶️ Продолжить», which presses the original button again. **In place**
+(`require_totp_in_place`: «Обновить бота», «Обновить агент», «Убрать чужой override») the code is
+asked in the same message as the plan, and a correct code starts the action right there — one
+message, one confirmation; a wrong one keeps the screen and adds the error, «✖️ Отмена» drops the
+prompt. Future dangerous
 actions (rotations, IP/domain change, restore) register in `DANGEROUS_ACTIONS`
 (`bot/totp_gate.py`). Audit (entity `security`): `totp_enrollment_started`,
 `totp_enabled`, `totp_verified`, `totp_backup_code_used`, `totp_verify_failed`,

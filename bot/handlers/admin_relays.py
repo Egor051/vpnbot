@@ -34,7 +34,14 @@ from typing import Any, cast
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InaccessibleMessage,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from bot.container import Services
 from bot.deploy_views import deploy_failure_text, deploy_warnings_text
@@ -72,7 +79,7 @@ from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.progress import STATES, ProgressMessage, Timer, steps_of
 from bot.fallback import fallback_state_line
 from bot.relays import outcome_text, pairing_text, relay_card_text, relay_delete_text, relays_list_text
-from bot.totp_gate import require_totp
+from bot.totp_gate import Resume, register_resume, require_totp, require_totp_in_place
 from config.validators import format_ipv4_networks, ipv4_address
 from i18n import t
 from models.dto import Relay, RelayPairing
@@ -81,7 +88,9 @@ from services.errors import AccessDenied, InvalidOperation, NotFound, ServiceErr
 from services.key_bundles import ReconcileOutcome, ReconcileSummary, RelayMembersAction
 from services.relay_health import LEVEL_ICONS
 from services.relay_pairing import format_ports
+from services.relay_sshd_override import remove_button
 from services.relays import (
+    AGENT_SSHD_OVERRIDE,
     AGENT_UPDATE_STATUS,
     IssuedPairing,
     PairingCheckFailed,
@@ -95,6 +104,7 @@ from services.relays import (
     parse_relay_host,
 )
 from utils.formatting import code, h
+from utils.redact import redact_text
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -1242,8 +1252,34 @@ async def _progress_edit(message: object, text: str, *, reply_markup: InlineKeyb
     return await safe_edit_message_text(message, text, reply_markup=reply_markup)  # type: ignore[arg-type]
 
 
-def _update_view(callback: CallbackQuery, relay: Relay) -> ProgressMessage:
-    return ProgressMessage(callback.message, t("relay_update_title", name=h(relay.name)),
+class UpdateRuns:
+    """The relay updates running in this process, numbered: a second «Обновить» while one
+    runs answers «уже идёт, запуск #N» and starts nothing."""
+
+    def __init__(self) -> None:
+        self._seq = 0
+        self._running: dict[int, int] = {}
+
+    def running(self, relay_id: int) -> int | None:
+        return self._running.get(relay_id)
+
+    def start(self, relay_id: int) -> int | None:
+        """A number for a new run of *relay_id*; None while one runs."""
+        if relay_id in self._running:
+            return None
+        self._seq += 1
+        self._running[relay_id] = self._seq
+        return self._seq
+
+    def finish(self, relay_id: int) -> None:
+        self._running.pop(relay_id, None)
+
+
+UPDATE_RUNS = UpdateRuns()
+
+
+def _update_view(message: object, relay: Relay) -> ProgressMessage:
+    return ProgressMessage(message, t("relay_update_title", name=h(relay.name)),  # type: ignore[arg-type]
                            steps_of(deploy_step_titles()), edit=_progress_edit)
 
 
@@ -1256,26 +1292,55 @@ def _legacy_agent(relay: Relay) -> bool:
     return agent_older_than(relay.agent, AGENT_UPDATE_STATUS)
 
 
+def _update_plan(relay: Relay, *, needs_code: bool = False) -> str:
+    """The plan of «Обновить агент»: every step ⚪ (an agent that cannot report steps:
+    its one line), what happens, and the one confirmation (or the code that is it)."""
+    view = _update_view(None, relay)
+    if _legacy_agent(relay):
+        view.steps = steps_of([(LEGACY_STEP, _legacy_line(relay))])
+    view.footer = t("relay_update_plan_note") + "\n\n" + (
+        t("relay_update_confirm_code") if needs_code else t("relay_update_confirm_hint")
+    )
+    return view.text(activity=False)
+
+
+def _update_log_keyboard(relay_id: int) -> InlineKeyboardMarkup:
+    """While the update runs: only «📄 Лог»."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t("btn_wizard_log"), callback_data=f"admin:relay:{relay_id}:ag:log")],
+    ])
+
+
+async def _answer_running(callback: CallbackQuery, relay_id: int) -> bool:
+    number = UPDATE_RUNS.running(relay_id)
+    if number is None:
+        return False
+    await safe_callback_answer(callback, t("relay_update_already_running", id=number), show_alert=True)
+    return True
+
+
 @router.callback_query(F.data.regexp(_RELAY_ACTION + r":ag:up$"))
 async def relay_agent_update(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """The plan: every step of the relay's deploy ⚪ (an agent that cannot report the
-    steps: its one line instead), and «✅ Подтвердить»."""
+    """«⬆️ Обновить агент»: THIS message becomes the plan — every step ⚪ and «✅
+    Подтвердить» / «✖️ Отмена»; with TOTP the code prompt instead, the code being the
+    confirmation (the gate in place). A press while an update runs: «уже идёт, запуск #N»."""
     try:
         if not await _guard(callback, services):
             return
         assert callback.from_user is not None and callback.data is not None
         relay_id = _relay_id(callback.data)
-        if not await require_totp(callback, state, services, action="relay_update"):
+        if await _answer_running(callback, relay_id):
             return
         relay = await services.relays.get(callback.from_user.id, relay_id)
+        if not await require_totp_in_place(
+            callback, state, services, action="relay_update", screen=_update_plan(relay, needs_code=True),
+            resume=f"admin:relay:{relay_id}:ag:up:ok", back=f"admin:relay:{relay_id}", edit=safe_edit_message_text,
+        ):
+            return
         await safe_callback_answer(callback)
-        view = _update_view(callback, relay)
-        if _legacy_agent(relay):
-            view.steps = steps_of([(LEGACY_STEP, _legacy_line(relay))])
-        view.footer = t("relay_update_plan_note")
-        await view.show_plan(InlineKeyboardMarkup(inline_keyboard=[
+        await safe_edit_message_text(callback.message, _update_plan(relay), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_relay_update_confirm"), callback_data=f"admin:relay:{relay_id}:ag:up:ok")],
-            [InlineKeyboardButton(text=t("btn_cancel"), callback_data=f"admin:relay:{relay_id}")],
+            [InlineKeyboardButton(text=t("btn_relay_update_cancel"), callback_data=f"admin:relay:{relay_id}")],
         ]))
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1299,16 +1364,32 @@ def _close_failed(view: ProgressMessage, poller: UpdatePoller, step: str) -> boo
     return False
 
 
+def _override_rows(relay: Relay, paths: tuple[str, ...]) -> list[list[InlineKeyboardButton]]:
+    """«🧹 Убрать чужой override» for each foreign sshd override the result names."""
+    if agent_older_than(relay.agent, AGENT_SSHD_OVERRIDE):
+        return []
+    return [remove_button(relay.id, path) for path in paths[:4]]
+
+
+def _override_manual(relay: Relay, paths: tuple[str, ...]) -> str:
+    """An agent too old to remove it: the one-time fix by hand (the update that would
+    bring the new agent is the very deploy the override stops)."""
+    if not paths or not agent_older_than(relay.agent, AGENT_SSHD_OVERRIDE):
+        return ""
+    moves = "\n".join(f"mv {path} /root/attic/" for path in paths)
+    return t("relay_sshd_override_manual", version=h(agent_release(relay.agent)), commands=h(moves))
+
+
 async def _run_update(
-    callback: CallbackQuery, services: Services, view: ProgressMessage, poller: UpdatePoller, relay: Relay
-) -> str | None:
-    """The long ``update`` with the animation; the result's text for the card (None:
-    the relay is gone — the plain card/list)."""
-    assert callback.from_user is not None
+    actor: int, services: Services, view: ProgressMessage, poller: UpdatePoller, relay: Relay
+) -> tuple[str, list[list[InlineKeyboardButton]]] | None:
+    """The long ``update`` with the animation; the result's text and its extra buttons
+    (None: the relay is gone — the plain card/list)."""
     shown = True
+    rows: list[list[InlineKeyboardButton]] = []
     try:
         try:
-            reply = await view.run(services.relays.update_agent(callback.from_user.id, relay.id))
+            reply = await view.run(services.relays.update_agent(actor, relay.id))
         finally:
             # Before any final state: a poll answer from now on is dropped.
             poller.stop()
@@ -1333,36 +1414,40 @@ async def _run_update(
     except RelayUpdateFailed as exc:
         shown = _close_failed(view, poller, exc.failure.step)
         notice = t("relay_agent_update_failed_cause") + "\n" + deploy_failure_text(exc.failure)
+        paths = exc.failure.sshd_overrides
+        if paths:
+            monitor = getattr(services, "sshd_override", None)
+            if monitor is not None:
+                await monitor.remember(relay.id, paths)
+            manual = _override_manual(relay, paths)
+            notice += "\n\n" + (manual or t("relay_sshd_override_hint"))
+            rows = _override_rows(relay, paths)
     except ServiceError as exc:
         shown = _close_failed(view, poller, "")
         notice = t("relay_agent_update_failed", error=h(service_error_text(exc)))
     title = t("relay_update_title", name=h(relay.name))
     if not shown:
-        return f"{title}\n\n{notice}"
+        return f"{title}\n\n{notice}", rows
     steps = view.text(activity=False).split("\n", 2)[-1].strip()
-    return f"{title}\n{steps}\n\n{notice}"
+    return f"{title}\n{steps}\n\n{notice}", rows
 
 
-@router.callback_query(F.data.regexp(_RELAY_ACTION + r":ag:up:ok$"))
-async def relay_agent_update_run(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """The update itself: the long agent call, and next to it ``update-status`` every
-    :data:`UPDATE_POLL_SECONDS` (:class:`UpdatePoller`); the result closes the steps
-    (✅, or ❌ on the step it stopped in — «шаг неизвестен» when nobody can tell).
+async def _relay_update_run(message: Message, actor: int, relay_id: int, services: Services) -> int | None:
+    """The update itself on *message*: the long agent call and, next to it,
+    ``update-status`` every :data:`UPDATE_POLL_SECONDS` (:class:`UpdatePoller`); only
+    «📄 Лог» under it while it runs; the result with «⬅️ Назад» at the end. The run's
+    number — None when one already runs.
 
     An agent older than ``update-status`` (its version from the last status, or its
     «not an agent command» to the first poll) shows ONE line with the activity, never a
     list of steps that cannot move."""
+    number = UPDATE_RUNS.start(relay_id)
+    if number is None:
+        return None
     try:
-        if not await _guard(callback, services):
-            return
-        assert callback.from_user is not None and callback.data is not None
-        relay_id = _relay_id(callback.data)
-        if not await require_totp(callback, state, services, action="relay_update"):
-            return
-        actor = callback.from_user.id
         relay = await services.relays.get(actor, relay_id)
-        await safe_callback_answer(callback, t("relay_agent_updating"))
-        view = _update_view(callback, relay)
+        view = _update_view(message, relay)
+        view.markup = _update_log_keyboard(relay_id)
         poller = UpdatePoller(view, lambda: services.relays.update_progress(actor, relay_id), _legacy_line(relay))
         if _legacy_agent(relay):
             poller.legacy_view()
@@ -1371,16 +1456,89 @@ async def relay_agent_update_run(callback: CallbackQuery, state: FSMContext, ser
         await view.push(force=True)
         polling = asyncio.create_task(poller.run()) if not poller.legacy else None
         try:
-            body = await _run_update(callback, services, view, poller, relay)
-            if body is not None:
-                await _show_card(callback, services, relay_id, body)
+            result = await _run_update(actor, services, view, poller, relay)
+            back = [InlineKeyboardButton(text=t("btn_back"), callback_data=f"admin:relay:{relay_id}")]
+            if result is None:
+                await safe_edit_message_text(message, t("err_relay_not_found"), reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text=t("btn_back"), callback_data="admin:relays")]]))
             else:
-                await _show_card(callback, services, relay_id)
+                body, rows = result
+                log = [InlineKeyboardButton(text=t("btn_wizard_log"), callback_data=f"admin:relay:{relay_id}:ag:log")]
+                await safe_edit_message_text(message, body, reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[*rows, log, back]))
         finally:
             if polling is not None:
                 # Not cancelled: an ssh call in flight finishes on its own (its answer is
                 # dropped) — after the result is on the screen, which never waits for it.
                 await asyncio.gather(polling, return_exceptions=True)
+    finally:
+        UPDATE_RUNS.finish(relay_id)
+    return number
+
+
+@router.callback_query(F.data.regexp(_RELAY_ACTION + r":ag:up:ok$"))
+async def relay_agent_update_run(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """«✅ Подтвердить»: the update, in this message (:func:`_relay_update_run`)."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        relay_id = _relay_id(callback.data)
+        if await _answer_running(callback, relay_id):
+            return
+        relay = await services.relays.get(callback.from_user.id, relay_id)
+        if not await require_totp_in_place(
+            callback, state, services, action="relay_update", screen=_update_plan(relay, needs_code=True),
+            resume=f"admin:relay:{relay_id}:ag:up:ok", back=f"admin:relay:{relay_id}", edit=safe_edit_message_text,
+        ):
+            return
+        await safe_callback_answer(callback, t("relay_agent_updating"))
+        if await _relay_update_run(_message(callback), callback.from_user.id, relay_id, services) is None:
+            await _answer_running(callback, relay_id)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@register_resume(r"admin:relay:\d+:ag:up:ok")
+async def relay_agent_update_resume(resume: Resume) -> None:
+    """A correct TOTP code on the plan: it was the confirmation — the update starts here."""
+    relay_id = _relay_id(resume.data)
+    try:
+        await require_superadmin(resume.services, resume.user.id)
+        number = await _relay_update_run(resume.message, resume.user.id, relay_id, resume.services)
+        if number is None:
+            await safe_edit_message_text(
+                resume.message, t("relay_update_already_running", id=UPDATE_RUNS.running(relay_id) or "?"),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=t("btn_back"), callback_data=f"admin:relay:{relay_id}")]]),
+            )
+    except ServiceError as exc:
+        await safe_edit_message_text(resume.message, h(service_error_text(exc)), reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text=t("btn_back"), callback_data=f"admin:relay:{relay_id}")]]))
+
+
+@router.callback_query(F.data.regexp(_RELAY_ACTION + r":ag:log$"))
+async def relay_agent_update_log(callback: CallbackQuery, services: Services) -> None:
+    """«📄 Лог»: the end of the update's deploy log on the relay, as a file (read-only;
+    it runs next to the update itself)."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.data is not None
+        relay_id = _relay_id(callback.data)
+        relay = await services.relays.get(callback.from_user.id, relay_id)
+        got = await services.relays.update_log(callback.from_user.id, relay_id)
+        if got is None:
+            await safe_callback_answer(
+                callback, t("relay_update_log_old_agent", version=agent_release(relay.agent)), show_alert=True)
+            return
+        path, text = got
+        await safe_callback_answer(callback)
+        name = f"relay-{relay.name}-{path.rsplit('/', 1)[-1] or 'deploy.log'}"
+        await _message(callback).answer_document(
+            BufferedInputFile(redact_text(text).encode("utf-8"), filename=name[:120]),
+            caption=t("relay_update_log_caption", name=h(relay.name), path=code(path)),
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

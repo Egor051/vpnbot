@@ -24,7 +24,19 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.fsm.states import TotpStates
 from bot.handlers import admin_modules, security
-from bot.totp_gate import ACTION_KEY, DANGEROUS_ACTIONS, PROMPT_KEY, RESUME_KEY, require_totp
+from bot.totp_gate import (
+    ACTION_KEY,
+    DANGEROUS_ACTIONS,
+    IN_PLACE_KEY,
+    PROMPT_KEY,
+    RESUME_KEY,
+    UNDO_DATA,
+    Resume,
+    register_resume,
+    require_totp,
+    require_totp_in_place,
+    screen_message,
+)
 from i18n import _CATALOGS
 from services.totp import TotpError, TotpLocked, VerifyResult
 from services.wizard_modes import MODES
@@ -236,7 +248,7 @@ async def test_protocol_removal_stops_at_the_gate(monkeypatch: pytest.MonkeyPatc
 def test_every_gated_call_site_names_a_registered_action() -> None:
     sites: list[tuple[str, str]] = []
     for path in (ROOT / "bot").rglob("*.py"):
-        for m in re.finditer(r'require_totp\([^)]*action="([a-z_]+)"', path.read_text(encoding="utf-8")):
+        for m in re.finditer(r'require_totp(?:_in_place)?\([^)]*action="([a-z_]+)"', path.read_text(encoding="utf-8")):
             sites.append((path.name, m.group(1)))
     names = {action for _, action in sites}
     assert {"protocol_uninstall", "protocol_disable", "relay_delete_keys"} <= names, sites
@@ -249,3 +261,79 @@ def test_every_gated_call_site_names_a_registered_action() -> None:
     for label in DANGEROUS_ACTIONS.values():
         for locale in ("ru", "en"):
             assert label in _CATALOGS[locale], (locale, label)
+
+
+# ── in place: the code asked on the screen it confirms (one message, one confirmation) ──
+_RESUMED: list[tuple[int, str]] = []
+
+
+@register_resume(r"test:inplace:\d+")
+async def _test_resume(resume: Resume) -> None:
+    _RESUMED.append((resume.message.message_id, resume.data))
+
+
+async def _in_place(totp: FakeTotp) -> tuple[FSMContext, FakeCallback]:
+    state = fsm()
+    callback = FakeCallback("test:inplace:1")
+
+    async def edit(message: Any, text: str, reply_markup: Any = None, **_: Any) -> bool:
+        message.edits.append(text)
+        message.markup = reply_markup
+        return True
+
+    assert not await require_totp_in_place(  # type: ignore[arg-type]
+        callback, state, services(totp), action="relay_update", screen="PLAN ⚪", resume="test:inplace:1",
+        back="admin:relay:1", edit=edit,
+    )
+    return state, callback
+
+
+async def test_in_place_the_code_is_asked_on_the_screen_itself() -> None:
+    state, callback = await _in_place(FakeTotp())
+    assert callback.message.answers == [], "no second message"
+    assert callback.message.edits[-1].startswith("PLAN ⚪") and "🔐" in callback.message.edits[-1]
+    assert _buttons(callback.message.markup) == [UNDO_DATA]  # type: ignore[attr-defined]
+    data = await state.get_data()
+    assert data[PROMPT_KEY] == callback.message.message_id and data[IN_PLACE_KEY] is True
+
+
+async def test_in_place_a_correct_code_runs_the_action_on_that_screen() -> None:
+    _RESUMED.clear()
+    totp = FakeTotp()
+    state, callback = await _in_place(totp)
+    bot = FakeBot()
+    await security.totp_gate_code(FakeMessage(text="123456"), state, services(totp), bot)  # type: ignore[arg-type]
+    assert _RESUMED == [(callback.message.message_id, "test:inplace:1")], "the code was the confirmation"
+    assert bot.edited == [], "no «▶️ Продолжить»"
+    assert await state.get_state() is None
+
+
+async def test_in_place_a_wrong_code_keeps_the_screen() -> None:
+    _RESUMED.clear()
+    totp = FakeTotp()
+    totp.verify_result = TotpError("bad", key="totp_invalid_code")
+    state, _ = await _in_place(totp)
+    bot = FakeBot()
+    await security.totp_gate_code(FakeMessage(text="000000"), state, services(totp), bot)  # type: ignore[arg-type]
+    text, markup = bot.edited[-1]
+    assert text.startswith("PLAN ⚪") and _buttons(markup) == [UNDO_DATA] and _RESUMED == []
+    assert await state.get_state() == TotpStates.gate_code.state
+
+
+async def test_in_place_cancel_clears_the_gate_and_leads_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    state, _ = await _in_place(FakeTotp())
+    edits: list[tuple[str, Any]] = []
+
+    async def edit(message: Any, text: str, reply_markup: Any = None, **_: Any) -> bool:
+        edits.append((text, reply_markup))
+        return True
+
+    monkeypatch.setattr(security, "safe_edit_message_text", edit)
+    await security.totp_gate_undo(FakeCallback(UNDO_DATA), state)  # type: ignore[arg-type]
+    assert await state.get_state() is None
+    assert _buttons(edits[-1][1]) == ["admin:relay:1"]
+
+
+def test_the_screen_message_is_bound_to_the_bot() -> None:
+    message = screen_message(FakeBot(), UID, 42)  # type: ignore[arg-type]
+    assert (message.message_id, message.chat.id) == (42, UID)

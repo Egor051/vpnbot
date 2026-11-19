@@ -19,13 +19,14 @@ from __future__ import annotations
 import logging
 from typing import cast
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.container import Services
 from bot.fallback import (
     candidates_text,
+    proxy_notice_text,
     failure_keys,
     fallback_text,
     names_text,
@@ -49,6 +50,7 @@ from bot.keyboards.admin_fallback import (
     name_tag,
     names_keyboard,
     origin_keyboard,
+    proxy_notice_keyboard,
     settings_keyboard,
     setup_origin_keyboard,
     token_keyboard,
@@ -59,7 +61,9 @@ from bot.progress import ProgressMessage, steps_of
 from bot.totp_gate import require_totp
 from i18n import t
 from services.errors import InvalidOperation, NotFound, ServiceError
+from models.dto import RecipientFilter
 from services.fallback import FallbackOverview, FallbackService
+from services.proxy_endpoint import PROXY_KINDS
 from services.relays import host_is_ipv4
 from utils.formatting import code, h
 
@@ -205,8 +209,8 @@ async def _progress_edit(message: object, text: str, *, reply_markup: InlineKeyb
     return await safe_edit_message_text(message, text, reply_markup=reply_markup)  # type: ignore[arg-type]
 
 
-def _switch_progress(callback: CallbackQuery, action: str) -> ProgressMessage:
-    return ProgressMessage(callback.message, t(f"fb_progress_{action}"), steps_of(switch_step_titles()),
+def _switch_progress(callback: CallbackQuery, action: str, *, proxies: bool = False) -> ProgressMessage:
+    return ProgressMessage(callback.message, t(f"fb_progress_{action}"), steps_of(switch_step_titles(proxies=proxies)),
                            edit=_progress_edit)
 
 
@@ -238,7 +242,7 @@ async def fallback_confirm(callback: CallbackQuery, services: Services, state: F
             )
         else:
             text = t("fb_confirm_off", count=len(overview.names), ip=code(overview.main_ipv4 or "—"))
-        plan = _switch_progress(callback, action)
+        plan = _switch_progress(callback, action, proxies=bool(overview.proxies))
         plan.footer = text
         await plan.show_plan(confirm_keyboard(action))
     except Exception as exc:
@@ -251,9 +255,12 @@ async def _run_switch(callback: CallbackQuery, services: Services, action: str) 
     assert callback.from_user is not None
     fallback = _service(services)
     actor = callback.from_user.id
-    view = _switch_progress(callback, action)
+    view = _switch_progress(callback, action, proxies=bool(await fallback.proxy_ports()))
+    keys = {step.key for step in view.steps}
 
     async def on_progress(step: str, step_state: str, done: int | None, total: int | None) -> None:
+        if step not in keys:
+            return
         view.set(step, step_state, done=done, total=total)
         await view.push()
 
@@ -290,6 +297,78 @@ async def fallback_switch(callback: CallbackQuery, state: FSMContext, services: 
         await safe_callback_answer(callback, t("fb_switching"))
         action = callback.data.split(":")[2]
         await _run_switch(callback, services, action)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+# ── «📣 Разослать новую ссылку»: the proxies a switch moved (docs/proxy.md) ─────
+
+
+def _proxy_filter(kinds: tuple[str, ...]) -> RecipientFilter:
+    return RecipientFilter.create(protocols=[PROXY_KINDS[kind].value for kind in kinds if kind in PROXY_KINDS])
+
+
+@router.callback_query(F.data == "admin:fb:pxn")
+async def fallback_proxy_notice(callback: CallbackQuery, services: Services) -> None:
+    """The broadcast's confirmation: who gets it (the users with an active access of a
+    proxy that moved) and exactly what they get. Optional — never sent by itself."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None
+        fallback = _service(services)
+        kinds = await fallback.proxy_notice()
+        await safe_callback_answer(callback)
+        if not kinds:
+            await _show(callback, services, t("fb_proxy_notice_none"))
+            return
+        count = await services.announcements.count_recipients(callback.from_user.id, recipient_filter=_proxy_filter(kinds))
+        text = "\n".join([
+            t("fb_proxy_notice_confirm", count=count), "", proxy_notice_text(kinds, fallback.endpoints),
+        ])
+        await safe_edit_message_text(callback.message, text, reply_markup=proxy_notice_keyboard())
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:fb:pxn:ok")
+async def fallback_proxy_notice_send(callback: CallbackQuery, state: FSMContext, services: Services, bot: Bot) -> None:
+    """The broadcast, through the announcements (their ledger and their resume): the
+    message below is posted here and copied to every recipient as it is."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None and callback.message is not None
+        if not await require_totp(callback, state, services, action="fallback_proxy_notice"):
+            return
+        fallback = _service(services)
+        kinds = await fallback.proxy_notice()
+        if not kinds:
+            await safe_callback_answer(callback)
+            await _show(callback, services, t("fb_proxy_notice_none"))
+            return
+        await safe_callback_answer(callback, t("announce_sending"))
+        source = await bot.send_message(callback.message.chat.id, proxy_notice_text(kinds, fallback.endpoints))
+        result = await services.announcements.send_to_all(
+            actor_user_id=callback.from_user.id, bot=bot, from_chat_id=callback.message.chat.id,
+            message_id=source.message_id, recipient_filter=_proxy_filter(kinds),
+        )
+        await fallback.clear_proxy_notice(callback.from_user.id)
+        await _show(callback, services, t("fb_proxy_notice_sent", total=result.total, success=result.success,
+                                          failed=result.failed))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:fb:pxn:no")
+async def fallback_proxy_notice_skip(callback: CallbackQuery, services: Services) -> None:
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None
+        await _service(services).clear_proxy_notice(callback.from_user.id)
+        await safe_callback_answer(callback)
+        await _show(callback, services, t("fb_proxy_notice_skipped"))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

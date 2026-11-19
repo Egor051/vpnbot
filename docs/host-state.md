@@ -310,7 +310,12 @@ legacy name gone. So a repo file another file would outrank is caught before any
 installed; a live value the deploy is about to change is PENDING. **Phase 2** runs it again
 right after the host files and the role's unit are installed (on main: before the bot starts),
 writes the state file, and rolls back on any BEATEN/MISMATCH — the same path as the ssh gate.
-Both the `PHASE1_ONLY` report and `DEPLOY OK` carry the rows.
+Both the `PHASE1_ONLY` report and `DEPLOY OK` carry the rows. A Phase 1 refusal carries the
+findings in its own line too: `host invariants: N fatal finding(s) — nothing was changed. Fatal: BEATEN
+sshd passwordauthentication: <file>:<line> = yes wins over the repo value no of <repo file> …`
+(`hc_fatal_brief`, at most 4) — even a relay agent older than the markers forwards that line, and the
+bot shows the key, file:line and what beat what in the update's result
+([relay.md → A foreign sshd override](relay.md#a-foreign-sshd-override)).
 
 ### The vendor rule
 
@@ -472,10 +477,14 @@ ACCEPTED never alert; a reported LATENT that turns INFO (ssh.socket's `addresses
 check knows it as [generator output](#generator-output)) is dropped from what was reported, without
 a message.
 
-A **relay** runs no bot, and the bot has no channel to a relay — relays are rows in the database,
-probed from outside by a TLS handshake through their DNAT — so none is built for this. A relay's
-verdict is in its journal (`journalctl -u vpn-bot-host-check`, the failed unit) and in Phase 1 of
-every relay deploy (`CHECK=1` shows it without deploying).
+A **relay** runs no bot. Its verdict is in its journal (`journalctl -u vpn-bot-host-check`, the
+failed unit) and in Phase 1 of every relay deploy (`CHECK=1` shows it without deploying). The bot
+reads it through the agent (5+): `status` carries `sshd_overrides` from `last.json` (foreign files in
+`sshd_config.d` that beat a repo login key) and `sshd_drift` (`sshd -T` against the repo, every
+call); `sshd-check` runs the check afresh. For such a file the superadmins get a message with the
+button «🧹 Убрать чужой override» — once per file and its mtime, again when the file comes back
+([relay.md → A foreign sshd override](relay.md#a-foreign-sshd-override)). The relay's other rows are
+not forwarded.
 
 ### DNS on the main server
 

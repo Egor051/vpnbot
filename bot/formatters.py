@@ -682,16 +682,19 @@ def proxy_section_separator() -> str:
 
 
 def socks5_proxy_text(payload: dict[str, object]) -> str:
-    return "\n".join(
-        [
-            "<b>SOCKS5</b>",
-            f"Host: {code(payload.get('host') or '')}",
-            f"Port: {code(payload.get('port') or '')}",
-            f"Login: {code(payload.get('login') or '')}",
-            f"Password: {code(payload.get('password') or '')}",
-            f"URL: {code(payload.get('url') or '')}",
-        ]
-    )
+    """The SOCKS5 access as the user gets it — the payload's address is the one it is
+    reached at NOW (services/proxy_endpoint.py: the hub's IPv4 in the fallback mode)."""
+    lines = [
+        "<b>SOCKS5</b>",
+        f"Host: {code(payload.get('host') or '')}",
+        f"Port: {code(payload.get('port') or '')}",
+        f"Login: {code(payload.get('login') or '')}",
+        f"Password: {code(payload.get('password') or '')}",
+        f"URL: {code(payload.get('url') or '')}",
+    ]
+    if payload.get("tg_link"):
+        lines.append(f"Telegram: {code(payload.get('tg_link') or '')}")
+    return "\n".join(lines)
 
 
 def mtproto_proxy_text(payload: dict[str, object]) -> str:

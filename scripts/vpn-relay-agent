@@ -37,6 +37,37 @@ everything else is refused with exit 2 before anything is read or changed:
     ssh-port-resume since=<epoch>         go on with the migration (waits for proof)
     ssh-port-set port=<port>              SSH_PORT=<port> in .env and phase 1 now (both
                                           ports listen) — without a deploy
+    sshd-check                            run vpn-bot-host-check now: the foreign files in
+                                          sshd_config.d that beat a repo auth key (read-only
+                                          but for the check's own last.json)
+    sshd-override-off path=<file>         move ONE such file (found by that check) to
+                                          /root/attic, sshd -t, reload ssh, sshd -T;
+                                          rolled back on any failure (below)
+    update-log                            the tail of the last update's deploy log
+                                          (the file redeploy.sh named), read-only
+
+A FOREIGN SSHD OVERRIDE (docs/relay.md «Чужой sshd-override»). A hoster's panel that
+«resets the root password» drops a file like /etc/ssh/sshd_config.d/00-password-login.conf
+(PasswordAuthentication yes, PermitRootLogin yes); sorted before the repo's
+00-vpnrelay-keyonly.conf it wins (sshd: the first value wins) and the relay takes
+passwords again. vpn-bot-host-check reports it BEATEN, and every deploy stops in Phase 1
+— rightly, and nothing in the bot could fix it. `sshd-override-off path=<file>` does,
+and nothing else:
+  * <file> is a plain name directly in /etc/ssh/sshd_config.d/ (the whitelist: no other
+    directory, no glob, no "/"), not one the repo installs there (deploy/host/ssh/), and
+    a FRESH vpn-bot-host-check run reports it BEATEN on an sshd auth key — not a path
+    the bot merely says;
+  * root's authorized_keys has a line without command= (an operator's own key): with
+    only the agent's and the jump key's lines, key-only login would lock the operator
+    out — refused, «add your own key first»;
+  * the file is MOVED to /root/attic/<name>.<epoch> (never deleted), `sshd -t` must pass,
+    ssh.service is reloaded (try-reload-or-restart: nothing to do while it does not run),
+    and `sshd -T` must show the repo value for every key the file beat — or another
+    foreign file the check names still beats it (remove that one too). Any failure puts
+    the file back, `sshd -t` and the reload again.
+`status` carries `sshd_drift` (the auth keys whose `sshd -T` value is not the repo's —
+cheap, every call) and `sshd_overrides` (the check's last.json, written by its daily
+timer and by `sshd-check`), so the bot notices a file that comes back.
 
 THE SSH PORT (docs/host-state.md#the-ssh-port). A deploy moves ssh to SSH_PORT in two
 phases; phase 2 closes the old port only on a proof that the new one works from
@@ -147,8 +178,11 @@ from typing import Any
 # 2: input-confirm, jump, jump-off; input_status and jump in the facts.
 # 3: ssh-port-finish / -keep / -resume / -set; ssh_migration in the facts; update-status
 # and update.json's `progress`.
-# 4: input-filter on|off. The protocol (what `hello` answers) is unchanged.
-AGENT_VERSION = "4"
+# 4: input-filter on|off.
+# 5: sshd-check, sshd-override-off, update-log; sshd_drift / sshd_overrides in the facts;
+# the deploy log's path in update.json's progress. The protocol (what `hello` answers)
+# is unchanged.
+AGENT_VERSION = "5"
 PROTOCOL = 1
 # A `jump` list is the longest request (up to 32 host:port entries).
 MAX_REQUEST = 4096
@@ -197,6 +231,21 @@ DATA_PLANE_UNIT = "vpn-relay.service"
 # pins that every unit of deploy/relay/ matches, so the fallback covers the whole set.
 INSTALLED_UNIT_RE = re.compile(r"vpn-relay(?:-[a-z0-9][a-z0-9-]*)?\.(?:service|timer)")
 TABLES = (("ip", "vpnrelay"), ("inet", "vpnrelay_input"))
+# A foreign sshd override (see the module docstring): the host check, its state file,
+# where a moved file goes, and the sshd keys a repo drop-in pins (deploy.sh's
+# HOST_CHECK_SSHD_AUTH_KEYS — tests/test_vpn_relay_agent.py pins the two lists equal).
+HOST_CHECK = "/usr/local/sbin/vpn-bot-host-check"
+HOST_CHECK_STATE = P("/var/lib/vpn-bot-host-check/last.json")
+SSHD_DROPIN_DIR = "/etc/ssh/sshd_config.d"
+ATTIC = P("/root/attic")
+SSHD_AUTH_KEYS = ("passwordauthentication", "kbdinteractiveauthentication", "permitrootlogin",
+                  "permitemptypasswords", "pubkeyauthentication", "authenticationmethods")
+# sshd -T prints the old name of prohibit-password.
+SSHD_SYNONYMS = {"without-password": "prohibit-password"}
+# The deploy log redeploy.sh tees (REDEPLOY_LOG_DIR, default /root): update-log reads
+# only such a file, and at most this much of its end.
+DEPLOY_LOG_RE = re.compile(r"/root/deploy-[A-Za-z0-9_.:-]{1,64}\.log")
+UPDATE_LOG_MAX = 96 * 1024
 SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # `update` runs the whole deploy (the pytest gate included) inside its transient unit;
 # the bot waits this long plus a minute for the answer (services/relays.py).
@@ -227,6 +276,8 @@ _HOST = r"[A-Za-z0-9.-]{1,253}"
 # An ed25519 public key's base64 blob ("ssh-ed25519" + 32 bytes): always 68 characters.
 _ED25519_BLOB = r"AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}"
 _OPEN = rf"{_HOST}:[0-9]{{1,5}}"
+# A drop-in of sshd directly in /etc/ssh/sshd_config.d: a plain name, never a glob.
+_SSHD_DROPIN = r"/etc/ssh/sshd_config\.d/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\.conf"
 # services/relay_ssh.py _REQUEST is the same list (tests/test_relay_jump.py runs both).
 WHITELIST: dict[str, re.Pattern[str]] = {
     "hello": re.compile(rf"hello (?P<token>{_TOKEN_RE})"),
@@ -245,6 +296,9 @@ WHITELIST: dict[str, re.Pattern[str]] = {
     "ssh-port-keep": re.compile(r"ssh-port-keep since=(?P<since>[0-9]{1,12})"),
     "ssh-port-resume": re.compile(r"ssh-port-resume since=(?P<since>[0-9]{1,12})"),
     "ssh-port-set": re.compile(r"ssh-port-set port=(?P<port>[0-9]{1,5})"),
+    "sshd-check": re.compile(r"sshd-check"),
+    "sshd-override-off": re.compile(rf"sshd-override-off path=(?P<path>{_SSHD_DROPIN})"),
+    "update-log": re.compile(r"update-log"),
 }
 _LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
 
@@ -709,7 +763,13 @@ def facts(*, with_check: bool) -> dict[str, Any]:
         "update": read_json(UPDATE_FILE) or {},
         "input_status": input_status(),
         "ssh_migration": ssh_migration(),
+        # A foreign sshd override: the effective auth keys against the repo's (cheap),
+        # and what the host check's last run named (module docstring).
+        "sshd_drift": sshd_drift(),
     }
+    overrides_rows, checked_at = host_check_rows(fresh=False)
+    data["sshd_overrides"] = foreign_overrides(overrides_rows)
+    data["host_check_at"] = checked_at
     jump = jump_state()
     if jump is not None:
         data["jump"] = jump
@@ -1155,6 +1215,259 @@ def cmd_ssh_port_set(args: dict[str, str]) -> dict[str, Any]:
     return {"ssh_port": {"rc": 0, "lines": _helper_lines(done)}, **facts(with_check=False)}
 
 
+# --------------------------------------------------------------------------- #
+# A foreign sshd override (the module docstring)
+# --------------------------------------------------------------------------- #
+_SSHD_DROPIN_RE = re.compile(_SSHD_DROPIN)
+_SSHD_LINE = re.compile(r"^\s*([A-Za-z]+)\s+(.*?)\s*$")
+# An authorized_keys line: [options] <type> <base64> [comment]; the options end where the
+# key type begins (options may hold quoted spaces, a key type never sits inside them).
+_KEY_TYPE = re.compile(
+    r"(?:^|\s)(?:ssh-(?:ed25519|rsa|dss)|ecdsa-sha2-nistp(?:256|384|521)"
+    r"|sk-(?:ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)\s+AAAA"
+)
+
+
+def sshd_norm(value: str) -> str:
+    value = " ".join(value.strip().lower().split())
+    return SSHD_SYNONYMS.get(value, value)
+
+
+def repo_sshd_dropins() -> set[str]:
+    """The names the repo installs in sshd_config.d (deploy/host/ssh/*.conf of the checkout)."""
+    src = APP_DIR / "deploy" / "host" / "ssh"
+    try:
+        return {p.name for p in src.glob("*.conf") if p.is_file()}
+    except OSError:
+        return set()
+
+
+def repo_sshd_expect() -> dict[str, str]:
+    """The auth keys the repo's sshd drop-ins set (sorted like sshd reads them, the first
+    value wins) — what `sshd -T` must show."""
+    want: dict[str, str] = {}
+    src = APP_DIR / "deploy" / "host" / "ssh"
+    for path in sorted(src.glob("*.conf")) if src.is_dir() else []:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.lstrip().startswith("#") or "@" in line:
+                continue
+            match = _SSHD_LINE.match(line)
+            if match is None:
+                continue
+            if match.group(1).lower() == "match":
+                break
+            key = match.group(1).lower()
+            if key in SSHD_AUTH_KEYS and key not in want:
+                want[key] = sshd_norm(match.group(2))
+    return want
+
+
+def sshd_effective() -> dict[str, str] | None:
+    """`sshd -T` for the auth keys; None when it cannot tell."""
+    out = run(["sshd", "-T"], timeout=20)
+    if out.returncode != 0:
+        return None
+    found: dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        key, _, value = line.strip().partition(" ")
+        if key in SSHD_AUTH_KEYS:
+            found[key] = sshd_norm(value)
+    return found
+
+
+def sshd_drift() -> dict[str, dict[str, str]]:
+    """The auth keys whose effective value is not the repo's: {key: {have, want}}."""
+    have = sshd_effective()
+    if have is None:
+        return {}
+    # A key sshd -T does not print (an older OpenSSH names it otherwise) is no drift.
+    return {key: {"have": have[key], "want": want}
+            for key, want in repo_sshd_expect().items() if key in have and have[key] != want}
+
+
+def parse_host_check_rows(text: str) -> list[dict[str, str]]:
+    """The rows of vpn-bot-host-check's stdout ("VERDICT|family|key|path|text")."""
+    rows: list[dict[str, str]] = []
+    for line in text.splitlines():
+        parts = line.split("|", 4)
+        if len(parts) == 5 and parts[0] in ("BEATEN", "MISMATCH", "LATENT", "ACCEPTED", "WARN", "PENDING", "INFO", "OK"):
+            rows.append(dict(zip(("verdict", "family", "key", "path", "text"), parts)))  # noqa: B905 — len 5 checked
+    return rows
+
+
+def host_check_rows(*, fresh: bool) -> tuple[list[dict[str, str]], str]:
+    """(rows, when): a fresh run of the host check (it writes its last.json too), or
+    what its last.json says (its daily timer, the last deploy, the last sshd-check)."""
+    if fresh:
+        out = run([HOST_CHECK], timeout=240)
+        if out.returncode not in (0, 1, 4):
+            raise Failed(f"vpn-bot-host-check exit {out.returncode}: {tail(out.stderr or out.stdout, 3)}")
+        return parse_host_check_rows(out.stdout), time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    data = read_json(HOST_CHECK_STATE) or {}
+    rows = data.get("rows")
+    clean = [
+        {k: str(row.get(k) or "") for k in ("verdict", "family", "key", "path", "text")}
+        for row in (rows if isinstance(rows, list) else []) if isinstance(row, dict)
+    ]
+    return clean, str(data.get("generated_at") or "")[:40]
+
+
+def foreign_overrides(rows: Sequence[dict[str, str]]) -> list[dict[str, Any]]:
+    """The files in sshd_config.d that the check reports BEATING a repo auth key and
+    that the repo does not install: [{path, keys, texts, mtime}], one per file."""
+    ours = repo_sshd_dropins()
+    found: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        path = row["path"]
+        if (row["verdict"] != "BEATEN" or row["family"] != "sshd" or row["key"] not in SSHD_AUTH_KEYS
+                or not _SSHD_DROPIN_RE.fullmatch(path) or Path(path).name in ours):
+            continue
+        entry = found.setdefault(path, {"path": path, "keys": [], "texts": [], "mtime": None})
+        if row["key"] not in entry["keys"]:
+            entry["keys"].append(row["key"])
+            entry["texts"].append(row["text"][:300])
+    for path, entry in found.items():
+        with contextlib.suppress(OSError):
+            entry["mtime"] = int(os.lstat(P(path)).st_mtime)
+    return [found[path] for path in sorted(found)]
+
+
+def personal_keys(path: Path) -> int:
+    """root's authorized_keys lines a person can log in with: a key without command=."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    count = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _KEY_TYPE.search(line)
+        if match is not None and "command=" not in line[: match.start()].lower():
+            count += 1
+    return count
+
+
+def ssh_unit() -> str:
+    """ssh.service (Debian, Ubuntu) or sshd.service (elsewhere)."""
+    out = run(["systemctl", "show", "-p", "LoadState", "--value", "ssh.service"], timeout=10)
+    return "ssh.service" if out.stdout.strip() == "loaded" else "sshd.service"
+
+
+def reload_sshd() -> subprocess.CompletedProcess[str]:
+    return run(["systemctl", "try-reload-or-restart", ssh_unit()], timeout=60)
+
+
+def _move(src: Path, dst: Path) -> None:
+    shutil.move(str(src), str(dst))
+
+
+def cmd_sshd_check(_: dict[str, str]) -> dict[str, Any]:
+    require_paired()
+    rows, when = host_check_rows(fresh=True)
+    return {"sshd_overrides": foreign_overrides(rows), "sshd_drift": sshd_drift(), "host_check_at": when}
+
+
+def cmd_sshd_override_off(args: dict[str, str]) -> dict[str, Any]:
+    """Move one foreign sshd override to the attic — see the module docstring."""
+    path = args["path"]
+    if not _SSHD_DROPIN_RE.fullmatch(path) or "/" in path[len(SSHD_DROPIN_DIR) + 1:]:
+        raise Refused(f"path: {path!r} is not a file directly in {SSHD_DROPIN_DIR}")
+    name = Path(path).name
+    if name in repo_sshd_dropins():
+        raise Refused(f"{path} is the repo's own drop-in (deploy/host/ssh/{name}) — not a foreign override")
+    require_paired()
+    with exclusive():
+        if personal_keys(authorized_keys_path()) == 0:
+            raise Failed(
+                "root's authorized_keys has no key without command= (only the agent's / the jump key): with "
+                "key-only login you would lose your way in — add your own key first",
+                extra={"sshd_override": {"refused": "no_personal_key"}},
+            )
+        rows, _ = host_check_rows(fresh=True)
+        found = {o["path"]: o for o in foreign_overrides(rows)}
+        if path not in found:
+            raise Refused(f"vpn-bot-host-check does not report {path} beating an sshd auth key — nothing to move")
+        keys: list[str] = list(found[path]["keys"])
+        src = P(path)
+        if not os.path.lexists(src) or src.is_dir():
+            raise Failed(f"{path} is not a file on this host", extra={"sshd_override": {"refused": "gone"}})
+        ATTIC.mkdir(mode=0o700, parents=True, exist_ok=True)
+        dst = ATTIC / f"{name}.{int(time.time())}"
+        n = 1
+        while os.path.lexists(dst):
+            dst = ATTIC / f"{name}.{int(time.time())}.{n}"
+            n += 1
+        _move(src, dst)
+        moved_to = "/root/attic/" + dst.name
+
+        def put_back(why: str, *, reloaded: bool) -> Failed:
+            """The file back where it was; sshd reloaded again when it was reloaded without it."""
+            restored = "restored"
+            try:
+                _move(dst, src)
+                if reloaded:
+                    back_t = run(["sshd", "-t"], timeout=20)
+                    back_r = reload_sshd() if back_t.returncode == 0 else back_t
+                    if back_r.returncode != 0:
+                        restored = f"put back, but sshd -t / reload exit {back_r.returncode}"
+            except OSError as exc:
+                restored = f"PUT BACK FAILED: {exc} — the file is at {moved_to}"
+            return Failed(f"{why} — {path} {restored}", extra={"sshd_override": {"path": path, "rolled_back": restored}})
+
+        tested = run(["sshd", "-t"], timeout=20)
+        if tested.returncode != 0:
+            raise put_back(f"sshd -t failed without {name} (exit {tested.returncode}): "
+                           f"{tail(tested.stderr or tested.stdout, 3)}", reloaded=False)
+        reloaded = reload_sshd()
+        if reloaded.returncode != 0:
+            raise put_back(f"reloading ssh failed (exit {reloaded.returncode}): "
+                           f"{tail(reloaded.stderr or reloaded.stdout, 3)}", reloaded=True)
+        have = sshd_effective()
+        if have is None:
+            raise put_back("sshd -T failed after the reload", reloaded=True)
+        want = repo_sshd_expect()
+        wrong = [k for k in keys if k in want and k in have and have[k] != want[k]]
+        still: list[str] = []
+        if wrong:
+            # Another foreign file may still beat the same key: that is the next one to
+            # move, not a reason to put this one back.
+            again, _ = host_check_rows(fresh=True)
+            others = {o["path"]: o for o in foreign_overrides(again) if o["path"] != path}
+            unexplained = [k for k in wrong if not any(k in o["keys"] for o in others.values())]
+            if unexplained:
+                shown = ", ".join(k + " " + have.get(k, "?") for k in unexplained)
+                raise put_back(f"sshd -T still shows {shown} without it", reloaded=True)
+            still = sorted(others)
+    return {"sshd_override": {"path": path, "moved_to": moved_to, "keys": keys, "still_beaten_by": still},
+            "sshd_drift": sshd_drift()}
+
+
+def cmd_update_log(_: dict[str, str]) -> dict[str, Any]:
+    """The end of the deploy log of the last (or the running) update — read-only."""
+    require_paired()
+    update = read_json(UPDATE_FILE) or {}
+    progress = update.get("progress") if isinstance(update.get("progress"), dict) else {}
+    log = update.get("log") or (progress or {}).get("log") or ""
+    if not isinstance(log, str) or not DEPLOY_LOG_RE.fullmatch(log):
+        raise Failed("no deploy log is known for the last update", extra={"update_log": {"log": ""}})
+    try:
+        fd = os.open(P(log), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise Failed(f"{log} cannot be read: {exc}", extra={"update_log": {"log": log}}) from None
+    with os.fdopen(fd, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - UPDATE_LOG_MAX))
+        data = fh.read().decode("utf-8", errors="replace")
+    return {"update_log": {"log": log, "size": size, "truncated": size > UPDATE_LOG_MAX, "text": data}}
+
+
 COMMANDS = {
     "hello": cmd_hello,
     "status": cmd_status,
@@ -1170,6 +1483,9 @@ COMMANDS = {
     "ssh-port-keep": cmd_ssh_port_keep,
     "ssh-port-resume": cmd_ssh_port_resume,
     "ssh-port-set": cmd_ssh_port_set,
+    "sshd-check": cmd_sshd_check,
+    "sshd-override-off": cmd_sshd_override_off,
+    "update-log": cmd_update_log,
 }
 
 
@@ -1211,6 +1527,14 @@ _DV_PYTEST_SUMMARY = re.compile(r"^=+ .*\b[0-9]+ (?:failed|errors?)\b.* in [0-9.
 _DV_PYTEST_NODE = re.compile(r"^(?:FAILED|ERROR) tests/")
 DV_EXCERPT_LINES = 8
 DV_EXCERPT_CHARS = 300
+# A FAIL row of the host invariants (deploy.sh's hc_row_text under «[deploy][WARN]»):
+# «FAIL BEATEN   sshd passwordauthentication — <text>[ [<path>]]» — the finding itself.
+_DV_HC_ROW = re.compile(
+    r"^\[deploy\]\[WARN\]\s+FAIL\s+(?P<verdict>BEATEN|MISMATCH|LATENT)\s+(?P<family>[a-z][a-z0-9_-]{0,31})"
+    r"\s+(?P<key>\S{1,128}) — (?P<text>.*?)(?: \[(?P<path>/[^\]\s]{1,300})\])?$"
+)
+_DV_AT_PATH = re.compile(r"^(/\S{1,300}?):[0-9]{1,6} = ")
+DV_FINDINGS_MAX = 8
 
 
 def _dv_guess(lines: list[str], rc: int) -> str:
@@ -1248,6 +1572,7 @@ def _dv_excerpt(lines: list[str]) -> list[str]:
             rollback_reason
             or "[deploy][FAIL] " in line
             or "FAIL: " in line
+            or _DV_HC_ROW.match(line)
             or _DV_PYTEST_NODE.match(line)
             or _DV_PYTEST_SUMMARY.match(line)
             or "ensurepip is not available" in line
@@ -1259,12 +1584,31 @@ def _dv_excerpt(lines: list[str]) -> list[str]:
     return picked[-DV_EXCERPT_LINES:]
 
 
+def _dv_findings(lines: list[str]) -> list[dict[str, str]]:
+    """The host invariants' FAIL rows (_DV_HC_ROW) as {verdict, family, key, path, text}:
+    the path the row names, else the file of «<file>:<line> = …» its text starts with."""
+    found: list[dict[str, str]] = []
+    for line in lines:
+        m = _DV_HC_ROW.match(line.strip())
+        if m is None:
+            continue
+        text = m.group("text").strip()[:DV_EXCERPT_CHARS]
+        at = _DV_AT_PATH.match(text)
+        path = m.group("path") or (at.group(1) if at else "")
+        item = {"verdict": m.group("verdict"), "family": m.group("family"), "key": m.group("key"),
+                "path": path, "text": text}
+        if item not in found:
+            found.append(item)
+    return found[-DV_FINDINGS_MAX:]
+
+
 def deploy_verdict(output: str, rc: int) -> dict[str, Any]:
     """Why a deploy (redeploy.sh -> deploy.sh) ended as it did, for the bot.
 
-    ``{"reason", "step", "excerpt", "warnings", "log"}``: reason is one of
+    ``{"reason", "step", "excerpt", "findings", "warnings", "log"}``: reason is one of
     DEPLOY_REASONS, or "" when the deploy did not fail (ok, noop); step is deploy.sh's
-    step it failed in ("" when unknown); excerpt the significant lines; warnings the
+    step it failed in ("" when unknown); excerpt the significant lines; findings the
+    host invariants' FAIL rows of a failed deploy (_dv_findings); warnings the
     ``[deploy:warn]`` findings of a deploy that succeeded ({"code", "text"}); log the
     deploy log redeploy.sh named. deploy.sh's own result line decides when there is
     one; without it the text does (a deploy.sh that predates the markers).
@@ -1292,6 +1636,7 @@ def deploy_verdict(output: str, rc: int) -> dict[str, Any]:
         "reason": reason,
         "step": step,
         "excerpt": _dv_excerpt(lines) if reason else [],
+        "findings": _dv_findings(lines) if reason else [],
         "warnings": [
             {"code": m.group("code"), "text": m.group("text").strip()[:DV_EXCERPT_CHARS]}
             for m in _DV_WARN.finditer(output)
@@ -1412,8 +1757,11 @@ def internal_update() -> int:
     note("running", running, from_commit=old, release=latest)
 
     def progress(output: str) -> None:
-        # The bot reads it with `update-status` while this runs (bot/progress.py).
-        note("running", running, from_commit=old, release=latest, progress=deploy_progress(output))
+        # The bot reads it with `update-status` while this runs (bot/progress.py); the
+        # log's path lets `update-log` show the deploy's output while it runs.
+        log = _DV_LOG.search(output)
+        note("running", running, from_commit=old, release=latest,
+             progress={**deploy_progress(output), **({"log": log.group("log")} if log else {})})
 
     # The deploy an operator runs, unattended: redeploy.sh starts the tag's deploy.sh
     # in its own transient unit and, with REDEPLOY_ATTACH=pipe, waits and exits with
@@ -1444,7 +1792,7 @@ def internal_update() -> int:
     note("failed", f"the deploy of {latest} {verdict}: {_deploy_reason(output)}",
          from_commit=old, release=latest, **({"now_commit": now} if now != old else {}), **where,
          reason=verdict_of["reason"] or "failed", step=verdict_of["step"],
-         excerpt=verdict_of["excerpt"] or tail(output, 4).splitlines())
+         excerpt=verdict_of["excerpt"] or tail(output, 4).splitlines(), findings=verdict_of["findings"])
     return 1
 
 

@@ -31,7 +31,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_bundles, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, relay_hardening, security, settings as settings_handler, ssh_port, start, ufw
+from bot.handlers import admin, admin_bundles, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, relay_hardening, relay_sshd, security, settings as settings_handler, ssh_port, start, ufw
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
 from bot.wizard_notifier import TelegramWizardNotifier
 from bot.middlewares.access import BlockedUserMiddleware
@@ -82,9 +82,11 @@ from services.online_clients import OnlineClientsService
 from services.protocol_modules import ProtocolModulesService
 from services.protocol_uninstall import ProtocolUninstallService, UninstallRegistry
 from services.proxy import ProxyService
+from services.proxy_endpoint import ProxyEndpoints
 from services.relay import RelayCatalog
 from services.host_check import HostCheckMonitor
 from services.relay_hardening import RelayHardeningMonitor
+from services.relay_sshd_override import SshdOverrideMonitor
 from services.ssh_port import SshPortMonitor
 from services.ufw import UfwApplier, UfwDeadmanMonitor
 from aiogram.types import InlineKeyboardMarkup
@@ -572,7 +574,12 @@ async def _build_app(
             ),
         },
     )
-    proxy_service = ProxyService(accesses=proxy_accesses_repo, users=user_service, settings=settings)
+    # THE public address of each proxy now (services/proxy_endpoint.py): the fallback
+    # mode routes it through the hub; every place that shows a proxy reads this one.
+    proxy_endpoints = ProxyEndpoints(settings)
+    proxy_service = ProxyService(
+        accesses=proxy_accesses_repo, users=user_service, settings=settings, endpoints=proxy_endpoints,
+    )
     socks5_service = Socks5Service(
         accesses=proxy_accesses_repo,
         users=user_service,
@@ -582,6 +589,7 @@ async def _build_app(
         audit=audit_service,
         user_locks=user_locks,
         backend_health=backend_health,
+        endpoints=proxy_endpoints,
     )
     mtproto_service = MtProtoService(
         accesses=proxy_accesses_repo,
@@ -592,6 +600,7 @@ async def _build_app(
         adapter=mtproxy_adapter,
         user_locks=user_locks,
         backend_health=backend_health,
+        endpoints=proxy_endpoints,
     )
     user_service.attach_proxy_access_management(
         proxy_accesses_repo,
@@ -768,6 +777,8 @@ async def _build_app(
         token_file=fallback_token,
         dns=CloudflareDns(fallback_token.load),
         doh=doh_resolve_a,
+        endpoints=proxy_endpoints,
+        modules=protocol_modules_service,
     )
     await fallback_service.refresh_state()
     relay_health_supervisor.behind_hub = fallback_service.behind_hub
@@ -792,6 +803,13 @@ async def _build_app(
     # relay with): «довести до нормы?» once per pairing (services/relay_hardening.py).
     relay_hardening_monitor = RelayHardeningMonitor(store=db, admin_ids=settings.admin_ids)
     relay_service.status_listeners.append(relay_hardening_monitor.relay_status)
+    # A foreign file in a relay's sshd_config.d that re-opens password login (a hoster's
+    # «password reset»): told once per file and mtime, with the button that removes it.
+    sshd_override_monitor = SshdOverrideMonitor(
+        store=db, admin_ids=settings.admin_ids,
+        check=lambda relay_id: relay_service.sshd_check(None, relay_id),
+    )
+    relay_service.status_listeners.append(sshd_override_monitor.relay_status)
     # A UFW policy change waiting for its proof (docs/host-state.md#the-firewall-ufw):
     # one message with «Подтвердить», one when it was confirmed or reverted.
     ufw_deadman_monitor = UfwDeadmanMonitor(
@@ -984,6 +1002,7 @@ async def _build_app(
         host_check=host_check_monitor,
         ssh_port=ssh_port_monitor,
         relay_hardening=relay_hardening_monitor,
+        sshd_override=sshd_override_monitor,
         ufw_deadman=ufw_deadman_monitor,
         superadmin_claim=superadmin_claim_service,
         totp=totp_service,
@@ -1010,6 +1029,7 @@ async def _build_app(
     host_check_monitor.bot = bot
     ssh_port_monitor.bot = bot
     relay_hardening_monitor.bot = bot
+    sshd_override_monitor.bot = bot
     ufw_deadman_monitor.bot = bot
     warp_manager.bot = bot
     wizard_service.notifier = TelegramWizardNotifier(bot=bot, service=wizard_service, admin_ids=settings.admin_ids)
@@ -1069,6 +1089,7 @@ async def _build_app(
     dp.include_router(admin_maintenance.router)
     dp.include_router(ssh_port.router)
     dp.include_router(relay_hardening.router)
+    dp.include_router(relay_sshd.router)
     dp.include_router(ufw.router)
     dp.include_router(admin_wizard.router)
     dp.include_router(admin_bundles.router)

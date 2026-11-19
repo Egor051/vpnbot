@@ -4,6 +4,68 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **A foreign sshd override on a relay is shown and can be removed from the bot
+  (docs/relay.md#a-foreign-sshd-override).** he2 (the hub), updating to v3.2.2: a hoster's «password
+  reset» had dropped `/etc/ssh/sshd_config.d/00-password-login.conf` (PasswordAuthentication yes,
+  PermitRootLogin yes); sorted before the repo's `00-vpnrelay-keyonly.conf` it won, and
+  `vpn-bot-host-check --pre-install` stopped the deploy in Phase 1 — rightly — while the bot showed only
+  «2 fatal finding(s)». Now the update's result lists the findings — the key, file:line, what beat what
+  — from agent 5's structured `findings` (the DEPLOY VERDICT block reads the deploy's `FAIL BEATEN …`
+  rows) and, for an older agent, from deploy.sh's own refusal line, which now carries them
+  (`hc_fatal_brief`: «… — nothing was changed. Fatal: BEATEN sshd passwordauthentication: …»). For a file
+  directly in `sshd_config.d` that the repo does not install and that beats a repo login key the result
+  offers **«🧹 Убрать чужой override»**: agent 5's new whitelisted `sshd-override-off path=<file>` (the
+  same pattern in the agent's WHITELIST and the bot's `_REQUEST`) moves ONE file — only one a fresh host
+  check run names, only while root's authorized_keys holds a key without `command=` («add your own key,
+  or you will lose your way in») — to `/root/attic/<name>.<epoch>`, runs `sshd -t`, reloads ssh, checks
+  `sshd -T`, and puts it back on any failure. An agent older than 5 gets the one-time fix by hand
+  instead (the update that would bring the new agent is the very deploy the file stops).
+- **The same check is step 0 of «🛡 Довести до нормы»** (`sshd-check`, then `sshd-override-off` per file),
+  and **a file that comes back is told again**: agent 5's `status` carries `sshd_drift` (`sshd -T`
+  against the repo, every call) and `sshd_overrides` (the host check's `last.json`, its timer runs
+  daily and after boot); `services/relay_sshd_override.py` tells the superadmins once per file and
+  mtime, with the button — a repeated «password reset» is a new mtime; a drift alone asks
+  `sshd-check` at most hourly.
+- **Agent 5**: `sshd-check`, `sshd-override-off`, `update-log` (the end of the update's deploy log —
+  the «📄 Лог» button), the deploy log's path in `update.json`'s progress.
+- **SOCKS5 (and MTProto) through the hub in the fallback mode** (docs/proxy.md,
+  docs/relay.md#the-proxies-through-the-hub). While the mode is on and the hub forwards the module's port, the «Прокси» section
+  and every link — `socks5://`, the new `https://t.me/socks?…`, MTProto's `t.me/proxy`, host:port,
+  the stats — carry the hub's IPv4 instead of SOCKS5_HOST (main's IPv4, banned at the border); the
+  port and the credentials stay. ONE source: `ProxyEndpoints` (services/proxy_endpoint.py); the stored
+  payload is rewritten with the address «now» on every show. The switch adds SOCKS5_PORT/tcp (and
+  MTPROTO_PORT) to the hub's TCP set with the same agent `apply` as 443/2096 — at the switch, not with
+  the hub's role, so a danted outage outside the mode never looks like a dead hub — and takes it off
+  when the mode or the module goes off; a port that cannot be forwarded never blocks the VPN switch.
+  «🔍 Проверить» shows the proxy as a row of its own (a dead main:SOCKS5_PORT is a clear ⚠️ refusal of
+  the proxy, not of 443/2096). Only TCP CONNECT works through the hub (documented). After a switch that
+  moved a proxy the mode's screen offers **«📣 Разослать пользователям с прокси новую ссылку»** — never
+  sent by itself: the number of recipients, the text, TOTP, the regular announcements.
+
+### Changed
+
+- **«⬆️ Обновить бота» and «⬆️ Обновить агент»: one message, one confirmation.** The button edits THAT
+  message into the plan (the steps ⚪, «✅ Подтвердить» / «✖️ Отмена») — no stale button left under it,
+  no second message; with TOTP the code prompt is in the same message and the code IS the confirmation
+  (`require_totp_in_place`, a resume registry in bot/totp_gate.py). The wizard's update run starts
+  confirmed: its plan goes on to apply by itself (also across a restart), no «✅ Применить» after it.
+  While a run moves the keyboard is only «📄 Лог»; at the end the result with «📄 Лог» and «⬅️ Назад».
+  «Состояние:» follows the facts — «⏳ выполняется (шаг: тесты)» from the first step marker on, then
+  «✅ готово» / «❌ ошибка» (run #6 showed «📝 план» under ✅✅🔄). A second press while a run is active
+  answers «уже идёт, запуск #N» and changes nothing.
+
+### Fixed
+
+- **«Шаг деплоя: неизвестен» for a stop before any change.** An agent older than the markers (he2 on
+  v3.2.0) forwarded «… (exit 1): host invariants: 2 fatal finding(s) — nothing was changed» without the
+  `[deploy:result failed step=checks reason=checks]` line. The «result text → step» table (`TEXT_STEPS`,
+  services/deploy_result.py) now maps deploy.sh's own words to the step and reason it dies with, and a
+  test walks EVERY «nothing was changed» of deploy.sh against it.
+
 ## [3.2.2](https://github.com/Egor051/vpnbot/releases/tag/v3.2.2) — 2026-11-19
 
 ### Fixed

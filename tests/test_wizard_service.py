@@ -520,3 +520,44 @@ async def test_a_confirmation_that_wins_cannot_be_cancelled(world: World) -> Non
     with pytest.raises(WizardError):
         await svc.cancel(ADMIN, run.id)
     assert (await svc.get(run.id)).state == "running"
+
+
+async def test_a_run_started_confirmed_goes_from_its_plan_to_execute_by_itself(world: World) -> None:
+    """«⬆️ Обновить бота»: ONE confirmation before the start — the ready plan is not shown
+    for «Применить», the execute phase is launched at once (also across a restart)."""
+    svc = world.service()
+    run = await svc.start(ADMIN, "update", chat_id=5, message_id=7, confirmed=True)
+    assert run.phase == "plan" and await svc.started_confirmed(run.id)
+    world.emit(run.id, "launched", phase="plan")
+    world.emit(run.id, "deploy", progress={"step": "checks", "steps": {"preflight": "ok", "checks": "ok"}})
+    world.emit(run.id, "plan", text="HEAD a → origin/main b: 1 commit(s)")
+    world.emit(run.id, "finished", phase="plan", outcome="planned")
+    world.alive(run.id, "inactive")
+    await svc.poll_once()
+    after = await svc.get(run.id)
+    assert after.phase == "execute" and after.state == "running"
+    assert "plan_ready" not in world.notifier.kinds(), "no second confirmation"
+    assert world.runner.calls[-1][world.runner.calls[-1].index("--phase") + 1] == "execute"
+    assert "wizard_run_confirmed" in await world.actions()
+    world.emit(run.id, "launched", phase="execute")
+    snap = await svc.snapshot(run.id)
+    assert snap.earlier_deploy_progress is not None and snap.earlier_deploy_progress["step"] == "checks"
+
+
+async def test_a_confirmed_plan_ready_before_a_restart_goes_on_after_it(world: World) -> None:
+    svc = world.service()
+    run = await svc.start(ADMIN, "update", chat_id=5, confirmed=True)
+    await svc.repo.update(run.id, svc.clock.now(), plan_ready=True)  # ready, the bot died before the launch
+    await world.service().poll_once()
+    assert (await svc.get(run.id)).phase == "execute"
+    assert "plan_ready" not in world.notifier.kinds()
+
+
+async def test_an_unconfirmed_update_still_waits_for_its_plan(world: World) -> None:
+    svc = world.service()
+    run = await svc.start(ADMIN, "update", chat_id=5)
+    world.emit(run.id, "launched", phase="plan")
+    world.emit(run.id, "plan", text="p")
+    world.emit(run.id, "finished", phase="plan", outcome="planned")
+    await svc.poll_once()
+    assert (await svc.get(run.id)).plan_ready and not await svc.started_confirmed(run.id)

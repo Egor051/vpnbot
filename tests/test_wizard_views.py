@@ -76,7 +76,8 @@ def test_run_view_picks_the_screen_by_state() -> None:
     _, plan_kb = run_view(run(mode="update", state="planned", plan_ready=True), snap)
     assert [b.callback_data for r in plan_kb.inline_keyboard for b in r][:2] == ["wiz:ok:3", "wiz:no:3"]
     _, progress_kb = run_view(run(), snap)
-    assert "wiz:run:3" in [b.callback_data for r in progress_kb.inline_keyboard for b in r]
+    # While a run moves: only «📄 Лог» — no «Обновить», no second confirmation.
+    assert [b.callback_data for r in progress_kb.inline_keyboard for b in r] == ["wiz:log:3"]
     snap.artifact = "dump.txt"
     _, final_kb = run_view(run(mode="dump", state="succeeded", active=False), snap)
     assert "wiz:art:3" in [b.callback_data for r in final_kb.inline_keyboard for b in r]
@@ -203,3 +204,66 @@ def test_a_running_update_shows_its_steps_and_tests_and_survives_the_restart() -
                         '\n{"event": "finished", "outcome": "succeeded"}')
     final = final_text(run(mode="update", state="succeeded", active=False), done)
     assert final.count("✅") >= 8 and "⚪" not in final
+
+
+# ── «Состояние:» as it is (one message, one confirmation — «⬆️ Обновить бота») ──
+def _status_lines(*records: dict[str, Any]) -> str:
+    import json
+
+    return "\n".join(json.dumps(r) for r in records)
+
+
+def _state_line(text: str) -> str:
+    from i18n import t
+
+    prefix = t("wizard_run_header", mode="M", id=1, state="S").split("S")[0].split("\n")[-1]
+    return next(line for line in text.splitlines() if line.startswith(prefix))
+
+
+def test_after_the_first_step_marker_the_state_is_not_plan() -> None:
+    """Run #6 on he2's main: «Состояние: 📝 план» while the steps were already ✅✅🔄."""
+    from i18n import t
+
+    planning = run(mode="update", state="planned", phase="plan", current_step="plan")
+    launched = parse_status(_status_lines({"event": "launched", "phase": "plan"}))
+    moving = parse_status(_status_lines(
+        {"event": "launched", "phase": "plan"},
+        {"event": "deploy", "progress": {"step": "tests", "steps": {"preflight": "ok", "fetch": "ok", "tests": "run"}}},
+    ))
+    first = _state_line(progress_text(planning, launched))
+    assert t("wizard_state_planned") not in first, "a confirmed run is running from its start"
+    line = _state_line(progress_text(planning, moving))
+    assert t("wizard_state_planned") not in line and t("wizard_state_running") in line
+    assert t("wizard_state_step", step=t("deploy_step_tests")) in line
+    # The execute phase: the plan's steps stay ✅, the deploy's own steps move on.
+    execute = parse_status(_status_lines(
+        {"event": "launched", "phase": "plan"},
+        {"event": "deploy", "progress": {"step": "checks", "steps": {
+            "preflight": "ok", "fetch": "ok", "tests": "ok", "checks": "ok"}}},
+        {"event": "launched", "phase": "execute"},
+        {"event": "deploy", "progress": {"step": "fetch", "steps": {"preflight": "ok", "fetch": "run", "tests": "wait"}}},
+    ))
+    text = progress_text(run(mode="update", state="running", phase="execute"), execute)
+    assert "✅ " + t("deploy_step_tests") in text and "✅ " + t("deploy_step_checks") in text
+    assert "🔄 " + t("deploy_step_fetch") in text and "⚪ " + t("deploy_step_install") in text
+    # A legacy plan that waits for «Применить» is the only «план»; the end says how it ended.
+    assert t("wizard_state_planned") in _state_line(plan_text(run(mode="update", state="planned", plan_ready=True)))
+    done = final_text(run(mode="update", state="succeeded", active=False), execute)
+    assert t("wizard_state_succeeded") in _state_line(done)
+    failed = final_text(run(mode="update", state="failed", active=False), execute)
+    assert t("wizard_state_failed") in _state_line(failed)
+
+
+def test_the_update_plan_before_the_run_is_one_screen_with_one_confirmation() -> None:
+    from bot.wizard_views import update_confirm_keyboard, update_plan_text
+    from i18n import t
+
+    text = update_plan_text()
+    assert text.count("⚪") == 8 and t("wizard_update_confirm_hint") in text
+    assert t("wizard_update_confirm_code") in update_plan_text(needs_code=True)
+    assert [b.callback_data for r in update_confirm_keyboard().inline_keyboard for b in r] == ["wiz:go:update", "wiz:menu"]
+
+
+def test_the_result_has_its_log_and_back() -> None:
+    _, final_kb = run_view(run(mode="update", state="failed", active=False), StatusSnapshot())
+    assert [b.callback_data for r in final_kb.inline_keyboard for b in r] == ["wiz:log:3", "wiz:menu"]

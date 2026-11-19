@@ -103,6 +103,14 @@ _DV_PYTEST_SUMMARY = re.compile(r"^=+ .*\b[0-9]+ (?:failed|errors?)\b.* in [0-9.
 _DV_PYTEST_NODE = re.compile(r"^(?:FAILED|ERROR) tests/")
 DV_EXCERPT_LINES = 8
 DV_EXCERPT_CHARS = 300
+# A FAIL row of the host invariants (deploy.sh's hc_row_text under «[deploy][WARN]»):
+# «FAIL BEATEN   sshd passwordauthentication — <text>[ [<path>]]» — the finding itself.
+_DV_HC_ROW = re.compile(
+    r"^\[deploy\]\[WARN\]\s+FAIL\s+(?P<verdict>BEATEN|MISMATCH|LATENT)\s+(?P<family>[a-z][a-z0-9_-]{0,31})"
+    r"\s+(?P<key>\S{1,128}) — (?P<text>.*?)(?: \[(?P<path>/[^\]\s]{1,300})\])?$"
+)
+_DV_AT_PATH = re.compile(r"^(/\S{1,300}?):[0-9]{1,6} = ")
+DV_FINDINGS_MAX = 8
 
 
 def _dv_guess(lines: list[str], rc: int) -> str:
@@ -140,6 +148,7 @@ def _dv_excerpt(lines: list[str]) -> list[str]:
             rollback_reason
             or "[deploy][FAIL] " in line
             or "FAIL: " in line
+            or _DV_HC_ROW.match(line)
             or _DV_PYTEST_NODE.match(line)
             or _DV_PYTEST_SUMMARY.match(line)
             or "ensurepip is not available" in line
@@ -151,12 +160,31 @@ def _dv_excerpt(lines: list[str]) -> list[str]:
     return picked[-DV_EXCERPT_LINES:]
 
 
+def _dv_findings(lines: list[str]) -> list[dict[str, str]]:
+    """The host invariants' FAIL rows (_DV_HC_ROW) as {verdict, family, key, path, text}:
+    the path the row names, else the file of «<file>:<line> = …» its text starts with."""
+    found: list[dict[str, str]] = []
+    for line in lines:
+        m = _DV_HC_ROW.match(line.strip())
+        if m is None:
+            continue
+        text = m.group("text").strip()[:DV_EXCERPT_CHARS]
+        at = _DV_AT_PATH.match(text)
+        path = m.group("path") or (at.group(1) if at else "")
+        item = {"verdict": m.group("verdict"), "family": m.group("family"), "key": m.group("key"),
+                "path": path, "text": text}
+        if item not in found:
+            found.append(item)
+    return found[-DV_FINDINGS_MAX:]
+
+
 def deploy_verdict(output: str, rc: int) -> dict[str, Any]:
     """Why a deploy (redeploy.sh -> deploy.sh) ended as it did, for the bot.
 
-    ``{"reason", "step", "excerpt", "warnings", "log"}``: reason is one of
+    ``{"reason", "step", "excerpt", "findings", "warnings", "log"}``: reason is one of
     DEPLOY_REASONS, or "" when the deploy did not fail (ok, noop); step is deploy.sh's
-    step it failed in ("" when unknown); excerpt the significant lines; warnings the
+    step it failed in ("" when unknown); excerpt the significant lines; findings the
+    host invariants' FAIL rows of a failed deploy (_dv_findings); warnings the
     ``[deploy:warn]`` findings of a deploy that succeeded ({"code", "text"}); log the
     deploy log redeploy.sh named. deploy.sh's own result line decides when there is
     one; without it the text does (a deploy.sh that predates the markers).
@@ -184,6 +212,7 @@ def deploy_verdict(output: str, rc: int) -> dict[str, Any]:
         "reason": reason,
         "step": step,
         "excerpt": _dv_excerpt(lines) if reason else [],
+        "findings": _dv_findings(lines) if reason else [],
         "warnings": [
             {"code": m.group("code"), "text": m.group("text").strip()[:DV_EXCERPT_CHARS]}
             for m in _DV_WARN.finditer(output)
@@ -427,6 +456,7 @@ def _failure_fields(verdict: dict[str, Any], default: str) -> dict[str, Any]:
         "reason": verdict["reason"] or default,
         "fail_step": verdict["step"],
         "excerpt": verdict["excerpt"],
+        "findings": verdict.get("findings") or [],
         "deploy_log": verdict["log"],
     }
 
@@ -483,7 +513,7 @@ def saved_verdict(ctx: Any) -> dict[str, Any]:
         data = {}
     if not isinstance(data, dict):
         data = {}
-    blank: dict[str, Any] = {"reason": "", "step": "", "excerpt": [], "warnings": [], "log": ""}
+    blank: dict[str, Any] = {"reason": "", "step": "", "excerpt": [], "findings": [], "warnings": [], "log": ""}
     return {**blank, **{k: v for k, v in data.items() if k in blank}}
 
 

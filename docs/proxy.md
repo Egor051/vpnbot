@@ -18,6 +18,25 @@ relevant env flags (see [Configuration](configuration.md)).
   [WARP → WARP proxy egress](warp.md#warp-proxy-egress-masking-the-proxies-outbound-ip) and
   `deploy/danted-warp.conf` before changing it.
 
+## Through the hub in the fallback mode
+
+In the [fallback mode](relay.md#fallback-mode-hub) main's IP is banned at the border, and a proxy handed
+out as `SOCKS5_HOST:SOCKS5_PORT` is dead for users in Russia. So, while the mode is on:
+
+- **The address.** The «Прокси» section and everything the bot hands out for SOCKS5 and MTProto
+  (`Host`/`Port`, `socks5://`, `https://t.me/socks?…`, `https://t.me/proxy?…`, the stats) is rendered
+  with **the hub's IPv4**, the port unchanged. The mode off — `SOCKS5_HOST` / `MTPROTO_HOST` again. One
+  source: `ProxyEndpoints.endpoint()` in services/proxy_endpoint.py. Logins, passwords and secrets stay.
+- **The forward.** «Включить» adds `SOCKS5_PORT/tcp` (and `MTPROTO_PORT` when that module is on) to the
+  hub with the same agent `apply` as 443/2096; «Выключить» and switching the module off take it away.
+  Details: [relay.md → The proxies through the hub](relay.md#the-proxies-through-the-hub).
+- **TCP CONNECT only.** UDP ASSOCIATE does not work through the hub (danted hands out its own address
+  for UDP); Telegram needs TCP only.
+- **danted** sees every such connection from the hub's IP: `client pass` / `socks pass` must let it in
+  (the template has `from: 0.0.0.0/0`); a fail2ban of your own on danted — the hub in `ignoreip`.
+- **Saved links** do not move by themselves: after a switch — optionally — «📣 Разослать пользователям
+  с прокси новую ссылку» on the mode's screen.
+
 ## MTProto static mode
 
 - Set `MTPROTO_MODE=static` and provide `MTPROTO_SECRET`.

@@ -436,8 +436,16 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
 
 #### Progress of «Обновить агент»
 
-«⬆️ Обновить агент» first shows the plan — the deploy's steps ⚪ (preflight, fetch, tests, checks,
-backup, install, restart, verify) with «✅ Подтвердить»; then the run: the long `update` call, and
+**One message, one confirmation.** «⬆️ Обновить агент» edits THIS message: the deploy's steps ⚪
+(preflight, fetch, tests, checks, backup, install, restart, verify) with «✅ Подтвердить» / «✖️ Отмена».
+When TOTP is needed, the code is asked in the same message and is the confirmation itself — no second
+step, no «▶️ Продолжить» (`require_totp_in_place`, bot/totp_gate.py). While the update runs the message
+carries only «📄 Лог» (agent 5's `update-log`: the end of the deploy log as a file; an older agent —
+the log's path on the relay); a second press of «Обновить» answers «уже идёт, запуск #N» and changes
+nothing. At the end: the result, «📄 Лог» and «Назад» (for a [foreign sshd
+override](#a-foreign-sshd-override) its button too).
+
+Then the run: the long `update` call, and
 next to it, every 10 s, **`update-status`** — a light, lock-free agent request answering
 `/var/lib/vpn-relay/update.json`, where the agent writes the deploy's progress
 (`deploy_progress`: the steps from deploy.sh's [step markers](deployment.md#step-and-result-markers)
@@ -463,6 +471,19 @@ poll. The result closes the steps — ✅, or ❌ on the step deploy.sh failed i
   the inverse of deploy.sh's `deploy_fail_reason` (a test runs that function for every step
   against it). Nothing tells it → no ❌ on any step and «шаг неизвестен» — never a guess onto the
   first step (he2: ❌ landed on «проверки перед деплоем» while pytest had failed).
+- **A stop before any change** («stopped before any change … — nothing was changed»): the step and
+  the reason come from the «result text → step» table — `TEXT_STEPS` of services/deploy_result.py:
+  deploy.sh's own words with the step it dies in (`host invariants:` → checks, `NODE_ROLE` →
+  preflight, a relay's release target → fetch, the test venv → tests, the backup → backup, …). A test
+  walks EVERY «nothing was changed» of deploy.sh and pins its step — a new message without a row
+  fails it. he2 (agent v3.2.0): «host invariants: 2 fatal finding(s)» showed «шаг неизвестен» — now
+  «проверки».
+- **The host check's findings** in the result: the key, file:line, what beat what
+  («passwordauthentication: 00-password-login.conf:1 = yes beats the repo value no of
+  00-vpnrelay-keyonly.conf»). Agent 5 hands them as `findings` (the DEPLOY VERDICT block reads the
+  deploy's `FAIL BEATEN …` lines); for an older agent the text itself carries them: deploy.sh appends
+  the findings to its refusal line («… — nothing was changed. Fatal: BEATEN sshd
+  passwordauthentication: …»), which the agent forwards as it is.
 
 #### Which revision a relay deploys
 
@@ -843,7 +864,7 @@ line, extra words, an argv, an interactive login — is refused with exit 2 befo
 | Request | Does |
 |---|---|
 | `hello <token>` | Complete the pairing; answers the relay's facts. The only request before pairing. |
-| `status` | Facts: target, ports, the live DNAT target, what the name resolves to now, `ip_forward`, the units (`vpn-relay.service` and every timer of the set below), the ssh ports, the egress source address, the checkout, the last update, `vpn-relay-apply check`, `vpn-relay-apply input-status` (`input_status`) and, on a hub, its jump line (`jump`: the relays it opens, the key's fingerprint). |
+| `status` | Facts: target, ports, the live DNAT target, what the name resolves to now, `ip_forward`, the units (`vpn-relay.service` and every timer of the set below), the ssh ports, the egress source address, the checkout, the last update, `vpn-relay-apply check`, `vpn-relay-apply input-status` (`input_status`), on a hub its jump line (`jump`: the relays it opens, the key's fingerprint), and from agent 5 `sshd_drift` (the login keys whose `sshd -T` value is not the repo's; cheap, every call) and `sshd_overrides` / `host_check_at` (what the host check's last run named — its `last.json`), [a foreign sshd override](#a-foreign-sshd-override). |
 | `apply target=<dns name> tcp=<ports> udp=<ports>` | Re-point / re-port: refused for a name that is not a name or does not resolve on the relay, a port outside 1..65535, more than 8, a TCP port sshd listens on. Rewrites only `RELAY_UPSTREAM_HOST` / `RELAY_FORWARD_*`, applies, checks; puts `.env` back and re-applies when the ruleset or the check (table, sysctls, the upstream not answering) fails. |
 | `update` | In a transient unit (`systemd-run --wait`): fetch the release tags, pick the newest release ([the same rule as the deploy](#which-revision-a-relay-deploys)) — only forward, never backwards or sideways — and run the relay's deploy for it: `scripts/redeploy.sh` with `DEPLOY_REF=<tag>` (that tag's `deploy.sh`, in its own transient unit, log `/root/deploy-<ts>.log`): the pytest gate, helpers, units and host files, the reload of vpn-relay, the checks; `deploy.sh` rolls back by itself. The agent never checks anything out. The result (`running` / `noop` / `failed` / `succeeded`, `from_commit`, `to_commit`, `release`, `log`; for a failure `reason`, `step`, `excerpt` — the cause deploy.sh reported in its [result line](deployment.md#step-and-result-markers), its step and the lines that tell it; for a success `warnings`) is in `/var/lib/vpn-relay/update.json` and in `status`; a failed `update` answers with the whole result, and the bot shows the cause, the step, those lines and the log path instead of «the relay refused». Minutes: the agent waits up to 45 minutes. |
 | `uninstall` | In a transient unit: the units of the set below stopped and removed (timers first, `vpn-relay.service` last), both tables deleted, the sysctl file removed and `ip_forward` back to what it was before the install, the helpers, `/etc/vpn-relay`, `/var/lib/vpn-relay`, the checkout (when the installer created it), the agent's key line and the jump line removed. The adoption backup stays. Refused on a host without the installer's `/etc/vpn-relay/install.json`. |
@@ -854,6 +875,9 @@ line, extra words, an argv, an interactive login — is refused with exit 2 befo
 | `ssh-port-keep since=<s>` / `ssh-port-resume since=<s>` | Hold phase 1 (the old port stays, no proof finishes it) / go on with the migration. |
 | `ssh-port-set port=<p>` | `SSH_PORT=<p>` in `.env`, then `vpn-bot-ssh-port begin --keep <this session's port>`: both ports listen now, no deploy; the port the bot came in on never closes; `.env` restored on a failure (a failed input filter included). A forwarded port is refused. |
 | `input-filter on` / `input-filter off` | Agent 4. `on`: the filter is applied from a **staged** copy of `.env` with `RELAY_INPUT_FILTER=on` (`/etc/vpn-relay/input-filter.env`, `RELAY_ENV=<stage> vpn-relay-apply apply`) — the live `.env` is not touched yet; an unconfirmed TCP set arms the [dead-man](#keeping-access-the-dead-man-and-input-confirm), main's probe may confirm it in that apply. Confirmed (`input-status` OK / CONFIRMED) → `.env` gets `on` (`"committed": true`); still PENDING → the bot runs `input-confirm` from a NEW session and asks `on` again, which commits. Never confirmed → the dead-man removes the table and `.env` never said `on`. A failed apply → the live `.env` applied again, exit 4. `off`: `RELAY_INPUT_FILTER=off` and apply (the table goes, a waiting dead-man is disarmed); a failed apply puts `.env` back. [Bringing a relay to the defaults](#bringing-a-relay-to-the-defaults). |
+| `sshd-check` | Agent 5. A fresh `vpn-bot-host-check` run (read-only; it writes only its own `last.json`): the files in `sshd_config.d` that beat a repo login key (`sshd_overrides`: path, keys, the check's texts, mtime) and `sshd_drift`. |
+| `sshd-override-off path=<file>` | Agent 5. Move ONE [foreign sshd override](#a-foreign-sshd-override) to `/root/attic/<name>.<epoch>` (never delete it), `sshd -t`, `systemctl try-reload-or-restart ssh`, `sshd -T`; rolled back on any failure. The path is only a file directly in `/etc/ssh/sshd_config.d/` (no glob, no `/`, not the repo's file), and only one a FRESH host check run names; without an own key in root's authorized_keys — refused. |
+| `update-log` | Agent 5. The end (96 KiB) of the deploy log of the last (or the running) update — the `/root/deploy-<ts>.log` redeploy.sh named (`update.json`); read-only. The «📄 Лог» button under an update. |
 
 **The units** are not a list in the agent. They are read from the checkout by the same rule deploy.sh,
 install.sh and the host check use (`relay_unit_names`): every `deploy/relay/*.service` and `*.timer` of
@@ -948,6 +972,9 @@ for each one not at the defaults).
 sent) shows the plan (each step ⚪, «✅ Подтвердить»), then runs it with
 [the progress](#progress-of-обновить-агент) in the same message (`RelayService.harden`):
 
+0. **A foreign sshd override** — always first: `sshd-check` (a fresh host check), then
+   `sshd-override-off` for each file it names ([below](#a-foreign-sshd-override)). An agent older
+   than 5 — the step is ⏭ (its status cannot name an override).
 1. **The input filter** — `input-filter on` (the staged apply, the dead-man armed); unless main's
    probe confirmed it already, `input-confirm` from a NEW ssh session of the bot (through the
    hub's jump for a relay behind the hub — [below](#managing-the-ru-relays-through-the-hub)); then
@@ -966,6 +993,59 @@ that carries the traffic) and the step that heals itself (the dead-man), so a po
 cannot finish — a provider's firewall dropping 54321 — leaves the relay filtered, on 22. The move
 then runs the path every default relay takes (filter on; main's probe of {22, 54321} is also a
 proof for phase 2). The price: two more dead-man rounds, each confirmed by the bot itself.
+
+### A foreign sshd override
+
+**What happened on he2 (the hub).** On 2026-11-18 `/etc/ssh/sshd_config.d/00-password-login.conf`
+appeared (not from the repo; most likely the hoster's panel on a password reset) with
+`PasswordAuthentication yes` / `PermitRootLogin yes`. By file order (sshd takes the FIRST value) it
+beats `00-vpnrelay-keyonly.conf`: the hub takes passwords again. `vpn-bot-host-check --pre-install`
+reports it BEATEN and the relay's deploy stops in Phase 1 — rightly; but the bot showed only «2 fatal
+finding(s)», and only a hand could fix it.
+
+**What shows now.** The update's result names the findings — the key, file:line, what beat what
+([progress](#progress-of-обновить-агент)) — and the step «проверки». For a finding of the class «a
+file directly in `sshd_config.d` that the repo does not install beats a repo login key»
+(`passwordauthentication`, `kbdinteractiveauthentication`, `permitrootlogin`, `permitemptypasswords`,
+`pubkeyauthentication`, `authenticationmethods` — the list of deploy.sh's
+`HOST_CHECK_SSHD_AUTH_KEYS`) — the button **«🧹 Убрать чужой override»**.
+
+**What the button does** (TOTP `relay_sshd_override`, the code in the same message; agent 5,
+`sshd-override-off path=<file>`):
+
+- the path is only a file directly in `/etc/ssh/sshd_config.d/` (the agent's and the bot's
+  whitelist, `WHITELIST` and `_REQUEST`, in step; no glob, no subdirectory, not a file the repo
+  installs);
+- the agent runs the host check again and removes the file only when that run names it (never
+  because the bot says so);
+- root's `authorized_keys` must hold at least one line without `command=` — an operator's own key;
+  otherwise refused, «add your own key, or you will lose your way in» (with the agent's and the jump
+  key's lines only, key-only login would shut the operator out);
+- the file is **moved** to `/root/attic/<name>.<epoch>` (never deleted), `sshd -t`, `systemctl
+  try-reload-or-restart ssh`, `sshd -T` compared with the repo's value of every key it beat (a key
+  ANOTHER foreign file still beats is not a rollback: that file is named in the answer, remove it
+  too). Any failure puts the file back, `sshd -t` and the reload again.
+
+**An agent older than 5** (he2 on v3.2.0): the update that would bring the new agent stops on this
+very file. The bot shows the one-time fix by hand (over ssh with your own key):
+
+```bash
+mkdir -m 700 -p /root/attic
+mv /etc/ssh/sshd_config.d/00-password-login.conf /root/attic/
+sshd -t && systemctl reload ssh
+```
+
+then «⬆️ Обновить агент»; from then on the bot removes such a file itself.
+
+**When the file comes back.** Agent 5's `status` carries `sshd_drift` (the login keys whose `sshd -T`
+is not the repo's — cheap, every call of the health loop) and `sshd_overrides` (what the check's last
+run named — `vpn-bot-host-check.timer`, daily and 5 minutes after boot). The monitor
+(services/relay_sshd_override.py) sends the superadmins a message with the same button — ONCE per
+file and its mtime (`schema_meta`, a restart does not repeat it): a repeated «password reset» in the
+hoster's panel is a new file, a new mtime — told again. A drift with no file named yet makes the bot
+ask `sshd-check` itself, at most hourly per relay. A second password reset never silently re-opens
+password login on the hub. The same check is the first step of [«Довести до
+нормы»](#bringing-a-relay-to-the-defaults).
 
 ## Managing relays in the admin panel
 
@@ -1376,6 +1456,57 @@ switch-off that comes late costs the hub's traffic; one that comes too early, th
   `fallback-url: https://<hub host>:<SUBSCRIPTION_PUBLIC_PORT>/sub/<token>`. Happ reads it **only**
   for a subscription with a Provider ID. The subscription port's certificate must cover the hub's
   host (an IPv4 host gets a warning on the screen). The DNS is the real mechanism.
+
+### The proxies through the hub
+
+**Why.** SOCKS5 (and MTProto, when on) is handed out as `SOCKS5_HOST:SOCKS5_PORT` — today main's IPv4
+and port 31337. In the fallback mode main's IP is banned at the border: the proxy is dead for users in
+Russia, while the hub still reaches main.
+
+**The address — one source.** While the mode is on, the module is on and the hub forwards its port,
+the «Прокси» section and everything the bot hands out — `Host`/`Port`, `socks5://…`, the
+`https://t.me/socks?…` link, MTProto's `https://t.me/proxy?…` links, the stats lines — are rendered
+with **the hub's IPv4** (the address the failover names get), the port unchanged. The mode off —
+`SOCKS5_HOST` / `MTPROTO_HOST` again. One source: `ProxyEndpoints.endpoint()`
+(services/proxy_endpoint.py); no template reads `SOCKS5_HOST` itself, and the payload stored at issue
+is rewritten with the address «now» on every show. Logins, passwords and MTProto secrets do not
+change: the hub is an L4 forward, main's danted / mtproxy authenticate. Why the IPv4 and not the
+hub's host: the name may itself be a failover name or move with the mode; a name needs DNS on the
+client — exactly what is unreliable where the proxy is needed; the IPv4 is what the switch writes into
+the A records, so the proxy and the VPN names move together.
+
+**The forward on the hub.** «Включить» adds `SOCKS5_PORT/tcp` (and `MTPROTO_PORT` when that module is
+on) to the hub's TCP set — the same agent `apply` as 443/2096, BEFORE the DNS is written; the `apply`
+itself proves the hub reaches main:<port> or rolls the forward back. «Выключить» takes the port off
+after the names point at main again; switching a proxy module off while the mode is on takes it off
+at once (on — adds it). Chosen at the switch, not with the hub's role: outside the mode nobody needs
+danted through the hub, and every forwarded port is probed by the hub's own check (its health, its
+deploy's verify, the agent's `apply`) — a danted outage on main must not look like a dead hub, or roll
+its update back, while no proxy user needs it. A port that cannot be forwarded **never blocks** the
+switch: the VPN goes first, the report says what the proxies did, and users stay on the address that
+works. A port equal to the hub's SSH port is never sent (the agent would refuse it anyway).
+
+**The checks.** «🔍 Проверить» shows the proxy as a row of its own: the mode off — ℹ️ «the port goes
+on at the switch, the apply proves main:<port>»; on — ✅/⚠️ «the hub reaches main:<port>» (the hub's
+own check). An unreachable main:SOCKS5_PORT is a clear refusal of the PROXY (⚠️ and the error), not
+of the VPN: «the hub reaches main on 443/2096» does not count the proxy port.
+
+**danted sees the hub.** Every connection through the hub reaches main from the hub's IP. Checked:
+`deploy/danted.conf.example` has `client pass` and `socks pass` `from: 0.0.0.0/0`, no network that
+would exclude the hub (keep the live, hand-made `/etc/danted.conf` the same); the bot neither limits
+nor counts SOCKS5 by the client's IP (the anomaly detector reads Xray's access log only, and it skips
+the relays' source IPs — the hub's among them — anyway); the socks5 module's UFW rule is `allow`, not
+`limit`. A fail2ban of your own on danted at main needs the hub's source IPs in `ignoreip`.
+
+**TCP CONNECT only.** UDP ASSOCIATE does not work through an L4 hub: danted hands the client its own
+address (main) for UDP, which the client cannot reach in the mode. Telegram needs TCP only.
+
+**Saved links** carry main's IP and do not move by themselves. After a switch that moved a proxy's
+address, the mode's screen offers **«📣 Разослать пользователям с прокси новую ссылку»** — optional,
+never automatic: a confirmation with the number of recipients (an active access to a moved proxy) and
+the text, TOTP (`fallback_proxy_notice`), sent through the regular announcements (a segment by
+protocol, the delivery ledger). The text carries the new address (the same for everyone) and says the
+ready link is in «Прокси».
 
 ### Through the hub: the subscription limit, ssh-probe, health, anomaly detection
 

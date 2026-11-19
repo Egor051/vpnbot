@@ -3436,6 +3436,30 @@ hc_row_text() {   # $1 severity, $2 row
   if [[ -n "$path" && "$path" != "-" && "$text" != *"$path"* ]]; then printf ' [%s]' "$path"; fi
 }
 
+# The FAIL findings of Phase 1 in one line, for the die message: «. Fatal: BEATEN sshd
+# passwordauthentication: <text>; …» (at most HC_BRIEF_MAX, each capped). An agent older
+# than the step markers forwards only deploy.sh's last FAIL line (he2: v3.2.0 showed
+# «2 fatal finding(s)» and nothing else); the findings in that line reach the bot all
+# the same (services/deploy_result.py findings_from_text reads them back).
+HC_BRIEF_MAX=4
+hc_fatal_brief() {   # $@: the FAIL rows (and «pristine|<dst>» for a missing effect proof)
+  local row v fam key path text item out="" n=0
+  for row in "$@"; do
+    n=$(( n + 1 ))
+    (( n <= HC_BRIEF_MAX )) || continue
+    IFS='|' read -r v fam key path text <<< "$row"
+    if [[ "$v" == pristine ]]; then
+      item="MISMATCH pristine ${fam}: no effect proof for restoring its package default"
+    else
+      item="${v} ${fam} ${key}: ${text}"
+      if [[ -n "$path" && "$path" != "-" && "$text" != *"$path"* ]]; then item+=" [${path}]"; fi
+    fi
+    out+="${out:+; }${item:0:240}"
+  done
+  (( n <= HC_BRIEF_MAX )) || out+="; … $(( n - HC_BRIEF_MAX )) more"
+  [[ -z "$out" ]] || printf '. Fatal: %s' "$out"
+}
+
 # "beaten 0, mismatch 0, latent 2 (accepted 1), warn 3, pending 1" from HC_SUMMARY.
 hc_summary_text() {
   local f k
@@ -3462,6 +3486,7 @@ hc_summary_text() {
 # MISMATCH row there is already a FAIL); no row at all is a FAIL too.
 host_invariants_phase1() {
   local row sev n_fail=0 v fam path pr dst
+  local -a fatal=()
   local -A proven=()
   log "host invariants (scripts/vpn-bot-host-check --pre-install, role ${NODE_ROLE:-main}): the host as Phase 2 would leave it"
   host_invariants_run "$1" phase1
@@ -3479,7 +3504,7 @@ host_invariants_phase1() {
     if [[ "$fam" == pristine ]] && [[ "$v" == OK || "$v" == MISMATCH ]]; then proven["$path"]=1; fi
     case "$sev" in
       OK)   if [[ "$fam" == pristine ]]; then log "  $(hc_row_text OK "$row")"; fi ;;   # the effect proof
-      FAIL) n_fail=$(( n_fail + 1 )); warn "  $(hc_row_text FAIL "$row")" ;;
+      FAIL) n_fail=$(( n_fail + 1 )); fatal+=("$row"); warn "  $(hc_row_text FAIL "$row")" ;;
       WARN) warn "  $(hc_row_text WARN "$row")" ;;
       *)    log "  $(hc_row_text INFO "$row")" ;;
     esac
@@ -3489,6 +3514,7 @@ host_invariants_phase1() {
     dst="$(hc_logical "${pr%%|*}")"
     if [[ -z "${proven[$dst]+x}" ]]; then
       n_fail=$(( n_fail + 1 ))
+      fatal+=("pristine|${dst}")
       warn "  FAIL pristine ${dst} — the host check gave no effect proof for restoring its package default"
     fi
   done < <(hc_pristine_restores)
@@ -3501,7 +3527,7 @@ host_invariants_phase1() {
     phase1_would_stop "host invariants"
     warn "PHASE1_ONLY=1: reported, not fatal in inspection mode — a real deploy stops here"
   else
-    die "host invariants: ${n_fail} fatal finding(s) — nothing was changed"
+    die "host invariants: ${n_fail} fatal finding(s) — nothing was changed$(hc_fatal_brief "${fatal[@]}")"
   fi
 }
 

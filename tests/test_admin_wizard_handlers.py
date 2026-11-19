@@ -1,8 +1,12 @@
 """The «🧙 Мастер настройки» handlers (bot/handlers/admin_wizard.py).
 
 * SUPERADMIN only: anyone else is refused before the service is touched.
-* A dangerous mode (dump, update) asks the TOTP code before it starts and before a
-  plan is applied; a read-only, non-dangerous mode (selfcheck) starts at once.
+* A dangerous mode (dump, update) asks the TOTP code before it starts; a read-only,
+  non-dangerous mode (selfcheck) starts at once.
+* «⬆️ Обновить бота» is one message and one confirmation: the button turns THAT message
+  into the plan (steps ⚪, «✅ Подтвердить» / «✖️ Отменить») — with TOTP, into the code
+  prompt, the code starting the run by itself; the run starts confirmed.
+* A press while a run is active: «уже идёт, запуск #N», nothing started, nothing edited.
 * The run remembers the message it was started from, so the monitor edits THAT one.
 """
 
@@ -18,6 +22,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.fsm.states import TotpStates
 from bot.handlers import admin_wizard
+from bot.totp_gate import Resume, resumer_for
+from i18n import t
 from models.dto import WizardRun
 from services.errors import AccessDenied
 from services.wizard import StatusSnapshot
@@ -44,9 +50,13 @@ class FakeWizard:
         self.started: list[tuple[str, dict[str, Any]]] = []
         self.confirmed: list[int] = []
         self.planned = wizard_run(mode="update", state="planned", phase="plan", plan_ready=True)
+        self.running: WizardRun | None = None
 
     def exclusive(self) -> Any:
         return self.lock
+
+    async def active(self) -> WizardRun | None:
+        return self.running
 
     async def start(self, actor: int, mode: str, raw: Any = None, **kw: Any) -> WizardRun:
         self.started.append((mode, kw))
@@ -149,19 +159,60 @@ async def test_selfcheck_starts_at_once_and_remembers_its_message() -> None:
     assert cb.message.edits  # the menu became the progress message
 
 
-@pytest.mark.parametrize("mode", ["dump", "update"])
-async def test_a_dangerous_mode_asks_the_code_first(mode: str) -> None:
+async def test_a_dangerous_mode_asks_the_code_first() -> None:
     svc = services()
     state = fsm()
-    await admin_wizard.wizard_start(Callback(f"wiz:start:{mode}"), state, svc)  # type: ignore[arg-type]
+    await admin_wizard.wizard_start(Callback("wiz:start:dump"), state, svc)  # type: ignore[arg-type]
     assert svc.wizard.started == []
     assert await state.get_state() == TotpStates.gate_code.state
 
 
-async def test_without_totp_a_dangerous_mode_starts() -> None:
+async def test_update_with_totp_asks_the_code_in_the_same_message() -> None:
+    """The code prompt is THIS message (the plan with its steps ⚪); no second message,
+    no run before the code."""
+    svc = services()
+    state = fsm()
+    cb = Callback("wiz:start:update")
+    await admin_wizard.wizard_update_plan(cb, state, svc)  # type: ignore[arg-type]
+    assert svc.wizard.started == [] and cb.message.answers == []
+    assert await state.get_state() == TotpStates.gate_code.state
+    data = await state.get_data()
+    assert data["totp_resume"] == "wiz:go:update" and data["totp_prompt_id"] == cb.message.message_id
+    assert "⚪" in cb.message.edits[-1] and t("wizard_update_confirm_code") in cb.message.edits[-1]
+
+
+async def test_the_code_is_the_confirmation_the_run_starts_on_the_plan() -> None:
+    svc = services()
+    msg = Msg()
+    resume = Resume(message=msg, user=SimpleNamespace(id=UID), state=fsm(), services=svc,  # type: ignore[arg-type]
+                    bot=None, data="wiz:go:update")  # type: ignore[arg-type]
+    assert resumer_for("wiz:go:update") is admin_wizard.wizard_update_resume
+    await admin_wizard.wizard_update_resume(resume)
+    assert svc.wizard.started == [("update", {"chat_id": UID, "message_id": 10, "confirmed": True})]
+    assert msg.edits, "the plan became the run's progress message"
+
+
+async def test_without_totp_update_shows_the_plan_then_starts_on_one_confirmation() -> None:
     svc = services(totp=False)
-    await admin_wizard.wizard_start(Callback("wiz:start:update"), fsm(), svc)  # type: ignore[arg-type]
-    assert [m for m, _ in svc.wizard.started] == ["update"]
+    cb = Callback("wiz:start:update")
+    await admin_wizard.wizard_update_plan(cb, fsm(), svc)  # type: ignore[arg-type]
+    assert svc.wizard.started == [], "the plan first, in the same message"
+    assert t("wizard_update_confirm_hint") in cb.message.edits[-1]
+    go = Callback("wiz:go:update")
+    await admin_wizard.wizard_update_go(go, fsm(), svc)  # type: ignore[arg-type]
+    assert svc.wizard.started == [("update", {"chat_id": UID, "message_id": 10, "confirmed": True})]
+
+
+@pytest.mark.parametrize("data", ["wiz:start:update", "wiz:go:update", "wiz:start:selfcheck"])
+async def test_a_press_while_a_run_is_active_says_so_and_starts_nothing(data: str) -> None:
+    svc = services(totp=False)
+    svc.wizard.running = wizard_run(id=6, mode="update")
+    cb = Callback(data)
+    handler = {"wiz:start:update": admin_wizard.wizard_update_plan, "wiz:go:update": admin_wizard.wizard_update_go,
+               "wiz:start:selfcheck": admin_wizard.wizard_start}[data]
+    await handler(cb, fsm(), svc)  # type: ignore[operator]
+    assert svc.wizard.started == [] and cb.message.edits == [] and cb.message.answers == []
+    assert cb.alerts[-1] == (t("wizard_already_running", id=6, mode=t("wizard_mode_update")), True)
 
 
 async def test_applying_the_update_plan_asks_the_code_again() -> None:
