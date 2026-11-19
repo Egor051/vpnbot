@@ -232,6 +232,125 @@ def test_an_old_agents_text_tells_the_reason_and_the_step(message: str, reason: 
     assert (failure.reason, failure.step) == (reason, step)
 
 
+def test_he2s_host_invariants_stop_names_its_step() -> None:
+    """he2, agent v3.2.0, bot v3.2.2: «Шаг деплоя: неизвестен» — now checks/checks."""
+    failure = deploy_failure_from(None, message=(
+        "the deploy of v3.2.2 stopped before any change (exit 1): host invariants: 2 fatal finding(s) — "
+        "nothing was changed"
+    ))
+    assert (failure.reason, failure.step) == ("checks", "checks")
+
+
+# Every «… nothing was changed» of scripts/deploy.sh, with the reason and the step
+# deploy.sh stops with there — keyed by the function the die is in (None: top level),
+# a function with two cases by a substring of the message. A die added to deploy.sh in
+# a function not listed here fails the test until it is.
+_EXPECTED_BY_FUNCTION: dict[str | None, tuple[str, str]] = {
+    None: ("preflight", "preflight"),                # DEPLOY_REF on the main server
+    "resolve_node_role": ("preflight", "preflight"),
+    "role_guard": ("preflight", "preflight"),
+    "fetch_origin_main": ("fetch", "fetch"),
+    "relay_resolve_target": ("preflight", "fetch"),
+    "relay_fetch_target": ("preflight", "fetch"),
+    "relay_handover": ("preflight", "fetch"),
+    "ensure_python_venv": ("no_venv", "tests"),
+    "run_checkout_tests": ("no_venv", "tests"),
+    "phase1_pytest": ("tests", "tests"),
+    "managed_host_phase1": ("checks", "checks"),
+    "ssh_port_phase1": ("checks", "checks"),
+    "ufw_phase1": ("checks", "checks"),
+    "host_invariants_phase1": ("checks", "checks"),
+    "hy2_auth_unit_phase1": ("checks", "checks"),
+    "relay_phase1": ("checks", "checks"),
+    "relay_phase2": ("failed", "backup"),
+}
+_EXPECTED_BY_TEXT: tuple[tuple[str, str, tuple[str, str]], ...] = (
+    ("relay_fetch_target", "git fetch failed", ("fetch", "fetch")),
+    ("run_checkout_tests", "Phase 1 gate:", ("tests", "tests")),
+    ("relay_phase2", "the unit set is not known", ("checks", "checks")),  # before `step backup`
+)
+_FUNC_START = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{")
+
+
+def _literal_assignments(text: str) -> dict[str, str]:
+    """NAME="literal" and NAME="${NAME:-literal}" of deploy.sh (no other expansion)."""
+    found: dict[str, str] = {}
+    for m in re.finditer(r'^([A-Z][A-Z0-9_]*)="(?:\$\{\1:-)?([^"$]*?)\}?"', text, re.MULTILINE):
+        if m.group(2):
+            found.setdefault(m.group(1), m.group(2))
+    return found
+
+
+def _render(message: str, values: dict[str, str]) -> str:
+    """A die message as it prints: $(...) and ${...} replaced with plausible values."""
+    message = re.sub(r"\$\((?:[^()]|\([^()]*\))*\)", "X", message)
+
+    def var(m: re.Match[str]) -> str:
+        name = re.sub(r"[^A-Za-z0-9_].*$", "", m.group(1).lstrip("#!"))
+        return values.get(name, "2" if m.group(1).startswith("#") else "X")
+
+    message = re.sub(r"\$\{([^}]*)\}", var, message)
+    return re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*)", lambda m: values.get(m.group(1), "X"), message)
+
+
+def _nothing_changed_dies() -> list[tuple[int, str | None, str]]:
+    """(line, enclosing function, rendered message) of every die whose message says
+    «nothing was changed»."""
+    text = DEPLOY_SH.read_text(encoding="utf-8")
+    values = {
+        **_literal_assignments(text),
+        "SSH_PLAN_STATUS": "ssh port: REFUSED — the helper exited 2 (see above)",
+        "HY2_AUTH_UNIT_DST": "/etc/systemd/system/vpnbot-hy2-auth.service",
+        "MH_CAND_DIR": "/run/vpn-bot-deploy.cand", "root": "/tmp/wt",
+    }
+    found: list[tuple[int, str | None, str]] = []
+    func: str | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        start = _FUNC_START.match(line)
+        if start:
+            func = start.group(1)
+        elif line.startswith("}"):
+            func = None
+        if line.lstrip().startswith("#") or 'die "' not in line or not re.search(r"nothing was changed", line, re.I):
+            continue
+        body = line[line.index('die "') + len('die "'):line.rindex('"')]
+        found.append((number, func, _render(body, values)))
+    return found
+
+
+def test_every_stop_before_any_change_of_deploy_sh_names_its_step() -> None:
+    """Walks EVERY «nothing was changed» of scripts/deploy.sh: forwarded as an agent
+    older than the markers does (the «[deploy][FAIL] » prefix dropped, after its
+    «stopped before any change»), the bot reads the step and the reason deploy.sh dies
+    with there — not «шаг неизвестен»."""
+    dies = _nothing_changed_dies()
+    assert len(dies) >= 50, "the scan of deploy.sh found too few messages"
+    wrong: list[str] = []
+    for number, func, message in dies:
+        assert func in _EXPECTED_BY_FUNCTION, f"deploy.sh:{number} ({func}): add its step to the test and TEXT_STEPS"
+        expected = _EXPECTED_BY_FUNCTION[func]
+        for where, part, override in _EXPECTED_BY_TEXT:
+            if where == func and part in message:
+                expected = override
+        for text in (
+            f"the deploy of v3.2.2 stopped before any change (exit 1): {message}",
+            f"[deploy][FAIL] {message}",
+        ):
+            failure = deploy_failure_from(None, message=text)
+            if (failure.reason, failure.step) != expected:
+                wrong.append(f"deploy.sh:{number} {message!r}: {(failure.reason, failure.step)} != {expected}")
+    assert wrong == []
+
+
+def test_the_text_table_reads_only_a_stop_before_any_change() -> None:
+    """A rollback's words never take a step from the stop-before-any-change table."""
+    failure = deploy_failure_from(None, message=(
+        "the deploy of v3.2.2 failed and rolled back (exit 1): host invariants after the install: 1 BEATEN/MISMATCH "
+        "finding(s) (above) — the repo's host state is not in effect"
+    ))
+    assert (failure.reason, failure.step) == ("rolled_back", "verify")
+
+
 def test_a_known_reason_without_a_step_takes_the_step_from_the_table() -> None:
     assert deploy_failure_from({"reason": "tests"}).step == "tests"
     assert deploy_failure_from({"reason": "failed"}).step == "", "no guess for a reason that names no step"

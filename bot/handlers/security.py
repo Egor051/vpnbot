@@ -25,7 +25,21 @@ from bot.guards import require_superadmin
 from bot.handlers.common import answer_callback_error, service_error_text
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
-from bot.totp_gate import ACTION_KEY, PROMPT_KEY, RESUME_KEY, delete_quietly, resume_keyboard
+from bot.totp_gate import (
+    ACTION_KEY,
+    BACK_KEY,
+    IN_PLACE_KEY,
+    PROMPT_KEY,
+    RESUME_KEY,
+    SCREEN_KEY,
+    UNDO_DATA,
+    Resume,
+    delete_quietly,
+    in_place_keyboard,
+    resume_keyboard,
+    resumer_for,
+    screen_message,
+)
 from i18n import t
 from services.errors import ServiceError
 from services.totp import TotpLocked, TotpService
@@ -307,14 +321,26 @@ async def totp_gate_code(message: Message, state: FSMContext, services: Services
     data = await state.get_data()
     action = str(data.get(ACTION_KEY) or "")
     resume = data.get(RESUME_KEY)
+    in_place = data.get(IN_PLACE_KEY) is True
+    screen = str(data.get(SCREEN_KEY) or "")
     try:
         await require_superadmin(services, message.from_user.id)
         result = await _totp(services).verify(message.from_user.id, code, purpose=f"gate:{action}")
     except TotpLocked as exc:
         await state.clear()
+        if in_place:
+            await _edit_prompt(bot, message.chat.id, data, f"{screen}\n\n{service_error_text(exc)}", _back_keyboard(data))
+            return
         await _edit_prompt(bot, message.chat.id, data, service_error_text(exc), None)
         return
     except ServiceError as exc:
+        if in_place:
+            # The screen stays; the error is added under it, the code is asked again.
+            await _edit_prompt(
+                bot, message.chat.id, data,
+                f"{screen}\n\n" + t("totp_gate_retry", error=service_error_text(exc)), in_place_keyboard(),
+            )
+            return
         await _edit_prompt(
             bot,
             message.chat.id,
@@ -324,10 +350,35 @@ async def totp_gate_code(message: Message, state: FSMContext, services: Services
         )
         return
     await state.clear()
+    resume_fn = resumer_for(resume) if in_place and isinstance(resume, str) else None
+    prompt = data.get(PROMPT_KEY)
+    if resume_fn is not None and isinstance(resume, str) and isinstance(prompt, int):
+        # The code IS the confirmation: the action starts on the same screen.
+        await resume_fn(Resume(
+            message=screen_message(bot, message.chat.id, prompt), user=message.from_user, state=state,
+            services=services, bot=bot, data=resume,
+        ))
+        return
     text = t("totp_gate_ok")
     if result.method == "backup":
         text += "\n" + t("totp_backup_used", left=result.backup_left)
     await _edit_prompt(bot, message.chat.id, data, text, resume_keyboard(resume) if isinstance(resume, str) else None)
+
+
+def _back_keyboard(data: dict[str, Any]) -> InlineKeyboardMarkup | None:
+    back = data.get(BACK_KEY)
+    return InlineKeyboardMarkup(inline_keyboard=[_row(t("btn_back"), back)]) if isinstance(back, str) and back else None
+
+
+@router.callback_query(F.data == UNDO_DATA)
+async def totp_gate_undo(callback: CallbackQuery, state: FSMContext) -> None:
+    """«✖️ Отмена» of an in-place code: the gate is cleared, the screen says so and
+    leads back where it came from."""
+    data = await state.get_data()
+    if await state.get_state() == TotpStates.gate_code.state:
+        await state.clear()
+    await safe_callback_answer(callback, t("totp_gate_cancelled"))
+    await safe_edit_message_text(callback.message, t("totp_gate_undone"), reply_markup=_back_keyboard(data))
 
 
 @router.callback_query(F.data == "sec:gate:cancel")

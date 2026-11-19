@@ -137,6 +137,9 @@ class ProgressMessage:
     timer: Timer = field(default_factory=current_timer)
     edit: Edit | None = None
     footer: str = ""
+    # The keyboard every progress edit carries while the operation runs (only «📄 Лог»
+    # — never a button that does nothing or that starts the run again); None: none.
+    markup: InlineKeyboardMarkup | None = None
     tick: int = 0
     edits: int = 0
     _last_at: float | None = field(default=None, repr=False)
@@ -236,7 +239,7 @@ class ProgressMessage:
         self.tick += 1
         if text == self._last_text and not force:
             return False
-        return await self._send(text, markup)
+        return await self._send(text, markup if markup is not None else self.markup)
 
     async def animate(self, stop: asyncio.Event) -> None:
         """Until *stop*: one edit per *interval* (the activity line moves between the

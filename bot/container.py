@@ -30,6 +30,7 @@ from services.fallback import FallbackService
 from services.relays import RelayService
 from services.server_status import ServerStatusService
 from services.relay_hardening import RelayHardeningMonitor
+from services.relay_sshd_override import SshdOverrideMonitor
 from services.ssh_port import SshPortMonitor
 from services.ufw import UfwDeadmanMonitor
 from services.socks5 import Socks5Service
@@ -114,6 +115,10 @@ class Services:
     # per pairing that a relay is on SSH 22 / without the input filter; remembers «Позже».
     # None only in lightweight test doubles.
     relay_hardening: RelayHardeningMonitor | None = None
+    # A foreign sshd override on a relay (services/relay_sshd_override.py): tells the
+    # superadmins once per file and mtime, with «🧹 Убрать чужой override»; resolves the
+    # button's path. None only in lightweight test doubles.
+    sshd_override: SshdOverrideMonitor | None = None
     # The UFW dead-man (scripts/vpn-bot-ufw-apply): tells the superadmins when a change
     # of the incoming policy waits for its proof (with «Подтвердить») and how it ended.
     # None only in lightweight test doubles.

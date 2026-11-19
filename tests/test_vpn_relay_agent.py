@@ -1314,5 +1314,198 @@ def test_input_filter_needs_a_pairing(host: Host) -> None:
     assert rc == 3 and not [c for c in host.calls() if c.startswith("vpn-relay-apply")]
 
 
-def test_the_agent_says_version_4() -> None:
-    assert agent.AGENT_VERSION == "4" and "input-filter" in agent.COMMANDS
+def test_the_agent_says_version_5() -> None:
+    assert agent.AGENT_VERSION == "5" and "input-filter" in agent.COMMANDS
+    assert {"sshd-check", "sshd-override-off", "update-log"} <= set(agent.COMMANDS)
+
+
+# --------------------------------------------------------------------------- #
+# A foreign sshd override: sshd-check, sshd-override-off (docs/relay.md «Чужой sshd-override»)
+# --------------------------------------------------------------------------- #
+OVERRIDE = "/etc/ssh/sshd_config.d/00-password-login.conf"
+KEYONLY = "/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf"
+OVERRIDE_ROWS = [
+    f"BEATEN|sshd|passwordauthentication|{OVERRIDE}|{OVERRIDE}:1 = yes wins over the repo value no of {KEYONLY} "
+    "(the first value wins)",
+    f"BEATEN|sshd|permitrootlogin|{OVERRIDE}|{OVERRIDE}:2 = yes wins over the repo value prohibit-password of "
+    f"{KEYONLY} (the first value wins)",
+]
+
+
+def _override_host(host: Host, *, sshd_t_rc: int = 0, still_yes: bool = False, keys: str | None = None,
+                   rows: list[str] | None = None) -> Path:
+    """A relay with he2's override: the repo's drop-ins in the checkout, the foreign
+    file on the host, a host check that names it while it is there, sshd stubs."""
+    host.pair(paired=True)
+    repo_ssh = host.root / "opt/vpn-service/deploy/host/ssh"
+    repo_ssh.mkdir(parents=True, exist_ok=True)
+    for src in (ROOT / "deploy/host/ssh").glob("*.conf"):
+        shutil.copy(src, repo_ssh / src.name)
+    dropins = host.root / "etc/ssh/sshd_config.d"
+    dropins.mkdir(parents=True, exist_ok=True)
+    (dropins / "00-vpnrelay-keyonly.conf").write_text("PasswordAuthentication no\n", encoding="utf-8")
+    target = dropins / "00-password-login.conf"
+    target.write_text("PasswordAuthentication yes\nPermitRootLogin yes\n", encoding="utf-8")
+    if keys is not None:
+        host.keys.write_text(keys, encoding="utf-8")
+    listed = "\n".join(OVERRIDE_ROWS if rows is None else rows)
+    original_stubs = host.stubs
+
+    def stubs() -> None:
+        original_stubs()
+        host.stub("vpn-bot-host-check",
+                  f'if [[ -e "{target}" ]]; then cat <<\'EOF\'\n{listed}\nEOF\nexit 1; fi\necho "SUMMARY|role=relay"\nexit 0\n')
+        bad = "yes" if still_yes else ""
+        host.stub(
+            "sshd",
+            f'if [[ "$1" == -t ]]; then exit {sshd_t_rc}; fi\n'
+            f'if [[ -e "{target}" || -n "{bad}" ]]; then echo "passwordauthentication yes"; echo "permitrootlogin yes"\n'
+            'else echo "passwordauthentication no"; echo "permitrootlogin without-password"; fi\n'
+            'echo "pubkeyauthentication yes"; echo "kbdinteractiveauthentication no"\n',
+        )
+
+    host.stubs = stubs  # type: ignore[method-assign]
+    return target
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "sshd-override-off path=/etc/ssh/sshd_config",
+        "sshd-override-off path=/etc/ssh/sshd_config.d/../sshd_config.conf",
+        "sshd-override-off path=/etc/ssh/sshd_config.d/*.conf",
+        "sshd-override-off path=/etc/ssh/sshd_config.d/sub/x.conf",
+        "sshd-override-off path=/tmp/x.conf",
+        "sshd-override-off path=/etc/ssh/sshd_config.d/x.conf;id",
+        "sshd-override-off path=/etc/ssh/sshd_config.d/.hidden.conf",
+        "sshd-override-off path=/etc/ssh/sshd_config.d/x.conf extra",
+        "sshd-override-off",
+        "sshd-check now",
+        "update-log /root/x",
+    ],
+)
+def test_an_override_path_outside_sshd_config_d_is_refused_before_anything_runs(host: Host, raw: str) -> None:
+    _override_host(host)
+    rc, payload = host.run(raw)
+    assert rc == 2 and "refused" in payload["error"]
+    assert host.host_calls() == []
+
+
+def test_the_whitelist_takes_a_plain_drop_in() -> None:
+    assert agent.parse_request(f"sshd-override-off path={OVERRIDE}") == ("sshd-override-off", {"path": OVERRIDE})
+    assert agent.parse_request("sshd-check") == ("sshd-check", {})
+    assert agent.parse_request("update-log") == ("update-log", {})
+
+
+def test_the_override_moves_to_the_attic_and_sshd_is_checked_and_reloaded(host: Host) -> None:
+    target = _override_host(host)
+    rc, payload = host.run(f"sshd-override-off path={OVERRIDE}")
+    assert rc == 0, payload
+    moved = payload["sshd_override"]["moved_to"]
+    assert moved.startswith("/root/attic/00-password-login.conf.") and not target.exists()
+    kept = host.root / moved.lstrip("/")
+    assert kept.read_text(encoding="utf-8").startswith("PasswordAuthentication yes"), "moved, never deleted"
+    assert payload["sshd_override"]["keys"] == ["passwordauthentication", "permitrootlogin"]
+    calls = host.host_calls()
+    assert "sshd -t" in calls and "systemctl try-reload-or-restart sshd.service" in calls and "sshd -T" in calls
+    assert calls.index("sshd -t") < calls.index("systemctl try-reload-or-restart sshd.service")
+    assert payload["sshd_drift"] == {}
+
+
+def test_a_failing_sshd_t_puts_the_file_back(host: Host) -> None:
+    target = _override_host(host, sshd_t_rc=1)
+    before = target.read_text(encoding="utf-8")
+    rc, payload = host.run(f"sshd-override-off path={OVERRIDE}")
+    assert rc == 4 and "sshd -t failed" in payload["error"] and "restored" in payload["error"]
+    assert target.read_text(encoding="utf-8") == before
+    assert list((host.root / "root/attic").iterdir()) == []
+    assert "systemctl try-reload-or-restart sshd.service" not in host.host_calls(), "no reload of a broken config"
+
+
+def test_sshd_still_taking_passwords_without_it_puts_it_back(host: Host) -> None:
+    target = _override_host(host, still_yes=True)
+    rc, payload = host.run(f"sshd-override-off path={OVERRIDE}")
+    assert rc == 4 and "still shows passwordauthentication yes" in payload["error"]
+    assert target.exists() and payload["sshd_override"]["rolled_back"] == "restored"
+
+
+def test_without_an_own_key_it_is_refused_and_nothing_moves(host: Host) -> None:
+    target = _override_host(host, keys=KEY_LINE + "# only the agent\n")
+    rc, payload = host.run(f"sshd-override-off path={OVERRIDE}")
+    assert rc == 4 and payload["sshd_override"] == {"refused": "no_personal_key"}
+    assert "add your own key first" in payload["error"]
+    assert target.exists() and not [c for c in host.host_calls() if c.startswith(("vpn-bot-host-check", "sshd"))]
+
+
+def test_a_path_the_host_check_does_not_name_is_refused(host: Host) -> None:
+    target = _override_host(host, rows=[])
+    rc, payload = host.run(f"sshd-override-off path={OVERRIDE}")
+    assert rc == 2 and "does not report" in payload["error"] and target.exists()
+
+
+def test_the_repos_own_drop_in_is_never_moved(host: Host) -> None:
+    _override_host(host)
+    rc, payload = host.run(f"sshd-override-off path={KEYONLY}")
+    assert rc == 2 and "the repo's own drop-in" in payload["error"]
+
+
+def test_personal_keys_ignore_forced_commands() -> None:
+    p = Path(os.devnull)
+    assert agent.personal_keys(p) == 0
+    text = (KEY_LINE + 'restrict,port-forwarding,permitopen="a:1",command="/bin/false" ssh-ed25519 AAAAC3x jump\n'
+            + 'from="1.2.3.4",command="echo hi there" ssh-rsa AAAAB3 x\n# ssh-ed25519 AAAA commented\n')
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "k"
+        f.write_text(text, encoding="utf-8")
+        assert agent.personal_keys(f) == 0
+        f.write_text(text + 'no-pty,from="10.0.0.0/8" ssh-ed25519 AAAAC3op me\n', encoding="utf-8")
+        assert agent.personal_keys(f) == 1
+
+
+def test_sshd_check_and_status_name_the_override(host: Host) -> None:
+    _override_host(host)
+    rc, payload = host.run("sshd-check")
+    assert rc == 0 and [o["path"] for o in payload["sshd_overrides"]] == [OVERRIDE]
+    assert payload["sshd_overrides"][0]["keys"] == ["passwordauthentication", "permitrootlogin"]
+    assert isinstance(payload["sshd_overrides"][0]["mtime"], int)
+    assert payload["sshd_drift"]["passwordauthentication"] == {"have": "yes", "want": "no"}
+    # status: the drift (sshd -T, every call) and what the check's last.json names
+    state = host.root / "var/lib/vpn-bot-host-check"
+    state.mkdir(parents=True, exist_ok=True)
+    rows = [dict(zip(("verdict", "family", "key", "path", "text"), r.split("|", 4), strict=True)) for r in OVERRIDE_ROWS]
+    (state / "last.json").write_text(json.dumps({"generated_at": "2026-11-19T10:00:00Z", "rows": rows}), encoding="utf-8")
+    rc, status = host.run("status")
+    assert rc == 0 and [o["path"] for o in status["sshd_overrides"]] == [OVERRIDE]
+    assert status["host_check_at"] == "2026-11-19T10:00:00Z" and "permitrootlogin" in status["sshd_drift"]
+
+
+def test_update_log_reads_only_the_deploy_log_update_json_names(host: Host) -> None:
+    host.pair(paired=True)
+    log = host.root / "root/deploy-20261119T100000Z.log"
+    log.write_text("x" * 10 + "\n[deploy][FAIL] host invariants: 2 fatal finding(s)\n", encoding="utf-8")
+    (host.root / "var/lib/vpn-relay/update.json").write_text(
+        json.dumps({"state": "running", "progress": {"step": "checks", "log": "/root/deploy-20261119T100000Z.log"}}),
+        encoding="utf-8")
+    rc, payload = host.run("update-log")
+    assert rc == 0 and payload["update_log"]["text"].endswith("2 fatal finding(s)\n")
+    (host.root / "var/lib/vpn-relay/update.json").write_text(json.dumps({"log": "/etc/shadow"}), encoding="utf-8")
+    rc, payload = host.run("update-log")
+    assert rc == 4 and "no deploy log" in payload["error"]
+
+
+def test_the_verdict_carries_the_host_check_findings() -> None:
+    out = "\n".join([
+        "[deploy:step 4/8 checks]",
+        f"[deploy][WARN]   FAIL BEATEN   sshd passwordauthentication — {OVERRIDE_ROWS[0].split('|', 4)[4]}",
+        "[deploy][WARN]   FAIL MISMATCH unit even-day-reboot.timer — timer is disabled [/etc/systemd/system/even-day-reboot.timer]",
+        "[deploy][FAIL] host invariants: 2 fatal finding(s) — nothing was changed",
+        "[deploy:result failed step=checks reason=checks]",
+    ])
+    v = agent.deploy_verdict(out, 1)
+    assert (v["reason"], v["step"]) == ("checks", "checks")
+    assert v["findings"][0] == {"verdict": "BEATEN", "family": "sshd", "key": "passwordauthentication",
+                                "path": OVERRIDE, "text": OVERRIDE_ROWS[0].split("|", 4)[4]}
+    assert v["findings"][1]["path"] == "/etc/systemd/system/even-day-reboot.timer"
+    assert any("FAIL BEATEN" in line for line in v["excerpt"]), "the rows are in the excerpt too"
+    assert agent.deploy_verdict("[deploy:result ok]\n", 0)["findings"] == []

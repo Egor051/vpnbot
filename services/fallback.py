@@ -42,6 +42,23 @@ choose among several hubs; :meth:`FallbackService._switch` is the switch without
 superadmin check — the automatic switch on health (services/fallback_auto.py) calls it
 with ``actor_user_id=None`` (its preflight asks the hub's agent as the bot itself).
 
+THE PROXIES (docs/proxy.md «Через hub в режиме фолбэка»). SOCKS5 (and MTProto, when on)
+are handed out as SOCKS5_HOST:SOCKS5_PORT — main's address, dead for users in Russia in
+the mode. The switch adds the port of every proxying module that is on to the hub's TCP
+set — the same agent ``apply`` as 443/2096, whose own check proves the hub reaches
+main:<port> or rolls the forward back — and the «Прокси» section then shows the hub's
+IPv4 with the same port (services/proxy_endpoint.py, ONE source). Switching the mode off
+(or the module off) takes the port off the hub again. Chosen at the switch, not with the
+hub's role: outside the mode nobody needs main's danted through the hub, and a port the
+hub forwards is probed by the hub's own check (its health, its deploy's verify, the
+agent's apply) — a danted outage on main must not look like a dead hub, or roll its
+update back, while no proxy user needs it. A proxy port that cannot be forwarded never
+blocks the switch: the VPN goes first, the report says what the proxies did. Logins and
+passwords do not change; only TCP CONNECT works through the hub (danted answers UDP
+ASSOCIATE with its own address). Links users already saved still carry main's address:
+after a switch that moved a proxy the screen offers «📣 Разослать новую ссылку» — never
+sent by itself.
+
 SETTING IT UP (bot/handlers/admin_fallback.py, «⚙️ Настроить фолбэк»): the token
 (checked against the zone right away, :meth:`FallbackService.check_zone`), the hub
 among the relays with an agent outside Russia (:meth:`hub_candidates`, by the
@@ -88,6 +105,7 @@ from repositories.failover import (
 from repositories.relays import RelayRepository
 from services.audit import AuditService
 from services.errors import InvalidOperation, NotFound, ServiceError
+from services.proxy_endpoint import MTPROTO, PROXY_KINDS, SOCKS5, ProxyEndpoint, ProxyEndpoints
 from services.relay import select_hub
 from services.relay_pairing import format_ports, valid_dns_name
 from services.relays import CHECK_OK_CODES, RelayService, agent_uninstalled, only_input_filter_failures
@@ -100,6 +118,8 @@ FAILOVER = "failover"
 # `vpn-relay-apply check` exit codes a hub may report and still be fit: 0, or only
 # the input filter's own complaints (16-18) — not the forward, not the upstream.
 _HUB_CHECK_OK = CHECK_OK_CODES
+# `vpn-relay-apply check`: TCP connect to the upstream failed (on a forwarded TCP port).
+_E_TCP = 13
 # How long the switch waits for public resolvers to agree, and how often it asks.
 VERIFY_TIMEOUT_SECONDS = 30.0
 VERIFY_INTERVAL_SECONDS = 5.0
@@ -107,7 +127,10 @@ VERIFY_INTERVAL_SECONDS = 5.0
 META_AUTO_SWITCH = "fallback_auto_switch"
 # The switch's steps, for the progress message (bot/progress.py): on_progress(step,
 # state, done, total).
-SWITCH_STEPS = ("preflight", "dns", "verify", "jump")
+SWITCH_STEPS = ("preflight", "dns", "verify", "jump", "proxy")
+# schema_meta: the proxies a switch moved, whose users may want the new address
+# («📣 Разослать новую ссылку»): {"kinds": [...], "at": ...}; "" when none.
+META_PROXY_NOTICE = "fallback_proxy_notice"
 
 Doh = Callable[[str], Awaitable[list[DohAnswer]]]
 Progress = Callable[[str, str, int | None, int | None], Awaitable[None]]
@@ -146,6 +169,8 @@ class PreflightItem:
     params: dict[str, object] = field(default_factory=dict, hash=False, compare=False)
     # True: shown, but does not block the switch.
     warning: bool = False
+    # True: neither good nor bad — what will happen (an info icon); never blocks.
+    info: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,10 +205,23 @@ class NameResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ProxyRoute:
+    """What a switch did to one proxying module's forward on the hub."""
+
+    kind: str
+    port: int
+    # The hub forwards it now (the mode on) / it is off the hub (the mode off).
+    ok: bool
+    via_hub: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SwitchReport:
     target: str
     preflight: Preflight | None
     results: tuple[NameResult, ...] = ()
+    proxies: tuple[ProxyRoute, ...] = ()
 
     @property
     def started(self) -> bool:
@@ -223,6 +261,10 @@ class FallbackOverview:
     sub_fallback_url: bool
     direct_host: str | None
     single_direct_keys: int
+    # Where each proxying module that is on is reached now (services/proxy_endpoint.py).
+    proxies: tuple[tuple[str, ProxyEndpoint], ...] = ()
+    # The proxies a switch moved whose users have not been told yet.
+    proxy_notice: tuple[str, ...] = ()
 
     @property
     def target(self) -> str:
@@ -260,10 +302,25 @@ def _ipv4(value: str | None) -> str | None:
     return None if address is None else str(address)
 
 
-def check_reaches(status: Mapping[str, Any], address: str, ports: Iterable[int]) -> tuple[bool, list[int]]:
+PROXY_TITLES = {SOCKS5: "SOCKS5", MTPROTO: "MTProto"}
+
+
+def port_reached(status: Mapping[str, Any], address: str, port: int) -> bool:
+    """The agent's own check connected to *address*:*port* (and did not fail on it)."""
+    check = status.get("check")
+    lines = check.get("lines") if isinstance(check, dict) else None
+    text = [str(line) for line in lines] if isinstance(lines, list) else []
+    return (any(f"ok: TCP connect {address}:{port}" in line for line in text)
+            and not any(f"FAIL: TCP connect {address}:{port}" in line for line in text))
+
+
+def check_reaches(
+    status: Mapping[str, Any], address: str, ports: Iterable[int], *, tolerated: Iterable[int] = (),
+) -> tuple[bool, list[int]]:
     """Whether the agent's own ``vpn-relay-apply check`` connected to *address* on
-    every port of *ports* — and failed on nothing but the input filter. Returns
-    (passed, the ports that did not connect)."""
+    every port of *ports* — and failed on nothing but the input filter, or a TCP connect
+    on a *tolerated* port (a proxy port the hub forwards: a danted outage on main is not
+    a VPN that cannot switch). Returns (passed, the ports that did not connect)."""
     check = status.get("check")
     lines = check.get("lines") if isinstance(check, dict) else None
     rc = check.get("rc") if isinstance(check, dict) else None
@@ -273,7 +330,14 @@ def check_reaches(status: Mapping[str, Any], address: str, ports: Iterable[int])
         if not any(f"ok: TCP connect {address}:{port}" in line for line in text)
         or any(f"FAIL: TCP connect {address}:{port}" in line for line in text)
     ]
-    healthy = isinstance(rc, int) and (rc == 0 or (rc in _HUB_CHECK_OK and only_input_filter_failures(text)))
+    skip = tuple(f"TCP connect {address}:{port} " for port in tolerated)
+    judged = [line for line in text if not (skip and any(mark in line for mark in skip))]
+    # The exit code is the FIRST failure's: a tolerated port's TCP failure (13) may be
+    # it — the FAIL lines that are left decide.
+    rest_ok = only_input_filter_failures(judged)
+    healthy = isinstance(rc, int) and (
+        rc == 0 or (rc in _HUB_CHECK_OK and rest_ok) or (bool(skip) and rc == _E_TCP and rest_ok)
+    )
     return (healthy and not missing), missing
 
 
@@ -300,6 +364,8 @@ class FallbackService:
         monotonic: Callable[[], float] = time.monotonic,
         verify_timeout: float = VERIFY_TIMEOUT_SECONDS,
         verify_interval: float = VERIFY_INTERVAL_SECONDS,
+        endpoints: ProxyEndpoints | None = None,
+        modules: Any | None = None,
     ) -> None:
         self.repo = repo
         self.relays_repo = relays_repo
@@ -320,13 +386,116 @@ class FallbackService:
         # What the health loop asks synchronously (refresh_state keeps it current).
         self._mode_on = False
         self._names: frozenset[str] = frozenset()
+        # THE public address of each proxy (services/proxy_endpoint.py): refresh_state
+        # routes a module through the hub while the mode is on and the hub forwards it.
+        self.endpoints = endpoints or ProxyEndpoints(settings)
+        # services.protocol_modules (is_enabled): a proxying module switched off is not
+        # forwarded. None: .env alone decides (tests).
+        self.modules = modules
 
     # ── state for the health loop ─────────────────────────────────────────────
 
     async def refresh_state(self) -> None:
-        """Re-read the mode and the names (after every write, and at startup)."""
+        """Re-read the mode and the names (after every write, and at startup) — and where
+        each proxy is reached: through the hub while the mode is on and the hub forwards
+        its port (the hub's stored forward, written by the agent's apply)."""
         self._mode_on = await self.repo.mode_on()
         self._names = frozenset(name.name for name in await self.repo.list_names())
+        via: dict[str, str] = {}
+        if self._mode_on:
+            hub = select_hub(await self.relays_repo.list_hubs())
+            address = await self.hub_ipv4(hub)
+            if hub is not None and hub.agent is not None and address:
+                for kind, port in (await self.proxy_ports()).items():
+                    if port in hub.agent.tcp_ports:
+                        via[kind] = address
+        self.endpoints.set_via_hub(via)
+
+    # ── the proxies through the hub (module docstring, «THE PROXIES») ─────────
+
+    async def proxy_ports(self) -> dict[str, int]:
+        """{kind: port} of the proxying modules that are on (.env and the module switch),
+        without a port the hub forwards for the VPN anyway."""
+        vpn_tcp, _ = self.hub_ports()
+        found: dict[str, int] = {}
+        for kind in PROXY_KINDS:
+            enabled = self.settings.socks5_enabled if kind == SOCKS5 else self.settings.mtproto_enabled
+            port = self.endpoints.configured(kind).port
+            if not enabled or port is None or not 0 < port < 65536 or port in vpn_tcp:
+                continue
+            if self.modules is not None and not await self.modules.is_enabled(kind):
+                continue
+            found[kind] = port
+        return found
+
+    def _proxy_snapshot(self) -> dict[str, str]:
+        return {kind: self.endpoints.endpoint(kind).address for kind in PROXY_KINDS}
+
+    async def _sync_proxy_forward(self, actor_user_id: int | None, *, on: bool) -> tuple[ProxyRoute, ...]:
+        """The hub's TCP set = the VPN ports (+ the proxy ports while *on*), through the
+        agent's ``apply`` (its check proves main:<port> answers, or it rolls back). Never
+        raises: what happened is in the routes."""
+        wanted = await self.proxy_ports() if on else {}
+        hub = select_hub(await self.relays_repo.list_hubs())
+        if hub is None or hub.agent is None or agent_uninstalled(hub.agent):
+            return tuple(ProxyRoute(kind, port, ok=not on, via_hub=False, error="no hub with an agent")
+                         for kind, port in wanted.items())
+        agent = hub.agent
+        clash = {kind: port for kind, port in wanted.items() if port == agent.ssh_port}
+        ports = {kind: port for kind, port in wanted.items() if kind not in clash}
+        vpn_tcp, vpn_udp = self.hub_ports()
+        tcp = tuple(sorted(set(vpn_tcp) | set(ports.values())))
+        udp = tuple(agent.udp_ports) or vpn_udp
+        error: str | None = None
+        if set(agent.tcp_ports) != set(tcp):
+            try:
+                await self.relays.change_forward(
+                    actor_user_id, hub.id, target_host=agent.target_host, tcp=format_ports(tcp), udp=format_ports(udp),
+                    allow_hub=True,
+                )
+            except ServiceError as exc:
+                error = str(exc.params.get("error") or exc)[:300]
+                logger.warning("Fallback: the hub's proxy ports %s not applied: %s", format_ports(tcp), error)
+        routes = [ProxyRoute(kind, port, ok=False, via_hub=False, error="ssh") for kind, port in clash.items()]
+        routes += [ProxyRoute(kind, port, ok=error is None, via_hub=on and error is None, error=error)
+                   for kind, port in ports.items()]
+        if not on:
+            # Off: every proxy port that was there goes (a failure leaves it forwarded).
+            gone = {port for port in agent.tcp_ports if port not in vpn_tcp}
+            routes = [ProxyRoute(kind, port, ok=error is None, via_hub=error is not None, error=error)
+                      for kind, port in (await self.proxy_ports()).items() if port in gone]
+        await self._audit(actor_user_id, "fallback_proxy_forward",
+                          {"on": on, "tcp": list(tcp), "routes": {r.kind: r.ok for r in routes},
+                           **({"error": error} if error else {})}, relay_id=hub.id)
+        return tuple(routes)
+
+    async def sync_proxies(self, actor_user_id: int | None) -> tuple[ProxyRoute, ...]:
+        """A proxying module was switched on or off: while the mode is on the hub follows
+        (its port added or taken off). Nothing while the mode is off."""
+        async with self._lock:
+            if not await self.repo.mode_on():
+                return ()
+            before = self._proxy_snapshot()
+            routes = await self._sync_proxy_forward(actor_user_id, on=True)
+            await self.refresh_state()
+            await self._note_proxy_change(before)
+            return routes
+
+    async def _note_proxy_change(self, before: Mapping[str, str]) -> None:
+        """Remember the proxies whose address moved (their users may want the new one)."""
+        moved = [kind for kind, address in self._proxy_snapshot().items() if before.get(kind) != address]
+        if moved:
+            pending = set(await self.proxy_notice())
+            await self.repo.set_setting(META_PROXY_NOTICE, ",".join(sorted(pending | set(moved))))
+
+    async def proxy_notice(self) -> tuple[str, ...]:
+        """The proxies a switch moved whose users have not been told («📣 Разослать»)."""
+        raw = await self.repo.get_setting(META_PROXY_NOTICE) or ""
+        return tuple(kind for kind in raw.split(",") if kind in PROXY_KINDS)
+
+    async def clear_proxy_notice(self, actor_user_id: int) -> None:
+        await self.users.require_superadmin(actor_user_id)
+        await self.repo.set_setting(META_PROXY_NOTICE, "")
 
     @property
     def mode_on(self) -> bool:
@@ -371,6 +540,8 @@ class FallbackService:
             sub_fallback_url=await self.repo.sub_fallback_url(),
             direct_host=direct_host,
             single_direct_keys=await self.repo.single_direct_keys(issued_before=issued_before or None),
+            proxies=tuple((kind, self.endpoints.endpoint(kind)) for kind in await self.proxy_ports()),
+            proxy_notice=await self.proxy_notice(),
         )
 
     async def main_ipv4(self) -> str | None:
@@ -783,6 +954,14 @@ class FallbackService:
             if address is None:
                 raise InvalidOperation("нет адреса", key="fb_err_no_main_ipv4")
             await progress("preflight", "ok", None, None)
+            before = self._proxy_snapshot()
+            proxies: tuple[ProxyRoute, ...] = ()
+            if target == FAILOVER:
+                # The proxies first: their port on the hub before the names move (the
+                # agent's apply proves the hub reaches main:<port>); never blocking.
+                await progress("proxy", "run", None, None)
+                proxies = await self._sync_proxy_forward(actor_user_id, on=True)
+                await progress("proxy", "ok" if all(r.ok for r in proxies) else "fail", None, None)
             await self.repo.set_mode(target == FAILOVER, now=self.clock.now())
             await self.refresh_state()
             # Every relay but the hub is managed through the hub while the mode is
@@ -800,6 +979,13 @@ class FallbackService:
             await progress("verify", "run", None, None)
             results = await self._verify(written)
             await progress("verify", "ok", None, None)
+            if target == NORMAL:
+                # The names point at main again: the hub stops forwarding the proxies.
+                await progress("proxy", "run", None, None)
+                proxies = await self._sync_proxy_forward(actor_user_id, on=False)
+                await progress("proxy", "ok" if all(r.ok for r in proxies) else "fail", None, None)
+                await self.refresh_state()
+            await self._note_proxy_change(before)
         await self._audit(
             actor_user_id,
             "failover_enabled" if target == FAILOVER else "failover_disabled",
@@ -810,7 +996,7 @@ class FallbackService:
             },
         )
         await self.refresh_state()
-        return SwitchReport(target=target, preflight=preflight, results=tuple(results))
+        return SwitchReport(target=target, preflight=preflight, results=tuple(results), proxies=proxies)
 
     async def _write_name(self, name: FailoverName, target: str, address: str) -> NameResult:
         # What the record may hold now and still be overwritten: the main server,
@@ -926,13 +1112,25 @@ class FallbackService:
             {"name": hub.name, "want": f"tcp={format_ports(tcp)} udp={format_ports(udp)}",
              "have": f"tcp={format_ports(have_tcp)} udp={format_ports(have_udp)}"},
         ))
+        proxy = await self.proxy_ports()
+        forwarded = {kind: port for kind, port in proxy.items() if port in have_tcp}
         if payload:
-            reached, missing = check_reaches(payload, main, tcp)
+            reached, missing = check_reaches(payload, main, tcp, tolerated=forwarded.values())
             items.append(PreflightItem(
                 "fb_pf_reach", reached,
                 {"name": hub.name, "main": main, "ports": format_ports(tcp),
                  "missing": format_ports(missing) if missing else "—"},
             ))
+        # The proxies, one row each: through the hub while the mode forwards them, else
+        # what the switch will do (never blocking — the VPN goes first).
+        for kind, port in proxy.items():
+            params: dict[str, object] = {"proxy": PROXY_TITLES[kind], "port": port, "main": main, "name": hub.name}
+            if port == hub.agent.ssh_port:
+                items.append(PreflightItem("fb_pf_proxy_ssh", False, params, warning=True))
+            elif kind in forwarded:
+                items.append(PreflightItem("fb_pf_proxy_reach", port_reached(payload, main, port), params, warning=True))
+            else:
+                items.append(PreflightItem("fb_pf_proxy_later", True, params, info=True))
         # The loop: the hub's upstream is outside the set and IS the main server —
         # by the DNS API's record, by public resolvers and by the hub's own view.
         # The upstream NAME is the one the hub reports now, not the bot's stored

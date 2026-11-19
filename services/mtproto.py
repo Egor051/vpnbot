@@ -15,6 +15,7 @@ from repositories.proxy_accesses import ProxyAccessRepository
 from services.audit import AuditService
 from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
+from services.proxy_endpoint import ProxyEndpoints, mtproto_links
 from utils.redact import redact_value
 from services.user_locks import UserLockManager
 from services.users import UserService
@@ -58,10 +59,14 @@ class MtProtoService:
         adapter: MtProxyAdapter | None = None,
         user_locks: UserLockManager | None = None,
         backend_health: BackendHealth | None = None,
+        endpoints: ProxyEndpoints | None = None,
     ) -> None:
         self.accesses = accesses
         self.users = users
         self.settings = settings
+        # THE public address of the proxy now (services/proxy_endpoint.py): the hub's
+        # IPv4 in the fallback mode, MTPROTO_HOST otherwise.
+        self.endpoints = endpoints or ProxyEndpoints(settings)
         self.clock = clock
         self.audit = audit
         self.adapter = adapter
@@ -258,7 +263,7 @@ class MtProtoService:
                 actor_user_id=actor_user_id,
                 action="mtproto_proxy_created",
                 entity_id=access.id,
-                details={"owner_user_id": profile.telegram_user_id, "host": self.settings.mtproto_host, "mode": "static"},
+                details={"owner_user_id": profile.telegram_user_id, "host": self.endpoints.mtproto().host, "mode": "static"},
             )
             active = self._with_current_payload(await self._get_access(access.id))
             await self._mark_shown(active, actor_user_id)
@@ -357,7 +362,7 @@ class MtProtoService:
                     entity_id=access.id,
                     details={
                         "owner_user_id": profile.telegram_user_id,
-                        "host": self.settings.mtproto_host,
+                        "host": self.endpoints.mtproto().host,
                         "mode": "managed",
                         "fingerprint": fingerprint,
                         "generation": result.generation,
@@ -771,8 +776,8 @@ class MtProtoService:
             "type": ProxyAccessType.MTPROTO.value,
             "mode": mode,
             "protocol": "mtproto",
-            "host": self.settings.mtproto_host,
-            "port": self.settings.mtproto_port,
+            "host": self.endpoints.mtproto().host,
+            "port": self.endpoints.mtproto().port,
             "secret": secret,
             "secret_dd": f"dd{secret}",
             "fingerprint": mtproto_secret_fingerprint(secret),
@@ -787,8 +792,8 @@ class MtProtoService:
             "type": ProxyAccessType.MTPROTO.value,
             "mode": mode,
             "protocol": "mtproto",
-            "host": self.settings.mtproto_host,
-            "port": self.settings.mtproto_port,
+            "host": self.endpoints.mtproto().host,
+            "port": self.endpoints.mtproto().port,
             "public_name": self.settings.mtproto_public_name,
             "note": self.settings.mtproto_note,
         }
@@ -797,11 +802,7 @@ class MtProtoService:
         return payload
 
     def _links(self, secret: str) -> tuple[str, str]:
-        base = f"https://t.me/proxy?server={self.settings.mtproto_host}&port={self.settings.mtproto_port}"
-        return (
-            f"{base}&secret={secret}",
-            f"{base}&secret=dd{secret}",
-        )
+        return mtproto_links(self.endpoints.mtproto(), secret)
 
     def _with_current_payload(self, access: ProxyAccess) -> ProxyAccess:
         secret = self._access_secret(access)

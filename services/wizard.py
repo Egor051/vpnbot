@@ -13,7 +13,10 @@ What the bot does, and what it never does
 Phases
     plan     the mode's ``plan`` step (dry run: what would change). A mode with
              ``needs_confirmation`` stops here: the run is ``planned`` with
-             ``plan_ready`` until a superadmin confirms or cancels (or 30 minutes pass).
+             ``plan_ready`` until a superadmin confirms or cancels (or 30 minutes pass)
+             — unless the run was started CONFIRMED (``start(..., confirmed=True)``:
+             «⬆️ Обновить бота» asks its one confirmation before the run exists): then
+             a ready plan goes on to execute by itself (:meth:`WizardService._auto_confirm`).
     execute  ``apply`` → ``verify``; on a failure ``rollback``. ``running`` /
              ``verifying`` while it runs; ``succeeded`` / ``rolled_back`` / ``failed``
              at the end. A read-only mode goes straight to this phase.
@@ -60,6 +63,8 @@ LAUNCH_GRACE = timedelta(seconds=20)
 POLL_ACTIVE_SECONDS = 3
 POLL_IDLE_SECONDS = 30
 SCHEDULE_META_KEY = "wizard_selfcheck_daily"
+# The run started confirmed (its plan goes on to execute by itself): its id.
+CONFIRMED_META_KEY = "wizard_confirmed_run"
 SCHEDULE_EVERY = timedelta(hours=24)
 # A report that cannot be delivered (the chat is gone) is retried on every pass for
 # this long, then dropped — the run stays in the history either way.
@@ -139,6 +144,9 @@ class StatusSnapshot:
     # «Обновить бота»: where the deploy is (the helper's ``deploy`` events — its
     # steps and tests, read from the deploy's output while it runs).
     deploy_progress: dict[str, Any] | None = None
+    # The last ``deploy`` event of the phase BEFORE this one (the plan's CHECK, when
+    # this is the execute phase): the steps it already got through.
+    earlier_deploy_progress: dict[str, Any] | None = None
 
     @property
     def finished(self) -> bool:
@@ -167,6 +175,9 @@ def parse_status(text: str) -> StatusSnapshot:
         if rec["event"] == "launched":
             start = i
     snap = StatusSnapshot(events=len(records))
+    for rec in records[:start]:
+        if rec["event"] == "deploy" and isinstance(rec.get("progress"), dict):
+            snap.earlier_deploy_progress = rec["progress"]
     for rec in records[start:]:
         kind = rec["event"]
         if kind == "launched":
@@ -328,10 +339,13 @@ class WizardService:
         chat_id: int | None = None,
         message_id: int | None = None,
         origin: str = "manual",
+        confirmed: bool = False,
     ) -> WizardRun:
         """Validate, take the global lock (a row), launch the first phase.
 
         Authorisation (SUPERADMIN, TOTP for a dangerous mode) is the caller's job.
+        *confirmed*: the superadmin confirmed the run itself before it started (its
+        one confirmation) — a ready plan then goes on to execute without asking again.
         """
         mode = get_mode(mode_key)
         params = mode.validate(raw_params or {})
@@ -364,6 +378,8 @@ class WizardService:
             details={"mode": mode.key, "params": params, "origin": origin},
         )
         phase = "plan" if mode.needs_confirmation else "execute"
+        if phase == "plan" and confirmed:
+            await self.store.set_meta(CONFIRMED_META_KEY, str(run.id))
         if phase == "execute":
             await self.repo.update(run.id, now, phase="execute", state="running", current_step="apply")
         ok, detail = await self._launch(run, phase)
@@ -373,6 +389,27 @@ class WizardService:
         fresh = await self.repo.get(run.id)
         assert fresh is not None
         return fresh
+
+    async def started_confirmed(self, run_id: int) -> bool:
+        """The run was started confirmed (its plan goes on by itself)."""
+        return (await self.store.get_meta(CONFIRMED_META_KEY)) == str(run_id)
+
+    async def _auto_confirm(self, run: WizardRun) -> bool:
+        """A ready plan of a run started confirmed: on to execute, as «Применить» would
+        (the same atomic claim; the confirmation was the superadmin's, before the start)."""
+        if not await self.repo.claim_plan(run.id, self.clock.now()):
+            return False
+        await self.audit.write_best_effort(
+            actor_user_id=run.started_by,
+            action="wizard_run_confirmed",
+            entity_type=AuditEntityType.WIZARD,
+            entity_id=run.id,
+            details={"mode": run.mode, "confirmed": "before the start"},
+        )
+        ok, detail = await self._launch(run, "execute")
+        if not ok:
+            await self._finish(run.id, "failed", f"launch: {detail}", run.started_by)
+        return ok
 
     def exclusive(self) -> asyncio.Lock:
         """Held by a monitor pass; a handler that starts/confirms a run and renders its
@@ -471,6 +508,10 @@ class WizardService:
     async def _drive(self, run: WizardRun) -> None:
         now = datetime.now(timezone.utc)
         if run.state == "planned" and run.plan_ready:
+            if await self.started_confirmed(run.id):
+                # A restart between the ready plan and its launch: go on now.
+                await self._auto_confirm(run)
+                return
             updated = _parse_iso(run.updated_at)
             if updated is not None and now - updated > PLAN_TTL:
                 await self._finish(run.id, "cancelled", "the plan was not confirmed within 30 minutes", only_ready_plan=True)
@@ -521,7 +562,11 @@ class WizardService:
                     entity_id=run.id,
                     details={"mode": run.mode},
                 )
-                await self._show_plan(await self.repo.get(run.id) or run, snap)
+                ready = await self.repo.get(run.id) or run
+                if await self.started_confirmed(run.id):
+                    await self._auto_confirm(ready)
+                    return
+                await self._show_plan(ready, snap)
                 return
             if snap.outcome == "planned":
                 await self._finish(run.id, "succeeded", snap.plan_text or "nothing to do")

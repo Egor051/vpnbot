@@ -112,7 +112,13 @@ from models.dto import Relay, RelayAgent, RelayPairing
 from models.enums import AuditEntityType, VpnKeyType
 from repositories.relays import AGENT_UNINSTALLED_KEY, RelayRepository, RelayUsage
 from services.audit import AuditService
-from services.deploy_result import DeployFailure, deploy_failure_from
+from services.deploy_result import (
+    REPO_SSHD_DROPINS,
+    SSHD_AUTH_KEYS,
+    SSHD_DROPIN,
+    DeployFailure,
+    deploy_failure_from,
+)
 from services.errors import InvalidOperation, NotFound, ServiceError
 from services.notes import MAX_NOTE_LENGTH, normalize_note
 from services.relay import RelayCatalog, RelaySnapshot, basic_has_visible_server, select_hub
@@ -158,6 +164,8 @@ UNINSTALLED_KEY = AGENT_UNINSTALLED_KEY
 AGENT_SSH_PORT = 3
 AGENT_UPDATE_STATUS = 3
 AGENT_INPUT_FILTER = 4
+# 5 — sshd-check, sshd-override-off, update-log; sshd_drift / sshd_overrides in status.
+AGENT_SSHD_OVERRIDE = 5
 # «Довести relay до нормы» (docs/relay.md#bringing-a-relay-to-the-defaults): the defaults a
 # relay is brought to — SSH_PORT's default (DEFAULT_PORT of scripts/vpn-bot-ssh-port,
 # deploy/relay/relay.env.example) away from 22, and RELAY_INPUT_FILTER=on.
@@ -360,19 +368,85 @@ def agent_release(agent: RelayAgent | None) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class SshdOverride:
+    """A FOREIGN SSHD OVERRIDE (scripts/vpn-relay-agent, docs/relay.md «Чужой
+    sshd-override»): a file in sshd_config.d the repo does not install that beats a repo
+    auth key — the keys it beats, the check's texts, the file's mtime (a file that comes
+    back is a new one)."""
+
+    path: str
+    keys: tuple[str, ...]
+    texts: tuple[str, ...] = ()
+    mtime: int | None = None
+
+    @property
+    def name(self) -> str:
+        return self.path.rsplit("/", 1)[-1]
+
+
+def sshd_overrides_of(raw: object) -> tuple[SshdOverride, ...]:
+    """An agent's ``sshd_overrides`` (``status`` / ``sshd-check``), validated: only a file
+    directly in sshd_config.d that the repo does not install, beating a known auth key."""
+    if not isinstance(raw, list):
+        return ()
+    found: list[SshdOverride] = []
+    for item in raw[:16]:
+        if not isinstance(item, Mapping):
+            continue
+        path, keys, texts, mtime = item.get("path"), item.get("keys"), item.get("texts"), item.get("mtime")
+        if not isinstance(path, str) or SSHD_DROPIN.fullmatch(path) is None or path.rsplit("/", 1)[-1] in REPO_SSHD_DROPINS:
+            continue
+        clean = tuple(k for k in (keys if isinstance(keys, list) else []) if isinstance(k, str) and k in SSHD_AUTH_KEYS)
+        if not clean or any(o.path == path for o in found):
+            continue
+        found.append(SshdOverride(
+            path=path, keys=clean,
+            texts=tuple(str(x)[:300] for x in (texts if isinstance(texts, list) else [])[:8]),
+            mtime=mtime if type(mtime) is int and 0 <= mtime < 10**11 else None,
+        ))
+    return tuple(found)
+
+
+def sshd_drift_of(raw: object) -> dict[str, tuple[str, str]]:
+    """An agent's ``sshd_drift``: {auth key: (effective, the repo's)}."""
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, tuple[str, str]] = {}
+    for key, value in raw.items():
+        if key in SSHD_AUTH_KEYS and isinstance(value, Mapping):
+            out[str(key)] = (str(value.get("have") or "")[:80], str(value.get("want") or "")[:80])
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class SshdCheck:
+    """``sshd-check``: the foreign overrides a fresh host check names, the drift of the
+    auth keys, when the check ran."""
+
+    overrides: tuple[SshdOverride, ...]
+    drift: dict[str, tuple[str, str]]
+    checked_at: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class RelayHardening:
     """What is left to bring a relay to the defaults (see the module docstring)."""
 
     ssh_on_22: bool    # SSH_PORT is 22 and no migration is under way
     filter_off: bool   # RELAY_INPUT_FILTER=off (input-status «off …»)
+    # Foreign sshd overrides the relay's last status names (step 0 checks afresh anyway).
+    overrides: tuple[str, ...] = ()
 
     @property
     def needed(self) -> bool:
-        return self.ssh_on_22 or self.filter_off
+        return bool(self.overrides) or self.ssh_on_22 or self.filter_off
 
     @property
     def agent_version(self) -> int:
-        """The agent «Довести» needs: ``input-filter`` (4), else ``ssh-port-set`` (3)."""
+        """The agent «Довести» needs: ``sshd-override-off`` (5) for an override,
+        ``input-filter`` (4), else ``ssh-port-set`` (3)."""
+        if self.overrides:
+            return AGENT_SSHD_OVERRIDE
         return AGENT_INPUT_FILTER if self.filter_off else AGENT_SSH_PORT
 
 
@@ -390,7 +464,8 @@ def hardening_of_status(status: Mapping[str, Any], ssh_port: int) -> RelayHarden
     else:
         listening = [str(p) for p in ports] if isinstance(ports, list) else []
         ssh_on_22 = ssh_port == HARDEN_FROM_PORT and listening in ([], [str(HARDEN_FROM_PORT)])
-    return RelayHardening(ssh_on_22=ssh_on_22, filter_off=filter_off)
+    overrides = tuple(o.path for o in sshd_overrides_of(status.get("sshd_overrides")))
+    return RelayHardening(ssh_on_22=ssh_on_22, filter_off=filter_off, overrides=overrides)
 
 
 def hardening_of(relay: Relay) -> RelayHardening | None:
@@ -439,7 +514,7 @@ def _slim(payload: Mapping[str, Any]) -> dict[str, object]:
     """What is kept of a status answer (no unbounded fields)."""
     keep = ("agent", "protocol", "target_host", "tcp", "udp", "live_target", "resolved", "ip_forward",
             "units", "ssh_ports", "egress", "checkout", "update", "check", "paired_at", "input_status", "jump",
-            "ssh_migration")
+            "ssh_migration", "sshd_drift", "sshd_overrides", "host_check_at")
     return {k: payload[k] for k in keep if k in payload}
 
 
@@ -1515,15 +1590,20 @@ class RelayService:
         return dict(update) if isinstance(update, Mapping) else {}
 
     async def change_forward(
-        self, actor_user_id: int, relay_id: int, *, target_host: str, tcp: str, udp: str, allow_hub: bool = False
+        self, actor_user_id: int | None, relay_id: int, *, target_host: str, tcp: str, udp: str,
+        allow_hub: bool = False,
     ) -> AgentReply:
         """``apply`` on the relay: forward to another main-server name / other ports.
 
         A hub's forward (its origin and the hub ports) belongs to the fallback mode
         (services/fallback.py) and is refused here unless *allow_hub* — only the
-        fallback service passes it, after its own origin and loop checks.
+        fallback service passes it, after its own origin and loop checks. *actor_user_id*
+        None: the bot itself — only with *allow_hub* (the automatic switch's proxy ports).
         """
-        await self.users.require_superadmin(actor_user_id)
+        if actor_user_id is not None:
+            await self.users.require_superadmin(actor_user_id)
+        elif not allow_hub:
+            raise InvalidOperation("нет инициатора", key="err_insufficient_rights")
         if not allow_hub:
             self._refuse_hub(await self._require(relay_id))
         try:
@@ -1611,6 +1691,10 @@ class RelayService:
                 await on_progress(name, state)
 
         done: list[str] = []
+        # Step 0, always: a foreign sshd override (a fresh host check on the relay); one
+        # found is moved away — the relay takes passwords until it is.
+        if await self._harden_sshd(actor_user_id, relay, step):
+            done.append("sshd")
         if hardening.filter_off:
             await self._harden_filter(actor_user_id, relay, step)
             done.append("filter")
@@ -1666,6 +1750,99 @@ class RelayService:
             self._busy.discard(relay.id)
         await self._audit(actor_user_id, "relay_input_filter_on", relay.id, {"name": relay.name, "ok": True})
         await self._status_after(actor_user_id, relay.id)
+
+    async def _harden_sshd(
+        self, actor_user_id: int, relay: Relay, step: Callable[[str, str], Awaitable[None]]
+    ) -> bool:
+        """Step 0 of «Довести»: ``sshd-check``, then ``sshd-override-off`` for each file
+        it names. True when a file was moved. An agent older than the request skips the
+        step (⏭: its status cannot name an override either)."""
+        await step("sshd_check", "run")
+        if agent_older_than(relay.agent, AGENT_SSHD_OVERRIDE):
+            await step("sshd_check", "skip")
+            return False
+        try:
+            check = await self.sshd_check(actor_user_id, relay.id)
+        except RelayAgentError as exc:
+            if exc.key == "relay_agent_outdated":
+                await step("sshd_check", "skip")
+                return False
+            await step("sshd_check", "fail")
+            raise
+        except ServiceError:
+            await step("sshd_check", "fail")
+            raise
+        for override in check.overrides:
+            try:
+                await self.remove_sshd_override(actor_user_id, relay.id, override.path)
+            except ServiceError:
+                await step("sshd_check", "fail")
+                raise
+        await step("sshd_check", "ok")
+        return bool(check.overrides)
+
+    # ── a foreign sshd override (docs/relay.md «Чужой sshd-override») ─────────
+
+    async def sshd_check(self, actor_user_id: int | None, relay_id: int) -> SshdCheck:
+        """``sshd-check``: a fresh host check on the relay — the foreign sshd overrides it
+        names. *actor_user_id* None: the bot itself (the override monitor)."""
+        if actor_user_id is not None:
+            await self.users.require_superadmin(actor_user_id)
+        relay = await self._require_managed(relay_id)
+        reply = self._require_ok(await self._call(relay, "sshd-check", timeout=300.0), relay)
+        return SshdCheck(
+            overrides=sshd_overrides_of(reply.payload.get("sshd_overrides")),
+            drift=sshd_drift_of(reply.payload.get("sshd_drift")),
+            checked_at=str(reply.payload.get("host_check_at") or "")[:40],
+        )
+
+    async def remove_sshd_override(self, actor_user_id: int, relay_id: int, path: str) -> dict[str, Any]:
+        """``sshd-override-off path=<path>``: the agent moves the file to /root/attic —
+        only one a fresh host check names, only while root keeps an own key — checks
+        and reloads sshd, and puts it back on any failure. The answer's ``sshd_override``."""
+        await self.users.require_superadmin(actor_user_id)
+        if SSHD_DROPIN.fullmatch(path) is None or path.rsplit("/", 1)[-1] in REPO_SSHD_DROPINS:
+            raise InvalidOperation("не чужой файл sshd_config.d", key="relay_sshd_override_bad_path",
+                                   params={"path": path[:120]})
+        relay = await self._require_managed(relay_id)
+        if agent_older_than(relay.agent, AGENT_SSHD_OVERRIDE):
+            raise RelayAgentError("агент relay устарел", key="relay_sshd_override_agent_old",
+                                  params={"name": relay.name, "version": agent_release(relay.agent), "path": path})
+        claimed = await self._claim(relay_id)
+        try:
+            reply = await self._call(claimed, f"sshd-override-off path={path}", timeout=600.0)
+        finally:
+            self._busy.discard(claimed.id)
+        raw = reply.payload.get("sshd_override")
+        result: dict[str, Any] = dict(raw) if isinstance(raw, Mapping) else {}
+        await self._audit(actor_user_id, "relay_sshd_override_off", relay.id,
+                          {"name": relay.name, "path": path, "ok": reply.ok,
+                           **({"moved_to": result.get("moved_to")} if reply.ok else {"error": reply.error[:300]})})
+        if not reply.ok:
+            if result.get("refused") == "no_personal_key":
+                raise RelayAgentError("нет личного ключа", key="relay_sshd_override_no_key", params={"name": relay.name})
+            if unknown_request(reply):
+                raise RelayAgentError("агент relay устарел", key="relay_sshd_override_agent_old",
+                                      params={"name": relay.name, "version": agent_release(relay.agent), "path": path})
+            raise RelayAgentError(f"relay: {reply.error}", key="relay_sshd_override_error",
+                                  params={"path": path, "error": reply.error[:300]})
+        await self._status_after(actor_user_id, relay.id)
+        return result
+
+    async def update_log(self, actor_user_id: int, relay_id: int) -> tuple[str, str] | None:
+        """``update-log``: (the deploy log's path on the relay, its end) — None from an
+        agent older than the request."""
+        await self.users.require_superadmin(actor_user_id)
+        relay = await self._require_managed(relay_id)
+        reply = await self._call(relay, "update-log", timeout=60.0)
+        if unknown_request(reply):
+            return None
+        raw = reply.payload.get("update_log")
+        data: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+        if not reply.ok:
+            raise RelayAgentError(f"relay: {reply.error}", key="relay_update_log_missing",
+                                  params={"error": reply.error[:300]})
+        return str(data.get("log") or "")[:200], str(data.get("text") or "")
 
     async def _filter_off(self, relay: Relay) -> str:
         """The rollback of step 1: «restored», or why the dead-man does it."""

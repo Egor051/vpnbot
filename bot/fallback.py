@@ -14,14 +14,17 @@ from i18n import t
 from models.dto import FailoverName
 from services.fallback import (
     FAILOVER,
+    PROXY_TITLES,
     SWITCH_STEPS,
     Candidate,
     FallbackOverview,
     NameResult,
     Preflight,
     PreflightItem,
+    ProxyRoute,
     SwitchReport,
 )
+from services.proxy_endpoint import ProxyEndpoint, ProxyEndpoints
 from utils.formatting import code, format_msk_datetime, h
 
 
@@ -90,11 +93,41 @@ def fallback_text(overview: FallbackOverview, notice: str | None = None) -> str:
     else:
         lines.append(t("fb_direct_ipv4", count=overview.single_direct_keys))
     lines.append(t("fb_sub_header_on") if overview.sub_fallback_url else t("fb_sub_header_off"))
+    if overview.proxies:
+        lines.append("")
+        lines.extend(proxy_line(kind, endpoint) for kind, endpoint in overview.proxies)
+    if overview.proxy_notice:
+        lines.append(t("fb_proxy_notice_pending", proxies=h(", ".join(PROXY_TITLES[k] for k in overview.proxy_notice))))
     return "\n".join(lines)
 
 
+def proxy_notice_text(kinds: Sequence[str], endpoints: ProxyEndpoints) -> str:
+    """What the users of the moved proxies get: the new address of each (the same for
+    everyone — logins and passwords do not change) and where the ready link is."""
+    lines = [t("fb_proxy_notice_user_title"), ""]
+    lines += [t("fb_proxy_notice_user_line", proxy=h(PROXY_TITLES.get(kind, kind)),
+                address=code(endpoints.endpoint(kind).address)) for kind in kinds]
+    lines += ["", t("fb_proxy_notice_user_tail")]
+    return "\n".join(lines)
+
+
+def proxy_line(kind: str, endpoint: ProxyEndpoint) -> str:
+    """Where users reach a proxy now: through the hub (the mode) or main."""
+    key = "fb_proxy_via_hub" if endpoint.via_hub else "fb_proxy_direct"
+    return t(key, proxy=h(PROXY_TITLES.get(kind, kind)), address=code(endpoint.address))
+
+
+def _route_line(route: ProxyRoute, target: str) -> str:
+    params = {"proxy": h(PROXY_TITLES.get(route.kind, route.kind)), "port": route.port}
+    if route.error == "ssh":
+        return t("fb_route_ssh", **params)
+    if not route.ok:
+        return t("fb_route_failed", error=h((route.error or "")[:200]), **params)
+    return t("fb_route_on" if target == FAILOVER else "fb_route_off", **params)
+
+
 def preflight_item_text(item: PreflightItem) -> str:
-    icon = "✅" if item.ok else ("⚠️" if item.warning else "❌")
+    icon = "ℹ️" if item.info else ("✅" if item.ok else ("⚠️" if item.warning else "❌"))
     params = {key: h(str(value)) for key, value in item.params.items()}
     return f"{icon} {t(item.key, **params)}"
 
@@ -130,6 +163,9 @@ def report_text(report: SwitchReport) -> str:
     lines.extend(_result_line(result) for result in report.results)
     if any(result.ok and not result.propagated for result in report.results):
         lines.extend(["", t("fb_report_not_yet_hint")])
+    if report.proxies:
+        lines.append("")
+        lines.extend(_route_line(route, report.target) for route in report.proxies)
     return "\n".join(lines)
 
 
@@ -180,9 +216,10 @@ def setup_step_title(step: int) -> str:
     return t("fb_setup_step", step=step, total=5)
 
 
-def switch_step_titles() -> list[tuple[str, str]]:
-    """The switch's steps for bot/progress.py (services.fallback.SWITCH_STEPS)."""
-    return [(key, t(f"fb_step_{key}")) for key in SWITCH_STEPS]
+def switch_step_titles(*, proxies: bool = False) -> list[tuple[str, str]]:
+    """The switch's steps for bot/progress.py (services.fallback.SWITCH_STEPS); the
+    proxies' step only when a proxying module is on."""
+    return [(key, t(f"fb_step_{key}")) for key in SWITCH_STEPS if proxies or key != "proxy"]
 
 
 def failure_keys(report: SwitchReport) -> list[str]:

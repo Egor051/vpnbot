@@ -1304,6 +1304,88 @@ async def test_a_failure_nobody_can_place_marks_no_step(prod: Env) -> None:
     assert t("deploy_fail_step_unknown") in text
 
 
+async def test_one_message_one_confirmation_and_only_the_log_while_it_runs(prod: Env, fake_timer: Any) -> None:
+    """«Обновить агент» with TOTP: THIS message becomes the plan with the code prompt (no
+    second message, no «▶️ Продолжить»); the code starts the update right there; while
+    it runs the only button is «📄 Лог»; a second press says «уже идёт, запуск #N» and
+    edits nothing; the result ends with «⬅️ Назад»."""
+    import asyncio
+
+    from bot.totp_gate import Resume, resumer_for
+
+    await _agent_v(prod, "3")
+    totp = FakeTotp(enabled=True)
+    state = fsm()
+    plan = Callback("admin:relay:1:ag:up")
+    await ui.relay_agent_update(plan, state, _services(prod, totp))  # type: ignore[arg-type]
+    assert await state.get_state() == TotpStates.gate_code.state
+    assert plan.message.answers == [], "no second message: the code is asked in this one"
+    assert plan.message.edits[-1].count("⚪") == 8 and t("relay_update_confirm_code") in plan.message.edits[-1]
+    data = await state.get_data()
+    assert data["totp_resume"] == "admin:relay:1:ag:up:ok" and data["totp_in_place"] is True
+    resume_fn = resumer_for(data["totp_resume"])
+    assert resume_fn is ui.relay_agent_update_resume
+
+    relay = _UpdateOnRelay(prod)
+    msg = plan.message
+    task = asyncio.create_task(resume_fn(Resume(  # the correct code: the update starts on the plan
+        message=msg, user=SimpleNamespace(id=ADMIN), state=fsm(), services=_services(prod, totp),  # type: ignore[arg-type]
+        bot=None, data=data["totp_resume"],  # type: ignore[arg-type]
+    )))
+    await relay.started.wait()
+    await fake_timer.parked(2)
+    assert all(_buttons(m) == ["admin:relay:1:ag:log"] for m in msg.markups[-1:]), "only «📄 Лог» while it runs"
+    again = Callback("admin:relay:1:ag:up")
+    await ui.relay_agent_update(again, fsm(), _services(prod, totp))  # type: ignore[arg-type]
+    number = ui.UPDATE_RUNS.running(1)
+    assert number is not None and again.alerts[-1] == (t("relay_update_already_running", id=number), True)
+    assert again.message.edits == [] and again.message.answers == []
+    run_again = Callback("admin:relay:1:ag:up:ok")
+    await ui.relay_agent_update_run(run_again, fsm(), _services(prod))  # type: ignore[arg-type]
+    assert run_again.message.edits == [] and [c["request"] for c in prod.client.calls].count("update") == 0
+    relay.finish.set()
+    await task
+    assert "updated to v9.1.0" in msg.edits[-1]
+    assert _buttons(msg.markups[-1]) == ["admin:relay:1:ag:log", "admin:relay:1"], "the result: «📄 Лог», «Назад»"
+    assert ui.UPDATE_RUNS.running(1) is None
+
+
+async def test_he2s_override_shows_the_findings_and_the_way_out(prod: Env) -> None:
+    """he2 on agent v3.2.0: the update stops in Phase 1 on the foreign sshd override; the
+    result names the findings (key, file:line, what beat what) and the step, and — the
+    agent being too old to remove it — the one-time fix by hand."""
+    await _agent_v(prod, "2", describe="v3.2.0")
+    over = "/etc/ssh/sshd_config.d/00-password-login.conf"
+    keyonly = "/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf"
+    prod.client.replies["update"] = AgentReply(4, {"ok": False, "error": (
+        "the deploy of v3.2.3 stopped before any change (exit 1): host invariants: 2 fatal finding(s) — nothing was "
+        f"changed. Fatal: BEATEN sshd passwordauthentication: {over}:1 = yes wins over the repo value no of {keyonly} "
+        f"(the first value wins); BEATEN sshd permitrootlogin: {over}:2 = yes wins over the repo value "
+        f"prohibit-password of {keyonly} (the first value wins)")})
+    cb = Callback("admin:relay:1:ag:up:ok")
+    await ui.relay_agent_update_run(cb, fsm(), _services(prod))  # type: ignore[arg-type]
+    text = cb.message.edits[-1]
+    assert "❌ " + t("deploy_step_checks") in text and t("deploy_fail_step_unknown") not in text
+    assert "passwordauthentication" in text and "permitrootlogin" in text and "00-password-login.conf</code>:1" in text
+    assert "mv /etc/ssh/sshd_config.d/00-password-login.conf /root/attic/" in text, "the fix by hand"
+    assert not any(b.startswith("rsov:") for b in _buttons(cb.message.markups[-1])), "agent 2 cannot do it"
+
+
+async def test_a_new_agents_override_gets_the_button(prod: Env) -> None:
+    await _agent_v(prod, "5")
+    over = "/etc/ssh/sshd_config.d/00-password-login.conf"
+    prod.client.replies["update"] = AgentReply(4, {"ok": False, "error": "the deploy of v3.2.3 stopped", "update": {
+        "state": "failed", "reason": "checks", "step": "checks",
+        "findings": [{"verdict": "BEATEN", "family": "sshd", "key": "passwordauthentication", "path": over,
+                      "text": f"{over}:1 = yes wins over the repo value no of /etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf"}],
+    }})
+    cb = Callback("admin:relay:1:ag:up:ok")
+    await ui.relay_agent_update_run(cb, fsm(), _services(prod))  # type: ignore[arg-type]
+    buttons = _buttons(cb.message.markups[-1])
+    assert buttons[0].startswith("rsov:go:1:") and buttons[-1] == "admin:relay:1"
+    assert t("relay_sshd_override_hint") in cb.message.edits[-1]
+
+
 # ── «🔑 SSH-порт relay» and the buttons of a relay's migration (B) ─────────────
 
 PHASE1 = {"ssh_port": "54321", "current": "22,54321", "state": "phase1", "action": "wait", "from": "22",

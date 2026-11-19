@@ -18,6 +18,25 @@
   см. [WARP → WARP proxy egress](warp.ru.md#warp-proxy-egress-маскировка-исходящего-ip-прокси) и
   `deploy/danted-warp.conf` перед изменением.
 
+## Через hub в режиме фолбэка
+
+В [режиме фолбэка](relay.ru.md#режим-фолбэка-hub) IP main забанен на границе, и прокси, выданный как
+`SOCKS5_HOST:SOCKS5_PORT`, у пользователей из РФ мёртв. Поэтому, пока режим включён:
+
+- **Адрес.** Раздел «Прокси» и всё, что бот выдаёт для SOCKS5 и MTProto (`Host`/`Port`, `socks5://`,
+  `https://t.me/socks?…`, `https://t.me/proxy?…`, статистика), рендерится с **IPv4 hub**, порт прежний.
+  Выключили режим — снова `SOCKS5_HOST` / `MTPROTO_HOST`. Один источник —
+  `ProxyEndpoints.endpoint()` в services/proxy_endpoint.py. Логины, пароли и секреты те же.
+- **Проброс.** «Включить» добавляет `SOCKS5_PORT/tcp` (и `MTPROTO_PORT`, если модуль включён) на hub
+  тем же `apply` агента, что 443/2096; «Выключить» и выключение модуля его снимают. Подробно —
+  [relay.ru.md → Прокси через hub](relay.ru.md#прокси-через-hub).
+- **Только TCP CONNECT.** UDP ASSOCIATE через hub не работает (danted отдаёт для UDP свой адрес);
+  Telegram хватает TCP.
+- **danted** видит все такие подключения с IP hub: `client pass` / `socks pass` должны пускать его
+  (в шаблоне `from: 0.0.0.0/0`); свой fail2ban на danted — hub в `ignoreip`.
+- **Сохранённые ссылки** сами не переедут: после переключения — по желанию — «📣 Разослать
+  пользователям с прокси новую ссылку» на экране режима.
+
 ## MTProto static mode
 
 - Установите `MTPROTO_MODE=static` и задайте `MTPROTO_SECRET`.

@@ -21,6 +21,7 @@ from bot.totp_gate import require_totp
 from bot.uninstall_texts import uninstall_plan_text, uninstall_report_text
 from i18n import t
 from repositories.protocol_modules import PROTOCOL_DISPLAY, PROTOCOL_NAMES, ProtocolModule
+from services.proxy_endpoint import PROXY_KINDS
 from services.errors import ServiceError
 from services.protocol_uninstall import PlanChangedError, ProtocolUninstallService, UninstallPlan
 from utils.formatting import h
@@ -159,6 +160,7 @@ async def admin_module_disable_exec(callback: CallbackQuery, services: Services,
         text = t("module_disabled_ok", label=label, deleted=deleted)
         if failed > 0:
             text += "\n\n" + t("module_disabled_partial", failed=failed)
+        text += await _hub_follows(services, name, callback.from_user.id)
         await safe_edit_message_text(
             callback.message,
             text,
@@ -166,6 +168,23 @@ async def admin_module_disable_exec(callback: CallbackQuery, services: Services,
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
+
+
+async def _hub_follows(services: Services, name: str, actor: int) -> str:
+    """A proxying module switched on/off while the fallback mode is on: the hub's
+    forward follows it (services/fallback.py «THE PROXIES»). Best effort — what it did."""
+    fallback = getattr(services, "fallback", None)
+    if name not in PROXY_KINDS or fallback is None:
+        return ""
+    try:
+        routes = await fallback.sync_proxies(actor)
+    except Exception as exc:  # the module switch itself is done; the hub is a follow-up
+        logger.warning("Fallback: the hub did not follow %s: %s: %s", name, type(exc).__name__, exc)
+        return "\n" + t("module_hub_failed", error=h(str(exc)[:200]))
+    failed = [route for route in routes if not route.ok]
+    if failed:
+        return "\n" + t("module_hub_failed", error=h((failed[0].error or "")[:200]))
+    return "\n" + t("module_hub_followed") if fallback.mode_on else ""
 
 
 @router.callback_query(F.data.regexp(r"^admin:module:enable:[a-z0-9]+$"))
@@ -221,6 +240,7 @@ async def admin_module_enable_exec(callback: CallbackQuery, services: Services) 
         if firewall is not None:
             key = "module_firewall_ok" if firewall.ok else "module_firewall_failed"
             text += "\n" + t(key, summary=h(firewall.summary))
+        text += await _hub_follows(services, name, callback.from_user.id)
         await safe_edit_message_text(
             callback.message,
             text,

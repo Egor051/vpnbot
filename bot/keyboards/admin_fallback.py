@@ -41,6 +41,9 @@ def fallback_keyboard(overview: FallbackOverview, configured: bool = True) -> In
         rows.append(_row(t("btn_fb_on"), "admin:fb:on"))
     if overview.state == "partial":
         rows.append(_row(t("btn_fb_repeat"), "admin:fb:retry"))
+    if overview.proxy_notice:
+        # A switch moved a proxy: telling its users is offered, never done by itself.
+        rows.append(_row(t("btn_fb_proxy_notice"), "admin:fb:pxn"))
     rows.append(_row(t("btn_fb_preflight"), "admin:fb:pf"))
     rows.append(_row(t("btn_fb_settings"), "admin:fb:set"))
     rows.append(_row(t("btn_relays_back"), "admin:relays"))
@@ -151,6 +154,15 @@ def confirm_keyboard(action: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         _row(t("btn_fb_confirm_on") if action == "on" else t("btn_fb_confirm_off"), f"admin:fb:{action}:ok"),
         _row(t("btn_cancel"), "admin:fb"),
+    ])
+
+
+def proxy_notice_keyboard() -> InlineKeyboardMarkup:
+    """«📣 Разослать» → the TOTP gate and the broadcast; the skip button forgets it."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        _row(t("btn_fb_proxy_notice_send"), "admin:fb:pxn:ok"),
+        _row(t("btn_fb_proxy_notice_skip"), "admin:fb:pxn:no"),
+        _row(t("btn_fb_back"), "admin:fb"),
     ])
 
 
