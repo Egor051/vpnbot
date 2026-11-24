@@ -373,3 +373,18 @@ def test_verify_fails_when_nginx_includes_a_config_it_cannot_read(host: WizardCe
     assert host.outcome(20) == "rolled_back"
     result = [e for e in host.events(20) if e["event"] == "result"][-1]
     assert "nginx: cannot tell what it reads" in result["text"]
+
+
+def test_a_domain_starting_to_write_after_the_plan_stops_the_apply(host: WizardCertHost) -> None:
+    """The plan showed (and the backup holds) the domains to release: one that starts to
+    copy into the registry afterwards would be changed without a backup — apply refuses."""
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64("/usr/local/sbin/acme-reload.sh")})
+    host.lay_out(chain, key)
+    assert host.wizard(21, "plan", action="adopt").returncode == 0
+    other = f"old.{DOMAIN}"
+    host.acme_domain(other, conf={"Le_ReloadCmd": b64("systemctl reload nginx")})
+    assert host.wizard(21, "execute", action="adopt").returncode == 1
+    assert host.outcome(21) != "succeeded"
+    assert host.conf(other)["Le_RealKeyPath"] == "/etc/vpn-bot/tls/privkey.pem", "untouched"
+    assert host.conf()["Le_ReloadCmd"] == b64("/usr/local/sbin/acme-reload.sh")
+    assert not [c for c in host.calls_of("vpn-bot-cert") if c.startswith("vpn-bot-cert adopt --domain")]

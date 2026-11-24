@@ -80,6 +80,9 @@ VERBS
   deploy / issue / renew / adopt --expect-pair SHA
       The run was planned on acme.sh's pair SHA (16 hex of status' pair_sha): refused
       (exit 3, nothing changed) when acme.sh holds another one by the time it starts.
+  issue / adopt --expect-release DIR[,DIR...]
+      The domain directories the plan releases ("" = none): refused the same way when
+      the set differs by the time the run starts (the wizard backed up exactly those).
   act [--json]
       Every installed reader's check and action on the files it has now — nothing is
       written. The wizard's rollback runs it after it restored a backup, so every reader
@@ -1761,7 +1764,8 @@ def _names(raw: str) -> list[str]:
     return names
 
 
-def issue(ctx: Ctx, raw_names: str, zone: str, *, expect: str | None = None) -> dict[str, Any]:
+def issue(ctx: Ctx, raw_names: str, zone: str, *, expect: str | None = None,
+          expect_released: Sequence[str] | None = None) -> dict[str, Any]:
     names = _names(raw_names)
     zone = zone.strip().lower().rstrip(".")
     if not _ZONE_RE.match(zone):
@@ -1804,6 +1808,7 @@ def issue(ctx: Ctx, raw_names: str, zone: str, *, expect: str | None = None) -> 
         with cron_held_off(ctx, current, log):
             wait_for_acme(ctx, log)
             expect_pair(ctx, current, expect)
+            expect_release(ctx, to_release(load_domains(ctx), current), expect_released)
             rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT,
                           env={"CF_Token": token, "CF_Zone_ID": zid, NESTED_ENV: lock.token()})
             log.append(f"acme.sh --issue -d {' -d '.join([main, *alts])} --keylength {keylength}: exit {rc}")
@@ -1952,9 +1957,21 @@ def release_changes(d: AcmeDomain) -> dict[str, str]:
     return changes
 
 
-def to_release(domains: Sequence[AcmeDomain], keep: AcmeDomain) -> list[AcmeDomain]:
+def to_release(domains: Sequence[AcmeDomain], keep: AcmeDomain | None) -> list[AcmeDomain]:
     """Every domain but *keep* that still reaches the bot's readers."""
-    return [d for d in domains if d.dir != keep.dir and release_changes(d)]
+    return [d for d in domains if (keep is None or d.dir != keep.dir) and release_changes(d)]
+
+
+def expect_release(ctx: Ctx, released: Sequence[AcmeDomain], expected: Sequence[str] | None) -> None:
+    """The plan listed the domains it releases (and the wizard backed up exactly those):
+    a domain that started — or stopped — reaching the readers since means the plan no
+    longer describes the run."""
+    if expected is None:
+        return
+    got = sorted(ctx.unroot(d.dir) for d in released)
+    if got != sorted(expected):
+        raise Refused("the acme.sh domains to release changed since the plan "
+                      f"({', '.join(sorted(expected)) or 'none'} → {', '.join(got) or 'none'}) — plan again")
 
 
 def release_entry(ctx: Ctx, d: AcmeDomain) -> dict[str, Any]:
@@ -1989,7 +2006,8 @@ def expect_pair(ctx: Ctx, domain: AcmeDomain | None, expected: str | None) -> No
                       "plan again")
 
 
-def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool, expect: str | None = None) -> dict[str, Any]:
+def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool, expect: str | None = None,
+          expect_released: Sequence[str] | None = None) -> dict[str, Any]:
     domain, released, plan = adoption_plan(ctx, explicit)
     if dry_run:
         return plan
@@ -2000,6 +2018,9 @@ def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool, expect: str | None =
         with cron_held_off(ctx, domain, log):
             wait_for_acme(ctx, log)
             expect_pair(ctx, domain, expect)
+            # Again under the lock: what is released is what the plan showed (and was backed up).
+            released = to_release(load_domains(ctx), domain)
+            expect_release(ctx, released, expect_released)
             # Released first: a renewal of another domain waiting on the lock then finds it is
             # no longer the bot's (deploy skips a domain that does not name it).
             for other in released:
@@ -2075,6 +2096,13 @@ def host_mount_namespace_argv(argv: list[str]) -> list[str] | None:
     return ["nsenter", "--mount=/proc/1/ns/mnt", "--", sys.executable, "-I", str(Path(__file__).resolve()), *argv]
 
 
+def _dirs_arg(value: str) -> list[str]:
+    dirs = [d for d in value.split(",") if d]
+    if not all(re.fullmatch(r"/[A-Za-z0-9._*/-]{1,512}", d) and ".." not in d for d in dirs):
+        raise argparse.ArgumentTypeError("absolute acme.sh domain directories, comma-separated")
+    return dirs
+
+
 def _pair_arg(value: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{16}", value):
         raise argparse.ArgumentTypeError("16 lowercase hex characters (status' pair_sha)")
@@ -2100,6 +2128,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--names", required=True)
     p.add_argument("--zone", required=True)
     p.add_argument("--expect-pair", type=_pair_arg)
+    p.add_argument("--expect-release", type=_dirs_arg)
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("renew", allow_abbrev=False)
     p.add_argument("--force", action="store_true", required=True)
@@ -2112,6 +2141,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--domain")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--expect-pair", type=_pair_arg)
+    # --expect-release DIR[,DIR...] ("" = none): the acme.sh domain directories the plan
+    # releases — refused when the set differs by the time the run starts.
+    p.add_argument("--expect-release", type=_dirs_arg)
     p.add_argument("--json", action="store_true")
     return parser.parse_args(list(argv))
 
@@ -2174,7 +2206,7 @@ def main(argv: list[str]) -> int:
                 finally:
                     lock.release()
         elif args.verb == "issue":
-            report = issue(ctx, args.names, args.zone, expect=args.expect_pair)
+            report = issue(ctx, args.names, args.zone, expect=args.expect_pair, expect_released=args.expect_release)
         elif args.verb == "renew":
             report = renew(ctx, args.zone, expect=args.expect_pair)
         elif args.verb == "act":
@@ -2187,7 +2219,8 @@ def main(argv: list[str]) -> int:
             emit(args, report, "\n".join(f"{a['consumer']}: {a['text']}" for a in report["actions"]))
             return EXIT_OK if report["ok"] else EXIT_CONSUMER
         else:
-            report = adopt(ctx, args.domain, dry_run=args.dry_run, expect=args.expect_pair)
+            report = adopt(ctx, args.domain, dry_run=args.dry_run, expect=args.expect_pair,
+                           expect_released=args.expect_release)
         emit(args, report, human_deploy(report))
         return EXIT_OK if report.get("ok", True) else EXIT_CONSUMER
     except Refused as exc:

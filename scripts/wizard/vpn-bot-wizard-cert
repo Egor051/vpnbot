@@ -154,6 +154,17 @@ def writers(st: dict[str, Any], keep: dict[str, Any] | None) -> list[dict[str, A
             and set((d.get("real_paths") or {}).values()) & set(REGISTRY_FILES)]
 
 
+def to_release(st: dict[str, Any], keep: dict[str, Any] | None) -> list[str]:
+    """vpn-bot-cert's to_release, read from status: the directories of every domain but
+    *keep* that still reaches the readers (a reloadcmd naming it, a Le_Real* path into
+    the registry) — the ones adopt / issue release."""
+    keep_dir = keep.get("dir") if keep else None
+    return sorted(str(d["dir"]) for d in st.get("domains", [])
+                  if d.get("dir") != keep_dir
+                  and (d.get("reloadcmd_kind") == "ours"
+                       or set((d.get("real_paths") or {}).values()) & set(REGISTRY_FILES)))
+
+
 def readers(st: dict[str, Any]) -> list[dict[str, Any]]:
     return [c for c in st.get("consumers", []) if c.get("installed")]
 
@@ -229,11 +240,14 @@ def plan_issue(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]
         # Its own install-cert would copy over the new pair after its renewals.
         paths = ", ".join(sorted(set(d["real_paths"].values()) & set(REGISTRY_FILES)))
         lines.append(f"Released: {d['dir']} copies to {paths} itself — those Le_Real* paths are emptied")
+    for other in [d for d in st.get("domains", []) if d.get("reloadcmd_kind") == "ours" and d not in hand
+                  and (current is None or d.get("dir") != current.get("dir"))]:
+        lines.append(f"Released: {other['dir']} names vpn-bot-cert deploy — its reloadcmd is emptied")
     lines.append("Readers:")
     lines += readers_text(st, "issue")
     lines.append("Note: Let's Encrypt allows 5 certificates for the same names per week.")
     return lines, {"domain": main, "new_domain": current is None, "names": names,
-                   "release_dirs": [str(d["dir"]) for d in hand]}
+                   "release_dirs": to_release(st, current)}
 
 
 def plan_renew(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
@@ -375,6 +389,16 @@ def step_apply(ctx: Any) -> int:
         print(f"acme.sh's certificate changed since the plan ({expected} → {now.get('pair_sha') or 'unreadable'}) — "
               "start again", file=sys.stderr)
         return 1
+    planned_release = sorted(str(d) for d in plan.get("release_dirs") or [])
+    if action in ("adopt", "issue"):
+        # The domains apply would release are the ones the plan showed — and the backup holds.
+        # Kept: the very directory the plan acts on (an rsa and an ecc one share the name).
+        keep = next((d for d in st.get("domains", []) if d.get("dir") == plan.get("acme_dir")), now)
+        fresh = to_release(st, None if plan.get("new_domain") else keep)
+        if fresh != planned_release:
+            print("the acme.sh domains to release changed since the plan "
+                  f"({', '.join(planned_release) or 'none'} → {', '.join(fresh) or 'none'}) — start again", file=sys.stderr)
+            return 1
     # Every reader's files, also those of a reader not installed now (nothing to lose).
     paths = sorted(set(touched_paths(st, plan)) | set(REGISTRY_FILES))
     lib.backup_paths(ctx.run_id, paths, log=ctx.log)
@@ -390,6 +414,8 @@ def step_apply(ctx: Any) -> int:
     if expected:
         # Checked again by the helper under its lock, on the pair it lays out.
         args += ["--expect-pair", str(expected)]
+    if action in ("adopt", "issue"):
+        args += ["--expect-release", ",".join(planned_release)]
     rc, report, rest = call(ctx, *args, timeout=HELPER_TIMEOUT)
     summary = summarize(action, report) if "groups" in report else failure(report, rest, rc)
     ctx.event("result", text=summary, verdict="ok" if rc == 0 else "failed")

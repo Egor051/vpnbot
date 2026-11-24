@@ -955,3 +955,28 @@ def test_stock_module_snippets_out_of_etc_nginx_do_not_make_it_unverifiable(host
     _, st = host.json("status")
     nginx = next(c for c in st["consumers"] if c["name"] == "nginx")
     assert nginx["reads_ok"] is True and nginx["reads_registry"] is True and nginx["reads_unverifiable"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Eighth review round
+# --------------------------------------------------------------------------- #
+def test_a_release_set_other_than_the_planned_one_is_refused(host: CertHost) -> None:
+    """--expect-release: a domain that started reaching the readers after the plan (and so
+    is not in the wizard's backup) refuses adopt / issue before anything changes."""
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64("/usr/local/sbin/acme-reload.sh")})
+    host.lay_out(chain, key)
+    _writer(host)
+    writer_dir = f"/root/.acme.sh/{WRITER}_ecc"
+    proc = host.cert("adopt", "--domain", DOMAIN, "--expect-release", "")
+    assert proc.returncode == 3 and "changed since the plan" in proc.stderr, proc.stderr
+    assert host.conf(WRITER)["Le_RealKeyPath"] == TLS_KEY and host.conf()["Le_ReloadCmd"] == b64("/usr/local/sbin/acme-reload.sh")
+    assert host.cert("adopt", "--domain", DOMAIN, "--expect-release", writer_dir).returncode == 0
+    assert host.conf(WRITER)["Le_RealKeyPath"] == ""
+    _writer(host)  # by hand again, after the adoption
+    host.token()
+    host.next_pair([DOMAIN])
+    before = host.acme_log()
+    proc = host.cert("issue", "--names", DOMAIN, "--zone", ZONE, "--expect-release", "")
+    assert proc.returncode == 3 and "changed since the plan" in proc.stderr
+    assert host.acme_log() == before, "acme.sh never ran"
+    assert host.cert("adopt", "--expect-release", "../etc").returncode == 2

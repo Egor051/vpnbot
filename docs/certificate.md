@@ -58,7 +58,9 @@ fails rather than guess what such a reader serves (the same for hysteria with an
 pair the run was planned on. When acme.sh holds another one by the time the run starts (cron renewed
 between the plan and the confirmation) the run is refused, nothing changed — the plan no longer
 describes it. `deploy` compares the very pair it lays out; the others check after the wait for a
-running acme.sh, under the lock, before acme.sh or the conf is touched.
+running acme.sh, under the lock, before acme.sh or the conf is touched. `issue` and `adopt` also take
+`--expect-release DIR[,DIR…]` (`""` = none): the domain directories the plan releases — refused the
+same way when that set differs (the wizard backed up exactly those).
 
 Exit codes: 0 ok; 1 a reader failed and its group was rolled back; 2 usage; 3 refused (nothing to
 adopt, no token, a bad pair, another domain, a pair other than the planned one); 5 cannot (a tool or
@@ -170,8 +172,9 @@ Buttons:
 
 Each run is the wizard's contract ([wizard.md](wizard.md)): the plan with the diff (the acme.sh conf
 lines before → after, the certificate before → after, each reader and what happens to it), TOTP,
-«✅ Применить», then apply (refused when acme.sh's pair is no longer the one the plan was made on —
-the helper gets it as `--expect-pair` too; a backup of the acme.sh domain directory — and of every
+«✅ Применить», then apply (refused when acme.sh's pair is no longer the one the plan was made on, or
+another domain started or stopped reaching the readers since — the helper gets both as
+`--expect-pair` / `--expect-release` too; a backup of the acme.sh domain directory — and of every
 domain the run releases —, every reader's files and the state, then the helper) → verify (`vpn-bot-cert status`: the domain is the bot's, reloadcmd ours,
 no file targets, the pair valid for 7+ days and covering the names, every installed reader holds the
 pair, took it and is configured to read the registry's files — not a pair of its own; hysteria
