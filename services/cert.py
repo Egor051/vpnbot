@@ -229,7 +229,7 @@ class CertService:
         elif action == "adopt" and names:
             # One of several domains that could be the bot's: the screen names it.
             domain = names[0].lower()
-            if not valid_dns_name(domain):
+            if not valid_dns_name(domain.removeprefix("*.")):
                 raise InvalidOperation("не DNS-имя", key="cert_err_bad_name", params={"value": domain[:80]})
             params["names"] = domain
         run = await self.wizard.start(actor_user_id, "cert", params, chat_id=chat_id, message_id=message_id)

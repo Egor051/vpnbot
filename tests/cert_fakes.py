@@ -139,6 +139,10 @@ if "--renew" in argv:
         fh.write(json.dumps({"renew_with_conf_token_fp": hashlib.sha256(t.encode()).hexdigest()[:8] if t else None,
                              "renew_zone": conf.get("CF_Zone_ID")}) + "\n")
     log_next(d, ecc, "renew")
+    if (sd / "swap-token").exists():
+        # The superadmin replaces the bot's token while acme.sh renews.
+        token_file = Path(str(home)[: -len("/root/.acme.sh")]) / "etc/vpn-bot/dns_failover/cloudflare_token"
+        token_file.write_text((sd / "swap-token").read_text())
     take_next(d, ecc)
     renewed(d, ecc)
     sys.exit(0 if reload(d, ecc, decode(conf.get("Le_ReloadCmd", ""))) == 0 else 1)
@@ -153,6 +157,8 @@ case "$verb" in
   cat) grep -qx -- "$unit" "$SD/units" 2>/dev/null; exit $? ;;
   is-active) [[ -f "$SD/active/$unit" ]]; exit $? ;;
   restart|reload|try-restart)
+    # What acme.sh's cron would see at this moment (the domain's next renewal time).
+    grep -h "^Le_NextRenewTime=" "$SD"/../root/root/.acme.sh/*/*.conf >> "$SD/next-during-action" 2>/dev/null
     [[ -f "$SD/fail-$verb-$unit" ]] && { echo "Job for $unit failed"; exit 1; }
     [[ -f "$SD/fail-once-$verb-$unit" ]] && { rm -f "$SD/fail-once-$verb-$unit"; echo "Job for $unit failed"; exit 1; }
     if [[ -f "$SD/dies-$unit" ]]; then rm -f "$SD/active/$unit"; exit 0; fi

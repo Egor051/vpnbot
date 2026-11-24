@@ -1662,7 +1662,9 @@ def issue(ctx: Ctx, raw_names: str, zone: str) -> dict[str, Any]:
             if domain is None:
                 raise Cannot(f"acme.sh issued {main} but its directory is not there")
             domain = install_cert(ctx, domain, lock, log)
-        report = deploy(ctx, domain)
+            # A token replaced while acme.sh issued: cron renews with the one in the file now.
+            sync_token(ctx, domain, zone, log, unless=token)
+            report = deploy(ctx, domain)
     finally:
         lock.release()
     report["log"] = log
@@ -1679,36 +1681,47 @@ def renew(ctx: Ctx, zone: str | None) -> dict[str, Any]:
     lock.acquire(LOCK_WAIT)
     try:
         domain = bot_domain(ctx, load_domains(ctx))
-        try:
-            token = read_bot_token(ctx)
-        except Refused as exc:
-            token = None
-            log.append(f"renewing with acme.sh's own saved credential: {exc}")
-        updates: dict[str, str] = {}
-        if token is not None:
-            updates["CF_Token"] = token
-            if zone:
-                if not all(n.removeprefix("*.") == zone or n.endswith("." + zone) for n in domain.names):
-                    raise Refused(f"{domain.name}: not in the zone {zone}")
-                updates["CF_Zone_ID"] = zone_id(ctx, token, zone)
+        if zone and not all(n.removeprefix("*.") == zone or n.endswith("." + zone) for n in domain.names):
+            raise Refused(f"{domain.name}: not in the zone {zone}")
         args = ["--renew", "-d", domain.name, "--force"]
         if domain.ecc:
             args.append("--ecc")
         with cron_held_off(ctx, domain, log):
             wait_for_acme(ctx, log)
-            if updates and token is not None:
-                conf_set(ctx, domain.conf_path, updates)
-                log.append(f"{domain.name}: acme.sh renews with the bot's token ({fingerprint(token)}) from now on")
+            # The token as it is NOW (after the wait), not as it was when the helper started.
+            used = sync_token(ctx, domain, zone, log)
+            if used is None:
+                log.append("renewing with acme.sh's own saved credential (the bot has no readable token)")
             rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT, env={NESTED_ENV: lock.token()})
             log.append(f"acme.sh --renew -d {domain.name} --force: exit {rc}")
             if rc != 0:
                 raise Cannot(f"acme.sh --renew failed (exit {rc}): {out.strip()[-600:]}")
-        fresh = next((d for d in load_domains(ctx) if d.dir == domain.dir), domain)
-        report = deploy(ctx, fresh)
+            sync_token(ctx, domain, zone, log, unless=used)
+            fresh = next((d for d in load_domains(ctx) if d.dir == domain.dir), domain)
+            report = deploy(ctx, fresh)
     finally:
         lock.release()
     report["log"] = log
     return report
+
+
+def sync_token(ctx: Ctx, domain: AcmeDomain, zone: str | None, log: list[str], *, unless: str | None = None) -> str | None:
+    """The bot's token (and the zone's id) into the domain's acme.sh conf — the credential
+    cron renews it with. Read at the moment it is written: the superadmin may replace the
+    token while acme.sh runs, and acme.sh itself saves the one it was given. *unless*: the
+    token already written — nothing to do while the file still holds it."""
+    try:
+        token = read_bot_token(ctx)
+    except Refused:
+        return None
+    if unless is not None and token == unless:
+        return token
+    updates = {"CF_Token": token}
+    if zone:
+        updates["CF_Zone_ID"] = zone_id(ctx, token, zone)
+    conf_set(ctx, domain.conf_path, updates)
+    log.append(f"{domain.name}: acme.sh renews with the bot's token ({fingerprint(token)}) from now on")
+    return token
 
 
 def adoption_plan(ctx: Ctx, explicit: str | None) -> tuple[AcmeDomain, dict[str, Any]]:
@@ -1751,7 +1764,8 @@ def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool) -> dict[str, Any]:
         with cron_held_off(ctx, domain, log):
             wait_for_acme(ctx, log)
             fresh = install_cert(ctx, domain, lock, log)
-        report = deploy(ctx, fresh)
+            # Still held: a due domain must not be renewed by cron under deploy's feet.
+            report = deploy(ctx, fresh)
     finally:
         lock.release()
     report["log"] = log

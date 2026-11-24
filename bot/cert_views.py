@@ -11,8 +11,9 @@ from utils.formatting import code, h
 
 LEVEL_ICONS = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
 _MAX_PROBLEMS = 12
-# Candidates to adopt offered one button each (cert:adopt:<index into status.candidates>).
-MAX_PICK = 8
+# Candidates to adopt offered one button each (cert:adopt:<index into status.candidates>):
+# every one of them — Telegram allows 100 buttons, an acme.sh home never holds that many.
+MAX_PICK = 64
 
 
 def _row(text: str, data: str) -> list[InlineKeyboardButton]:

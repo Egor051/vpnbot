@@ -239,3 +239,25 @@ async def test_several_candidates_get_one_adopt_button_each(world: World, monkey
     stale = FakeCallback("cert:adopt:7")
     await admin_cert.cert_adopt_pick(stale, _fsm(), world.services)  # type: ignore[arg-type]
     assert len(seen) == 1 and stale.alerts[-1][1] is True
+
+
+async def test_every_candidate_gets_a_button_and_a_wildcard_one_can_be_adopted(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = report()
+    names = [f"n{i}.{ZONE}" for i in range(9)] + [f"*.{ZONE}"]
+    data["candidate"], data["candidates"] = None, names
+    world.runner.data = data
+    cb = FakeCallback("cert:menu")
+    await admin_cert.cert_menu(cb, _fsm(), world.services)  # type: ignore[arg-type]
+    assert {f"cert:adopt:{i}" for i in range(10)} <= set(_callbacks(cb.message.edits[-1][1]))
+    seen: list[dict[str, Any]] = []
+    original = world.wizard.start
+
+    async def start(actor: int, mode: str, raw: Any = None, **kw: Any) -> Any:
+        seen.append(dict(raw or {}))
+        return await original(actor, mode, raw, **kw)
+
+    monkeypatch.setattr(world.wizard, "start", start)
+    await admin_cert.cert_adopt_pick(FakeCallback("cert:adopt:9"), _fsm(), world.services)  # type: ignore[arg-type]
+    assert seen == [{"action": "adopt", "names": f"*.{ZONE}"}]

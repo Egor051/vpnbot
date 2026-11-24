@@ -176,7 +176,7 @@ async def cert_go(callback: CallbackQuery, state: FSMContext, services: Services
     await _start_run(callback, state, services, callback.data.rsplit(":", 1)[-1])
 
 
-@router.callback_query(F.data.regexp(r"^cert:adopt:[0-7]$"))
+@router.callback_query(F.data.regexp(r"^cert:adopt:[0-9]{1,2}$"))
 async def cert_adopt_pick(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """«🔁 Принять <домен>»: one of several acme.sh domains that could be the bot's. The
     index is resolved against a FRESH status (also after the TOTP prompt)."""

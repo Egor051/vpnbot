@@ -269,7 +269,16 @@ class DnsService:
                 await self.repo.record_error(target, str(exc), now=self.clock.now())
             raise
         zone = await self.zone(target)
-        adopted = owned.adopted if owned is not None else change != "created"
+        if owned is None or change == "created":
+            # A record that was there before the bot's first write is adopted; one the bot
+            # just created is its own.
+            adopted = owned is None and change != "created"
+        elif owned.record_id and record.id != owned.record_id:
+            # The bot's record was replaced out of band: the one written now is someone
+            # else's — adopted, so a delete never removes it at Cloudflare.
+            adopted = True
+        else:
+            adopted = owned.adopted
         saved = await self.repo.save(
             target, purpose=purpose, content=record.content, zone_id=zone.id, record_id=record.id,
             adopted=adopted, now=self.clock.now(), actor=actor_user_id,

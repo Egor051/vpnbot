@@ -63,14 +63,16 @@ class DnsRecordsRepository:
         rtype: str = "A",
     ) -> OwnedDnsRecord:
         """Insert or update the row of a successful write (its last error cleared). The
-        purpose and ``adopted`` of an existing row are kept: ownership does not move."""
+        purpose of an existing row is kept (ownership does not move to another use);
+        ``adopted`` is what the service decided for this write."""
         if purpose not in PURPOSES:
             raise ValueError(f"dns_records: bad purpose {purpose!r}")
         await self.db.conn.execute(
             "INSERT INTO dns_records (name, type, purpose, content, zone_id, record_id, adopted, last_error, "
             "created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) "
             "ON CONFLICT(name, type) DO UPDATE SET content = excluded.content, zone_id = excluded.zone_id, "
-            "record_id = excluded.record_id, last_error = NULL, updated_at = excluded.updated_at",
+            "record_id = excluded.record_id, adopted = excluded.adopted, last_error = NULL, "
+            "updated_at = excluded.updated_at",
             (name.lower(), rtype, purpose, content, zone_id, record_id, int(adopted), now, now, actor),
         )
         await self.db.commit()

@@ -266,3 +266,18 @@ async def test_delete_removes_only_the_record_the_bot_wrote(world: Fallback) -> 
     stranger = world.cf.add("gone.example.net", MAIN)
     assert await world.dns_service.delete_a(ADMIN, "gone.example.net") is False
     assert [r["id"] for r in world.cf.a("gone.example.net")] == [stranger]
+
+
+async def test_a_record_replaced_out_of_band_is_adopted_not_taken(world: Fallback) -> None:
+    """The bot's record is deleted at Cloudflare and someone creates another: the next
+    upsert writes that one — it is adopted, so a later delete leaves it at Cloudflare."""
+    first = await world.dns_service.upsert_a(ADMIN, "host.example.net", MAIN, purpose="host")
+    assert first.record is not None and not first.record.adopted
+    for rid in [r["id"] for r in world.cf.a("host.example.net")]:
+        world.cf.records.pop(rid)
+    theirs = world.cf.add("host.example.net", "192.0.2.77")
+    again = await world.dns_service.upsert_a(ADMIN, "host.example.net", MAIN, purpose="host")
+    assert again.change == "updated" and again.record is not None and again.record.adopted
+    assert again.record.record_id == theirs
+    assert await world.dns_service.delete_a(ADMIN, "host.example.net") is False
+    assert [r["id"] for r in world.cf.a("host.example.net")] == [theirs]

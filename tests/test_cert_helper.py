@@ -618,3 +618,31 @@ def test_nginx_with_another_vhost_still_reads_the_registry(host: CertHost) -> No
     _, st = host.json("status")
     nginx = next(c for c in st["consumers"] if c["name"] == "nginx")
     assert nginx["reads_registry"] is False
+
+
+def test_a_token_replaced_while_acme_renews_is_the_one_cron_keeps(host: CertHost) -> None:
+    """The superadmin sets a new token while acme.sh renews (with the old one): afterwards
+    the domain's conf holds the NEW one — cron must not keep renewing with a revoked token."""
+    adopted_host(host)
+    host.token()
+    new = "cfNEW_TOKEN_0123456789abcdefghijklmnop"
+    (host.sd / "swap-token").write_text(new + "\n", encoding="utf-8")
+    host.next_pair([DOMAIN])
+    assert host.cert("renew", "--force", "--zone", ZONE).returncode == 0
+    assert host.conf()["CF_Token"] == new and host.conf()["CF_Zone_ID"] == ZONE_ID
+
+
+def test_adoption_keeps_cron_off_the_domain_through_its_deploy(host: CertHost, tmp_path: Path) -> None:
+    """A due domain: the readers act (the stale hysteria copy is restarted) while the
+    domain's next renewal time is still held ahead — cron cannot renew under deploy."""
+    import time
+
+    old_due = str(int(time.time()) - 5)
+    chain, key = host.acme_domain(conf={"Le_NextRenewTime": old_due})
+    stale_chain, stale_key = make_pair(tmp_path / "stale", [DOMAIN], days=20)
+    host.lay_out(chain, key, hysteria=(stale_chain.read_bytes(), stale_key.read_bytes()))
+    assert host.cert("adopt").returncode == 0
+    seen = (host.sd / "next-during-action").read_text(encoding="utf-8").split()
+    held = [int(v.split("=", 1)[1].strip("'")) for v in seen]
+    assert held and all(v >= int(time.time()) + 3000 for v in held), seen
+    assert host.conf()["Le_NextRenewTime"] == old_due
