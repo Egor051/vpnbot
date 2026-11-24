@@ -77,6 +77,12 @@ days. The status shows it at once (its copy differs from acme.sh's, red when it 
 days), the daily self-check alerts, and «📦 Разложить заново» — or the next renewal — lays it out
 again.
 
+acme.sh takes no lock of its own, and its cron (`acme.sh --cron` in root's crontab) does not take
+`vpn-bot-cert`'s: `issue` / `renew` / `adopt` wait — up to 5 minutes, then refuse — while another
+acme.sh process runs, and a cron renewal's `deploy` waits for the helper's lock. (A cron run that
+starts in the minute or two the helper's own acme.sh runs is not caught: the cron line itself is
+the host's and is not rewritten.)
+
 When acme.sh runs the reloadcmd from inside `issue` / `renew` / `adopt` (the environment variable
 `VPN_BOT_CERT_NESTED` names the lock the parent holds), `deploy` defers: the parent deploys right
 after acme.sh, with its own report.
@@ -101,7 +107,9 @@ A token that fails a step is refused with the step's reason, and nothing is stor
 carries its fingerprint (8 hex of sha256), never the value. The status shows whether acme.sh renews
 with the same token (fingerprints), and «🔄 Проверить продление» switches acme.sh to it.
 
-For `issue` the bot passes the zone's **name**; `vpn-bot-cert` asks Cloudflare for its id with the
+A certificate's names must all be in one zone (`CF_Zone_ID` is one zone): issue and renew refuse
+names from another zone while the run is built, before a plan is shown. For `issue` the bot passes
+the zone's **name**; `vpn-bot-cert` asks Cloudflare for its id with the
 token (`GET /zones?name=`) and gives acme.sh `CF_Zone_ID` — a zone id left in acme.sh's
 `account.conf` by another setup is never used. (The id is not passed along: 32 hex characters are
 masked as a secret by every redaction, the wizard's stored parameters included.)
@@ -134,7 +142,7 @@ Buttons:
 
 | Button | Run of the `cert` mode |
 |---|---|
-| «🔁 Принять текущий сертификат» — only before adoption | `action=adopt` |
+| «🔁 Принять текущий сертификат» — only before adoption; «🔁 Принять <domain>», one per domain, when several acme.sh domains could be the bot's | `action=adopt` (`names` = the domain picked) |
 | «🆕 Выпустить / перевыпустить» → «▶️ Составить план» («✏️ Другие имена» to type them) | `action=issue`, `names`, `zone` |
 | «🔄 Проверить продление» — once adopted | `action=renew` (`zone` with the bot's token) |
 | «📦 Разложить заново» — when a reader's copy differs or did not take it | `action=deploy` |

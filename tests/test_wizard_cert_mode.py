@@ -207,3 +207,19 @@ def test_the_text_kinds_are_typed_the_same_in_the_bot_and_the_launcher() -> None
                 BOT_MODES["cert"].params[name].coerce(name, value)
     assert lib.validate_params("cert", ["action=issue", "names=example.net"]) == {
         "action": "issue", "names": "example.net", "zone": ""}
+
+
+def test_adopt_takes_the_domain_the_screen_picked_among_several(host: WizardCertHost) -> None:
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64("/usr/local/sbin/acme-reload.sh")})
+    host.lay_out(chain, key)
+    host.acme_domain(f"old.{DOMAIN}", conf={"Le_ReloadCmd": b64("systemctl restart hysteria-server"),
+                                            "Le_RealFullChainPath": "", "Le_RealKeyPath": ""})
+    assert host.wizard(11, "plan", action="adopt").returncode == 1  # ambiguous without a pick
+    assert host.outcome(11) == "failed" and "more than one" in host.plan_text(11)
+    assert host.wizard(12, "plan", action="adopt", names=DOMAIN).returncode == 0
+    assert DOMAIN in host.plan_text(12)
+    proc = host.wizard(12, "execute", action="adopt", names=DOMAIN)
+    assert proc.returncode == 0, proc.stderr
+    assert host.outcome(12) == "succeeded"
+    assert host.conf()["Le_ReloadCmd"] == b64(RELOAD)
+    assert host.conf(f"old.{DOMAIN}")["Le_ReloadCmd"] == b64("systemctl restart hysteria-server")

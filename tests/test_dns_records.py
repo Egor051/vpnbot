@@ -236,3 +236,18 @@ async def test_an_adopted_origin_is_written_through_without_losing_its_ownership
     finally:
         forget_secret(TOKEN)
         await world.close()
+
+
+async def test_a_token_change_waits_for_a_running_switch(world: Fallback) -> None:
+    """The switch writes names with the token loaded per call: a new token — from the
+    fallback's screen or the certificate's — lands only once the switch is done."""
+    import asyncio
+
+    assert world.service._lock is world.dns_service.lock
+    async with world.service._lock:  # a switch in progress
+        task = asyncio.create_task(world.dns_service.set_token(ADMIN, OTHER, ZONE))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert not task.done() and world.token_file.load() == TOKEN
+    await task
+    assert world.token_file.load() == OTHER

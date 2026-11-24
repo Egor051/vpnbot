@@ -98,7 +98,11 @@ class DnsService:
         self.token_file = token_file
         self.dns = dns
         self._zones: dict[str, DnsZone] = {}
-        self._lock = asyncio.Lock()
+        # Held while the token file changes. The fallback mode uses THIS lock as its own
+        # (services/fallback.py): a switch writes names with the token loaded per call, so
+        # a new token (or none) must not land in the middle of it — whichever screen it
+        # comes from. Never held across an API call of set_token's check.
+        self.lock = asyncio.Lock()
 
     # ── the token ─────────────────────────────────────────────────────────────
 
@@ -167,7 +171,7 @@ class DnsService:
             if valid_token(value):
                 await self._audit(actor_user_id, audit_rejected, {"token_fp": fingerprint(value), "reason": exc.key})
             raise
-        async with self._lock:
+        async with self.lock:
             try:
                 self.token_file.save(value)
             except DnsTokenMissing as exc:
@@ -178,7 +182,7 @@ class DnsService:
 
     async def delete_token(self, actor_user_id: int, *, audit_action: str = "dns_token_deleted") -> bool:
         await self.users.require_superadmin(actor_user_id)
-        async with self._lock:
+        async with self.lock:
             removed = self.token_file.delete()
             self._zones.clear()
         if removed:

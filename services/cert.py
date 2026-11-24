@@ -61,6 +61,12 @@ class CertStatus:
         return str(value) if value else None
 
     @property
+    def candidates(self) -> list[str]:
+        """Every acme.sh domain that could be the bot's (several: the superadmin picks one)."""
+        value = self.raw.get("candidates")
+        return [str(v) for v in value] if isinstance(value, list) else ([self.candidate] if self.candidate else [])
+
+    @property
     def domain(self) -> dict[str, Any] | None:
         name = self.domain_name
         return next((d for d in self.raw.get("domains", []) if d.get("name") == name), None) if name else None
@@ -205,15 +211,27 @@ class CertService:
             if not chosen:
                 raise InvalidOperation("нет имён", key="cert_err_no_name")
             zone = await self.dns.zone(chosen[0].removeprefix("*."))
-            outside = [n for n in chosen if n != zone.name and not n.endswith("." + zone.name)]
+            outside = [n for n in chosen if n.removeprefix("*.") != zone.name and not n.endswith("." + zone.name)]
             if outside:
                 raise InvalidOperation("имена из разных зон", key="cert_err_other_zone",
                                        params={"zone": zone.name, "names": ", ".join(outside)})
             params.update(names=",".join(chosen), zone=zone.name)
-        elif action == "renew" and self.dns.token_set():
-            name = names[0] if names else None
-            if name:
-                params["zone"] = (await self.dns.zone(name.removeprefix("*."))).name
+        elif action == "renew" and self.dns.token_set() and names:
+            # vpn-bot-cert hands acme.sh ONE zone (CF_Zone_ID): every name must be in it —
+            # refused here, before a plan is shown, not after the confirmation.
+            chosen = [n.lower() for n in names]
+            zone = await self.dns.zone(chosen[0].removeprefix("*."))
+            outside = [n for n in chosen if n.removeprefix("*.") != zone.name and not n.endswith("." + zone.name)]
+            if outside:
+                raise InvalidOperation("имена из разных зон", key="cert_err_other_zone",
+                                       params={"zone": zone.name, "names": ", ".join(outside)})
+            params["zone"] = zone.name
+        elif action == "adopt" and names:
+            # One of several domains that could be the bot's: the screen names it.
+            domain = names[0].lower()
+            if not valid_dns_name(domain):
+                raise InvalidOperation("не DNS-имя", key="cert_err_bad_name", params={"value": domain[:80]})
+            params["names"] = domain
         run = await self.wizard.start(actor_user_id, "cert", params, chat_id=chat_id, message_id=message_id)
         if action == "issue":
             self.forget_names(actor_user_id)

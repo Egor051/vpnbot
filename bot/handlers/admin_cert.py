@@ -172,11 +172,25 @@ async def cert_names_input(message: Message, state: FSMContext, services: Servic
 @router.callback_query(F.data.regexp(r"^cert:go:(issue|renew|adopt|deploy)$"))
 async def cert_go(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """A run of the wizard's «cert» mode: its plan first (the diff), then «✅ Применить»."""
+    assert callback.data is not None
+    await _start_run(callback, state, services, callback.data.rsplit(":", 1)[-1])
+
+
+@router.callback_query(F.data.regexp(r"^cert:adopt:[0-7]$"))
+async def cert_adopt_pick(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """«🔁 Принять <домен>»: one of several acme.sh domains that could be the bot's. The
+    index is resolved against a FRESH status (also after the TOTP prompt)."""
+    assert callback.data is not None
+    await _start_run(callback, state, services, "adopt", pick=int(callback.data.rsplit(":", 1)[-1]))
+
+
+async def _start_run(
+    callback: CallbackQuery, state: FSMContext, services: Services, action: str, *, pick: int | None = None
+) -> None:
     try:
         if not await _guard(callback, services):
             return
-        assert callback.data is not None and callback.from_user is not None and callback.message is not None
-        action = callback.data.rsplit(":", 1)[-1]
+        assert callback.from_user is not None and callback.message is not None
         wizard = services.wizard
         if wizard is None:
             raise ServiceError("мастер не подключён", key="wizard_unavailable")
@@ -190,7 +204,16 @@ async def cert_go(callback: CallbackQuery, state: FSMContext, services: Services
             return
         cert = _cert(services)
         status, _ = await _status(services, callback.from_user.id)
-        names = cert.chosen_names(callback.from_user.id, status) if action == "issue" else (status.names if status else [])
+        if pick is not None:
+            candidates = status.candidates if status is not None else []
+            if pick >= len(candidates) or (status is not None and status.adopted):
+                await safe_callback_answer(callback, t("cert_pick_stale"), show_alert=True)
+                return
+            names = [candidates[pick]]
+        elif action == "issue":
+            names = cert.chosen_names(callback.from_user.id, status)
+        else:
+            names = status.names if status else []
         async with wizard.exclusive():
             run = await cert.start(
                 callback.from_user.id, action, names=names,

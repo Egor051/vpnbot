@@ -9,7 +9,8 @@ back as the plan found it. Parameter `action`:
 
   adopt    the hand-made acme.sh domain becomes the bot's: its install-cert is rewritten
            (reloadcmd = vpn-bot-cert deploy, no file targets) — the certificate is NOT
-           reissued; readers whose copy differs get the current pair
+           reissued; readers whose copy differs get the current pair. `names` (one name)
+           picks the domain when several could be the bot's
   issue    a certificate for `names` (DNS-01 through Cloudflare, zone `zone`, the bot's
            token), then the install-cert above, then deploy
   renew    `acme.sh --renew --force` of the bot's domain (and acme.sh switched to the bot's
@@ -100,6 +101,10 @@ def failure(obj: dict[str, Any], rest: str, rc: int) -> str:
 
 def bot_domain(st: dict[str, Any]) -> dict[str, Any] | None:
     name = st.get("domain") or st.get("candidate")
+    return next((d for d in st.get("domains", []) if d.get("name") == name), None) if name else None
+
+
+def domain_named(st: dict[str, Any], name: object) -> dict[str, Any] | None:
     return next((d for d in st.get("domains", []) if d.get("name") == name), None) if name else None
 
 
@@ -204,7 +209,9 @@ def plan_renew(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]
 
 
 def plan_dry(ctx: Any, verb: str) -> tuple[list[str], dict[str, Any], bool]:
-    rc, report, rest = call(ctx, verb, "--dry-run")
+    picked = [n for n in ctx.params["names"].split(",") if n]
+    extra = ["--domain", picked[0]] if verb == "adopt" and picked else []
+    rc, report, rest = call(ctx, verb, "--dry-run", *extra)
     if rc != 0 or "groups" not in report:
         raise lib.WizardError(f"vpn-bot-cert {verb} --dry-run: {failure(report, rest, rc)}")
     lines = [f"Domain: {report['domain']} — pair {report['source']['pair_sha']}, until {report['source']['not_after']}"]
@@ -214,7 +221,10 @@ def plan_dry(ctx: Any, verb: str) -> tuple[list[str], dict[str, Any], bool]:
     lines.append("Readers:")
     lines += groups_text(report)
     noop = verb == "deploy" and all(g["result"] == "unchanged" for g in report["groups"])
-    return lines, {"domain": report["domain"], "new_domain": False, "names": report["source"]["san"]}, noop
+    record: dict[str, Any] = {"domain": report["domain"], "new_domain": False, "names": report["source"]["san"]}
+    if report.get("conf"):
+        record["acme_dir"] = str(Path(str(report["conf"])).parent)
+    return lines, record, noop
 
 
 def step_plan(ctx: Any) -> int:
@@ -237,9 +247,10 @@ def step_plan(ctx: Any) -> int:
         ctx.event("plan", text=f"{ACTION_TITLES[action]}: {exc}")
         print(str(exc), file=sys.stderr)
         return 1
-    current = bot_domain(st)
-    record.update(action=action, pair_sha=(current or {}).get("pair_sha"), not_after=(current or {}).get("not_after"),
-                  acme_dir=(current or {}).get("dir"))
+    # The domain the action is about: the plan's own (adopt may name one of several).
+    current = domain_named(st, record.get("domain")) or bot_domain(st)
+    record.update(action=action, pair_sha=(current or {}).get("pair_sha"), not_after=(current or {}).get("not_after"))
+    record.setdefault("acme_dir", (current or {}).get("dir"))
     lib.write_private(lib.artifact_path(ctx.run_id, PLAN_ARTIFACT), json.dumps(record, sort_keys=True).encode())
     text = "\n".join([f"Action: {ACTION_TITLES[action]}", *lines])
     if noop:
@@ -289,7 +300,7 @@ def step_apply(ctx: Any) -> int:
     if rc != 0:
         print(f"vpn-bot-cert status failed: {failure(st, rest, rc)}", file=sys.stderr)
         return 1
-    now = bot_domain(st)
+    now = domain_named(st, plan["domain"]) if action == "adopt" else bot_domain(st)
     if not plan.get("new_domain") and (now is None or now["name"] != plan["domain"]):
         print(f"the domain changed since the plan ({plan['domain']} → {now['name'] if now else 'none'}) — start again",
               file=sys.stderr)

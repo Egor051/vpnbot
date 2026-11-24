@@ -547,3 +547,19 @@ def test_conf_parsing_decodes_acmes_base64_values(mod: ModuleType) -> None:
     assert mod.reload_kind("/usr/local/sbin/acme-reload.sh") == "legacy"
     assert mod.reload_kind("systemctl restart hysteria-server") == "other" and mod.reload_kind("") == "empty"
     assert mod.covers(["*.example.net"], "a.example.net") and not mod.covers(["*.example.net"], "a.b.example.net")
+
+
+def test_issue_renew_and_adopt_wait_for_an_acme_cron_run(host: CertHost) -> None:
+    """acme.sh takes no lock and its cron does not take vpn-bot-cert's: while another
+    acme.sh process runs, the helper does not start one of its own (waits, then refuses)."""
+    adopted_host(host)
+    host.token()
+    host.write("/proc/4242/cmdline", b"sh\0/root/.acme.sh/acme.sh\0--cron\0--home\0/root/.acme.sh\0")
+    host.write("/proc/4243/cmdline", b"/usr/bin/python3\0-m\0something.else\0")
+    for args in (("renew", "--force"), ("issue", "--names", DOMAIN, "--zone", ZONE)):
+        proc = host.cert(*args)
+        assert proc.returncode == 3 and "acme.sh is running already" in proc.stderr and "4242" in proc.stderr
+    assert host.acme_log() == []
+    host.file("/proc/4242/cmdline").unlink()
+    host.next_pair([DOMAIN])
+    assert host.cert("renew", "--force").returncode == 0

@@ -300,6 +300,9 @@ CASES: list[tuple[str, Callable[[], InlineKeyboardMarkup], str | None]] = [
         "consumers": [{"name": "hysteria", "installed": True, "in_sync": False}],
     })), None),
     ("cert_screen_unavailable", lambda: cv.screen_keyboard(None), None),
+    ("cert_screen_ambiguous", lambda: cv.screen_keyboard(CertStatus({
+        "adopted": False, "candidate": None, "candidates": ["a.example.net", "b.example.net"],
+    })), None),
     ("cert_issue", lambda: cv.issue_keyboard(True), None),
     ("cert_token", lambda: cv.token_keyboard(True), None),
     ("wizard_progress", lambda: wv.progress_keyboard(_wrun()), None),

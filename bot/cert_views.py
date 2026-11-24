@@ -11,6 +11,8 @@ from utils.formatting import code, h
 
 LEVEL_ICONS = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
 _MAX_PROBLEMS = 12
+# Candidates to adopt offered one button each (cert:adopt:<index into status.candidates>).
+MAX_PICK = 8
 
 
 def _row(text: str, data: str) -> list[InlineKeyboardButton]:
@@ -63,7 +65,9 @@ def screen_text(status: CertStatus | None, records: list[OwnedDnsRecord], *, tok
         dom = status.domain
         acme = status.acme
         lines.append("")
-        if dom is None:
+        if dom is None and len(status.candidates) > 1:
+            lines.append(t("cert_ambiguous", names=h(", ".join(status.candidates))))
+        elif dom is None:
             lines.append(t("cert_none"))
         else:
             lines.append(t("cert_domain_line", name=code(dom.get("name")), keylen=h(dom.get("keylength") or "?"),
@@ -95,6 +99,10 @@ def screen_keyboard(status: CertStatus | None) -> InlineKeyboardMarkup:
     if status is not None:
         if not status.adopted and status.candidate:
             rows.append(_row(t("btn_cert_adopt"), "cert:go:adopt"))
+        elif not status.adopted:
+            # Several domains could be the bot's: the superadmin picks the one to adopt.
+            for i, name in enumerate(status.candidates[:MAX_PICK]):
+                rows.append(_row(t("btn_cert_adopt_domain", name=name), f"cert:adopt:{i}"))
         rows.append(_row(t("btn_cert_issue"), "cert:issue"))
         if status.adopted:
             rows.append(_row(t("btn_cert_renew"), "cert:go:renew"))

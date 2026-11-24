@@ -75,6 +75,10 @@ VERBS
       written. The wizard's rollback runs it after it restored a backup, so every reader
       runs the restored pair again.
 
+acme.sh takes no lock, and its cron does not take this helper's: issue / renew / adopt wait
+(up to 5 minutes, then refuse) while another acme.sh process runs — a cron renewal —, and a
+cron renewal's own `deploy` waits for this helper's lock.
+
 Exit codes: 0 ok; 1 a consumer failed and its group was rolled back; 2 usage; 3 refused
 (nothing to adopt, no token, a bad pair, another domain); 5 cannot (a tool or a file).
 
@@ -134,6 +138,10 @@ NEW_KEYLENGTH = "ec-256"
 COMMAND_TIMEOUT = 60
 ACME_TIMEOUT = 900
 LOCK_WAIT = 900
+# acme.sh has no lock of its own, and its cron (`acme.sh --cron`, root's crontab) does not
+# take ours: before issue / renew / adopt run acme.sh, another acme.sh process — a cron
+# renewal — is waited for (then refused), so the two never change one domain together.
+ACME_BUSY_WAIT = float(os.environ.get("VPN_BOT_CERT_SELFTEST_ACME_WAIT", "0")) if SELFTEST else 300.0
 SETTLE_SECONDS = float(os.environ.get("VPN_BOT_CERT_SELFTEST_SETTLE", "0")) if SELFTEST else 2.0
 MAX_PEM_BYTES = 1 << 20
 MAX_NAMES = 10
@@ -1063,6 +1071,7 @@ def status(ctx: Ctx) -> dict[str, Any]:
         "domain": ours[0].name if len(ours) == 1 else None,
         "adopted": len(ours) == 1,
         "candidate": cands[0].name if not ours and len(cands) == 1 else None,
+        "candidates": sorted({d.name for d in cands}),
         "ambiguous": [d.dir.name for d in (ours if len(ours) > 1 else cands if len(cands) > 1 else [])],
         "consumers": consumers,
         "token": token_status(ctx),
@@ -1416,6 +1425,43 @@ def act(ctx: Ctx) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # acme.sh: install, issue, install-cert, renew
 # --------------------------------------------------------------------------- #
+def other_acme(ctx: Ctx) -> list[str]:
+    """acme.sh processes running now (pid: argv): the script is the first argument or
+    the interpreter's (`sh /root/.acme.sh/acme.sh --cron …`)."""
+    found: list[str] = []
+    try:
+        entries = sorted(ctx.host("/proc").iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        args = [a.decode("utf-8", errors="replace") for a in raw.split(b"\0") if a]
+        if any(Path(a).name == ACME_ENTRY for a in args[:3]):
+            found.append(f"{entry.name}: {' '.join(args)[:160]}")
+    return found
+
+
+def wait_for_acme(ctx: Ctx, log: list[str]) -> None:
+    deadline = time.monotonic() + ACME_BUSY_WAIT
+    noted = False
+    while True:
+        busy = other_acme(ctx)
+        if not busy:
+            return
+        if not noted:
+            log.append("waiting for another acme.sh: " + "; ".join(busy[:3]))
+            noted = True
+        if time.monotonic() >= deadline:
+            raise Refused("acme.sh is running already (its cron?): " + "; ".join(busy[:3])
+                          + " — try again once it is done")
+        time.sleep(2)
+
+
 def acme_argv(ctx: Ctx, *args: str) -> list[str]:
     home = str(ctx.host(ACME_HOME))
     return [f"{home}/{ACME_ENTRY}", "--home", home, "--config-home", home, *args]
@@ -1540,6 +1586,7 @@ def issue(ctx: Ctx, raw_names: str, zone: str) -> dict[str, Any]:
     lock = Lock(ctx)
     lock.acquire(LOCK_WAIT)
     try:
+        wait_for_acme(ctx, log)
         if not acme_installed(ctx):
             install_acme(ctx, log)
         domains = load_domains(ctx)
@@ -1589,6 +1636,7 @@ def renew(ctx: Ctx, zone: str | None) -> dict[str, Any]:
     lock = Lock(ctx)
     lock.acquire(LOCK_WAIT)
     try:
+        wait_for_acme(ctx, log)
         domain = bot_domain(ctx, load_domains(ctx))
         try:
             token = read_bot_token(ctx)
@@ -1655,6 +1703,7 @@ def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool) -> dict[str, Any]:
     lock = Lock(ctx)
     lock.acquire(LOCK_WAIT)
     try:
+        wait_for_acme(ctx, log)
         fresh = install_cert(ctx, domain, lock, log)
         report = deploy(ctx, fresh)
     finally:

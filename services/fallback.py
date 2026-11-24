@@ -481,7 +481,10 @@ class FallbackService:
         self._monotonic = monotonic
         self._verify_timeout = verify_timeout
         self._verify_interval = verify_interval
-        self._lock = asyncio.Lock()
+        # The switch's lock. With the DNS service it IS the DNS service's lock: the token
+        # (one file for the fallback, the certificate and the bot's records) is never
+        # replaced or deleted while a switch writes names with it.
+        self._lock = dns_service.lock if dns_service is not None else asyncio.Lock()
         # Reconciles one at a time (services/fallback.py, «RECONCILED»): they hold the
         # switch's lock only to plan and to record, never across an agent call.
         self._reconcile_lock = asyncio.Lock()

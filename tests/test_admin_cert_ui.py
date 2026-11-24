@@ -203,3 +203,39 @@ async def test_the_wizard_menu_opens_the_certificate_screen_not_a_bare_run(world
     services = SimpleNamespace(wizard=world.wizard, users=world.fb.service.users, totp=None)
     await admin_wizard.wizard_start(cb, _fsm(), services)  # type: ignore[arg-type]
     assert world.wizard.started == [] and cb.alerts[-1][1] is True
+
+
+async def test_a_renewal_across_zones_is_refused_before_a_plan(world: World) -> None:
+    """vpn-bot-cert hands acme.sh ONE zone: a certificate whose names span two zones is
+    refused while the run is being built — never after the confirmation."""
+    from services.errors import InvalidOperation
+
+    with pytest.raises(InvalidOperation) as caught:
+        await world.cert.start(ADMIN, "renew", names=[ZONE, "api.example.org"])
+    assert caught.value.key == "cert_err_other_zone" and "api.example.org" in str(caught.value.params["names"])
+    assert world.wizard.started == []
+
+
+async def test_several_candidates_get_one_adopt_button_each(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = report()
+    data["candidate"], data["candidates"] = None, [ZONE, f"old.{ZONE}"]
+    world.runner.data = data
+    cb = FakeCallback("cert:menu")
+    await admin_cert.cert_menu(cb, _fsm(), world.services)  # type: ignore[arg-type]
+    text, markup = cb.message.edits[-1]
+    assert f"old.{ZONE}" in text
+    buttons = _callbacks(markup)
+    assert "cert:go:adopt" not in buttons and {"cert:adopt:0", "cert:adopt:1"} <= set(buttons)
+    seen: list[dict[str, Any]] = []
+    original = world.wizard.start
+
+    async def start(actor: int, mode: str, raw: Any = None, **kw: Any) -> Any:
+        seen.append(dict(raw or {}))
+        return await original(actor, mode, raw, **kw)
+
+    monkeypatch.setattr(world.wizard, "start", start)
+    await admin_cert.cert_adopt_pick(FakeCallback("cert:adopt:1"), _fsm(), world.services)  # type: ignore[arg-type]
+    assert seen == [{"action": "adopt", "names": f"old.{ZONE}"}]
+    stale = FakeCallback("cert:adopt:7")
+    await admin_cert.cert_adopt_pick(stale, _fsm(), world.services)  # type: ignore[arg-type]
+    assert len(seen) == 1 and stale.alerts[-1][1] is True
