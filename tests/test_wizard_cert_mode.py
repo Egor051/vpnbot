@@ -359,3 +359,17 @@ def test_adopt_releases_a_writer_and_verify_holds_the_registry_to_one_domain(hos
     assert proc.returncode == 0, host.events(19)
     assert host.outcome(19) == "succeeded"
     assert host.conf(other)["Le_RealKeyPath"] == "" and host.conf(other)["Le_RealFullChainPath"] == ""
+
+
+def test_verify_fails_when_nginx_includes_a_config_it_cannot_read(host: WizardCertHost) -> None:
+    """An nginx include out of /etc/nginx (never read): what nginx serves is unknown — the
+    run is not verified, it is rolled back."""
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64("systemctl restart hysteria-server")})
+    host.lay_out(chain, key)
+    host.write("/etc/nginx/nginx.conf", "http {\n  include /srv/nginx/*.conf;\n}\n")
+    host.write("/srv/nginx/tls.conf", "ssl_certificate /srv/other/fullchain.pem;\n")
+    assert host.wizard(20, "plan", action="adopt").returncode == 0
+    assert host.wizard(20, "execute", action="adopt").returncode == 1
+    assert host.outcome(20) == "rolled_back"
+    result = [e for e in host.events(20) if e["event"] == "result"][-1]
+    assert "nginx: cannot tell what it reads" in result["text"]

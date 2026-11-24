@@ -918,3 +918,40 @@ def test_status_judges_the_directory_it_means_not_the_first_of_the_name(host: Ce
     assert "reloadcmd" not in keys, st["problems"]
     writer = [p for p in st["problems"] if p["key"] == "writer"]
     assert writer and f"/root/.acme.sh/{DOMAIN}:" in writer[0]["text"]
+
+
+def test_nginx_vhosts_included_from_elsewhere_in_etc_nginx_are_read(host: CertHost) -> None:
+    """nginx.conf includes vhosts from a directory of its own choosing: they are read."""
+    adopted_host(host)
+    host.write("/etc/nginx/nginx.conf", "http {\n  include /etc/nginx/mime.types;\n  include vhosts/*.conf;\n}\n")
+    host.write("/etc/nginx/vhosts/tls.conf", "ssl_certificate /srv/other/fullchain.pem;\n"
+                                             "ssl_certificate_key /srv/other/privkey.pem;\n")
+    _, st = host.json("status")
+    nginx = next(c for c in st["consumers"] if c["name"] == "nginx")
+    assert nginx["reads_registry"] is False and "/srv/other/fullchain.pem" in nginx["reads"]
+    assert nginx["reads_unverifiable"] is False
+
+
+def test_an_nginx_include_out_of_its_trees_makes_the_reader_unverifiable(host: CertHost) -> None:
+    adopted_host(host)
+    host.write("/etc/nginx/nginx.conf", "http {\n  include /srv/nginx/*.conf;\n}\n")
+    host.write("/srv/nginx/tls.conf", "ssl_certificate /srv/other/fullchain.pem;\n")
+    _, st = host.json("status")
+    nginx = next(c for c in st["consumers"] if c["name"] == "nginx")
+    assert nginx["reads_registry"] is None and nginx["reads_unverifiable"] is True
+    assert "/srv/nginx/tls.conf" in nginx["reads"] and "/srv/other/fullchain.pem" not in nginx["reads"]
+    assert any(p["key"] == "reads:nginx" for p in st["problems"])
+
+
+def test_stock_module_snippets_out_of_etc_nginx_do_not_make_it_unverifiable(host: CertHost) -> None:
+    """Debian / Ubuntu link modules-enabled/* to /usr/share/nginx: that tree is nginx's own."""
+    adopted_host(host)
+    host.write("/usr/share/nginx/modules-available/mod-stream.conf", "load_module modules/ngx_stream_module.so;\n")
+    host.file("/etc/nginx/modules-enabled").mkdir(parents=True)
+    host.file("/etc/nginx/modules-enabled/50-mod-stream.conf").symlink_to(
+        host.file("/usr/share/nginx/modules-available/mod-stream.conf"))
+    host.write("/etc/nginx/nginx.conf", "include /etc/nginx/modules-enabled/*.conf;\nhttp {\n  include conf.d/*.conf;\n}\n")
+    host.write("/etc/nginx/conf.d/steal.conf", f"ssl_certificate {TLS_CHAIN};\nssl_certificate_key {TLS_KEY};\n")
+    _, st = host.json("status")
+    nginx = next(c for c in st["consumers"] if c["name"] == "nginx")
+    assert nginx["reads_ok"] is True and nginx["reads_registry"] is True and nginx["reads_unverifiable"] is False

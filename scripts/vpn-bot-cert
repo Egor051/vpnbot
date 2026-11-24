@@ -107,6 +107,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import glob as globlib
 import hashlib
 import json
 import os
@@ -978,51 +979,90 @@ def group_files(group: Sequence[Consumer]) -> list[tuple[FileSpec, Consumer]]:
     return list(seen.values())
 
 
-def reads(ctx: Ctx, c: Consumer) -> tuple[bool | None, str, bool | None]:
+NGINX_MAX_FILES = 256
+# Where nginx's own files live: the config and the package's module snippets (Debian /
+# Ubuntu link modules-enabled/* there). A file elsewhere is never read — it is reported.
+NGINX_TREES = ("/etc/nginx", "/usr/share/nginx")
+
+
+def nginx_config_files(ctx: Ctx) -> tuple[list[Path], list[str]]:
+    """The files nginx loads: nginx.conf and what its ``include`` directives name (globs,
+    relative to /etc/nginx, followed recursively), plus conf.d/ and sites-enabled/ as the
+    packaging lays them out. (files read, files NOT read: out of NGINX_TREES — never
+    followed — or unreadable)."""
+    trees = [os.path.realpath(ctx.host(t)) + "/" for t in NGINX_TREES]
+    seen: set[str] = set()
+    files: list[Path] = []
+    skipped: list[str] = []
+    queue: list[Path] = [ctx.host(NGINX_CONF)]
+    for d in NGINX_CONF_DIRS:
+        base = ctx.host(d)
+        if base.is_dir():
+            queue += sorted(base.iterdir())
+    while queue and len(files) < NGINX_MAX_FILES:
+        p = queue.pop(0)
+        real = os.path.realpath(p)
+        if real in seen:
+            continue
+        seen.add(real)
+        if not os.path.exists(real):
+            continue
+        if not any(real.startswith(t) for t in trees):
+            skipped.append(ctx.unroot(Path(real)))
+            continue
+        if not os.path.isfile(real):
+            continue
+        text = read_text(Path(real))
+        if text is None:
+            skipped.append(ctx.unroot(Path(real)))
+            continue
+        files.append(Path(real))
+        for m in re.finditer(r"^\s*include\s+['\"]?([^;'\"\s]+)['\"]?\s*;", text, re.MULTILINE):
+            pattern = m.group(1)
+            host_pattern = str(ctx.host(pattern if pattern.startswith("/") else f"/etc/nginx/{pattern}"))
+            queue += [Path(x) for x in sorted(globlib.glob(host_pattern))]
+    return files, skipped
+
+
+def reads(ctx: Ctx, c: Consumer) -> tuple[bool | None, str, bool | None, bool]:
     """What the consumer is configured to read, against the registry: (it reads only
-    what the registry lays out, the detail, it reads the registry's pair at all). None:
-    unknown. The two differ for nginx only — another vhost with a certificate of its
-    own is a finding, not a reader that misses the registry's pair."""
+    what the registry lays out, the detail, it reads the registry's pair at all, the
+    answer is UNVERIFIABLE — its configuration could not be read in full). None:
+    unknown. The first two differ for nginx only — another vhost with a certificate of
+    its own is a finding, not a reader that misses the registry's pair."""
     want = {f.source: f.path for f in c.files}
     if c.name == "hysteria":
         text = read_text(ctx.host(HYSTERIA_CONFIG))
         if text is None:
-            return None, f"{HYSTERIA_CONFIG} is not readable", None
+            return None, f"{HYSTERIA_CONFIG} is not readable", None, True
         cert = re.search(r"^\s*cert:\s*['\"]?([^'\"\s#]+)", text, re.MULTILINE)
         key = re.search(r"^\s*key:\s*['\"]?([^'\"\s#]+)", text, re.MULTILINE)
         got = {"fullchain": cert.group(1) if cert else "", "key": key.group(1) if key else ""}
         if re.search(r"^\s*acme:", text, re.MULTILINE) and not (cert and key):
-            return False, "hysteria issues its own certificate (acme: in its config) — not this registry's", False
+            return False, "hysteria issues its own certificate (acme: in its config) — not this registry's", False, False
         ok = got == want
-        return ok, f"tls.cert={got['fullchain'] or '—'} tls.key={got['key'] or '—'}", ok
+        return ok, f"tls.cert={got['fullchain'] or '—'} tls.key={got['key'] or '—'}", ok, False
     if c.name == "subscription":
         cert, key = ctx.env("SUBSCRIPTION_TLS_CERT"), ctx.env("SUBSCRIPTION_TLS_KEY")
         if not cert and not key:
-            return None, "SUBSCRIPTION_TLS_CERT/KEY are not set (no public TLS port)", None
+            return None, "SUBSCRIPTION_TLS_CERT/KEY are not set (no public TLS port)", None, False
         ok = cert == want["fullchain"] and key == want["key"]
-        return ok, f"SUBSCRIPTION_TLS_CERT={cert or '—'} SUBSCRIPTION_TLS_KEY={key or '—'}", ok
+        return ok, f"SUBSCRIPTION_TLS_CERT={cert or '—'} SUBSCRIPTION_TLS_KEY={key or '—'}", ok, False
     if c.name == "nginx":
-        texts: list[str] = [read_text(ctx.host(NGINX_CONF)) or ""]
-        nginx_root = os.path.realpath(ctx.host("/etc/nginx"))
-        for d in NGINX_CONF_DIRS:
-            base = ctx.host(d)
-            if not base.is_dir():
-                continue
-            for p in sorted(base.iterdir()):
-                # sites-enabled holds symlinks to sites-available: read through them, but
-                # never out of /etc/nginx.
-                real = os.path.realpath(p)
-                if real.startswith(nginx_root + "/") and os.path.isfile(real):
-                    texts.append(read_text(Path(real)) or "")
+        files, skipped = nginx_config_files(ctx)
+        texts = [read_text(f) or "" for f in files]
         used = sorted({m.group(1) for t in texts for m in re.finditer(r"^\s*ssl_certificate(?:_key)?\s+([^;\s]+)\s*;", t, re.MULTILINE)})
-        if not used:
-            return None, "no ssl_certificate in the nginx config", None
-        registry = set(want.values()) <= set(used)
+        unread = f" — not read: {', '.join(skipped[:5])}" if skipped else ""
+        registry: bool | None = set(want.values()) <= set(used)
+        if not registry and skipped:
+            registry = None  # the files not read may hold it
         foreign = [p for p in used if p not in want.values() and not p.startswith("/etc/ssl/")]
         if foreign:
-            return False, "nginx also reads " + ", ".join(foreign) + " — not laid out by vpn-bot-cert", registry
-        return True, "ssl_certificate " + ", ".join(used), registry
-    return None, "", None
+            return False, "nginx also reads " + ", ".join(foreign) + " — not laid out by vpn-bot-cert" + unread, registry, bool(skipped)
+        if not used:
+            return None, "no ssl_certificate in the nginx config" + unread, None, bool(skipped)
+        return (None if skipped else True), "ssl_certificate " + ", ".join(used) + unread, registry, bool(skipped)
+    return None, "", None, False
 
 
 # --------------------------------------------------------------------------- #
@@ -1163,11 +1203,12 @@ def status(ctx: Ctx) -> dict[str, Any]:
         ok, why = installed(ctx, c)
         files = [file_status(ctx, f, c, src) for f in c.files] if ok else []
         in_sync = None if not ok or src is None else all(f["same"] for f in files)
-        reads_ok, reads_detail, reads_registry = reads(ctx, c) if ok else (None, "", None)
+        reads_ok, reads_detail, reads_registry, unverifiable = reads(ctx, c) if ok else (None, "", None, False)
         deployed = taken.get(c.name, {}).get("sha") if isinstance(taken.get(c.name), dict) else None
         consumers.append({
             "name": c.name, "unit": c.unit, "action": c.action, "installed": ok, "why": why, "files": files,
             "in_sync": in_sync, "reads_ok": reads_ok, "reads": reads_detail, "reads_registry": reads_registry,
+            "reads_unverifiable": unverifiable,
             "took_current": None if src is None or deployed is None else deployed == src.pair_sha,
         })
     report: dict[str, Any] = {
@@ -1256,6 +1297,8 @@ def problems(r: Mapping[str, Any]) -> list[dict[str, str]]:
                                                     f"want {f['want_owner']} {f['want_mode']}")
         if c["reads_ok"] is False:
             add("yellow", f"reads:{c['name']}", f"{c['name']}: {c['reads']}")
+        elif c.get("reads_unverifiable") and c["reads_registry"] is not True:
+            add("yellow", f"reads:{c['name']}", f"{c['name']}: cannot tell what it reads — {c['reads']}")
         if c["in_sync"] and c["took_current"] is False:
             add("yellow", f"action:{c['name']}", f"{c['name']}: the files are current, but its last {c['action']} ran "
                                                   "on another pair — «Разложить заново» acts on it again")
@@ -1699,7 +1742,7 @@ def zone_id(ctx: Ctx, token: str, zone: str) -> str:
         raise Cannot(f"Cloudflare GET /zones?name={zone}: {redact(ctx, str(exc))}") from None
     found = [z for z in body.get("result") or [] if isinstance(z, dict) and str(z.get("name", "")).lower() == zone]
     if not body.get("success") or len(found) != 1 or not _ZONE_ID_RE.match(str(found[0].get("id", ""))):
-        raise Refused(f"the Cloudflare token does not see the zone {zone}")
+        raise Refused(f"the Cloudflare token does not see the zone {zone} (it needs Zone · Zone · Read and Zone · DNS · Edit)")
     return str(found[0]["id"])
 
 

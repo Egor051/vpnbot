@@ -281,3 +281,23 @@ async def test_a_record_replaced_out_of_band_is_adopted_not_taken(world: Fallbac
     assert again.record.record_id == theirs
     assert await world.dns_service.delete_a(ADMIN, "host.example.net") is False
     assert [r["id"] for r in world.cf.a("host.example.net")] == [theirs]
+
+
+async def test_a_token_without_zone_read_is_refused_and_told_what_it_lacks(world: Fallback) -> None:
+    """Cloudflare's GET /zones needs «Zone · Zone · Read»: a token with DNS Edit alone does
+    not find the zone — refused, nothing stored, and the refusal names the permission."""
+    from i18n import t
+
+    world.token_file.delete()
+    real = world.cf.__call__
+
+    async def no_zone_read(method: str, url: str, **kw: Any) -> HttpReply:
+        if method == "GET" and url.rstrip("/").endswith("/zones"):
+            return HttpReply(403, {"success": False, "errors": [{"code": 9109, "message": "Unauthorized to access requested resource"}]})
+        return await real(method, url, **kw)
+
+    world.dns_service.dns = CloudflareDns(world.token_file.load, transport=no_zone_read)
+    with pytest.raises(InvalidOperation) as caught:
+        await world.dns_service.set_token(ADMIN, OTHER, ZONE)
+    assert caught.value.key == "dns_err_token_no_zone" and not world.token_file.exists()
+    assert "Zone · Zone · Read" in t(caught.value.key, **caught.value.params)

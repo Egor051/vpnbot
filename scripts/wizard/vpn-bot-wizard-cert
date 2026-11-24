@@ -449,8 +449,9 @@ def step_verify(ctx: Any) -> int:
         if c.get("reads_registry") is False:
             # Restarted on the registry's files, but configured to serve another pair.
             bad.append(f"{c['name']}: it does not read the registry's files ({c.get('reads')})")
-        elif c.get("reads_registry") is None and c.get("name") == "hysteria":
-            # Its config is the only way to know what it serves: unreadable = unverified.
+        elif c.get("reads_registry") is None and (c.get("reads_unverifiable") or c.get("name") == "hysteria"):
+            # Its configuration is the only way to know what it serves: not read in full
+            # (hysteria's config unreadable, an nginx include out of /etc/nginx) = unverified.
             bad.append(f"{c['name']}: cannot tell what it reads ({c.get('reads') or 'unknown'})")
         if c.get("in_sync") is not True:
             bad.append(f"{c['name']}: its files are not acme.sh's current pair")

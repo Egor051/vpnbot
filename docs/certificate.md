@@ -37,7 +37,11 @@ own directory; `deploy` lays the pair out, atomically, reader by reader.
 step. On a host without the `vpn-bot` group (the root-legacy model) the two TLS files fall back to
 group `root`. The status also says what each reader is **configured** to read — hysteria's
 `tls.cert`/`tls.key`, `SUBSCRIPTION_TLS_CERT`/`_KEY`, nginx's `ssl_certificate` lines — and flags a
-reader that reads something the registry does not lay out.
+reader that reads something the registry does not lay out. For nginx it reads `nginx.conf` and every
+file its `include` directives name (globs, relative to `/etc/nginx`, recursively), plus `conf.d/` and
+`sites-enabled/`; a file out of `/etc/nginx` and `/usr/share/nginx` (where Debian / Ubuntu link the
+module snippets) is never read — it is named, and the reader is **unverifiable**: the wizard's verify
+fails rather than guess what such a reader serves (the same for hysteria with an unreadable config).
 
 ## `vpn-bot-cert`
 
@@ -103,8 +107,10 @@ One file, `/etc/vpn-bot/dns_failover/cloudflare_token` (0600, owned by the bot's
 mode switches its names with it, the bot writes its DNS records with it, and `vpn-bot-cert` hands it
 to acme.sh for DNS-01 — as `CF_Token` in acme.sh's environment, never on a command line. Entered in
 the bot only («🔑 Токен Cloudflare», or the fallback mode's «🔑 DNS API token» — the same file, the
-same check): the message is **deleted** the moment it is read. Before it is stored the bot checks it
-through the API (`services/dns.py`):
+same check): the message is **deleted** the moment it is read. Its permissions: **«Zone · Zone ·
+Read»** and **«Zone · DNS · Edit»** on the zone — the bot and `vpn-bot-cert` find the zone by its name
+(`GET /zones?name=`, which needs Zone Read), so a token with DNS Edit alone is refused at step 2.
+Before it is stored the bot checks it through the API (`services/dns.py`):
 
 1. `GET /user/tokens/verify` — active;
 2. the zone of the names typed for «🆕 Выпустить» (else the certificate's name, else `HYSTERIA2_SNI`) is visible to it — on a fresh host with neither, the names are typed first;
