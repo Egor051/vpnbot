@@ -13,13 +13,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   module toggled); a mode switched on BEFORE v3.3.0 was installed — prod: on since 2026-11-18, hub he2 —
   never saw that event, so the hub never forwarded the port and «Прокси» kept handing out main's banned
   IPv4 with port 31337 while the mode was on. Now `FallbackService.reconcile_proxies` brings the hub's
-  proxy ports to what the mode wants at startup (right after `refresh_state()`, in the background), on
-  every pass of the fallback's health loop and when the «🛟 Режим фолбэка» screen opens: the mode on — a
+  proxy ports to what the mode wants at startup (right after `refresh_state()`), on every pass of the
+  fallback's health loop and when the «🛟 Режим фолбэка» screen opens — in the background, so an
+  agent's `apply` never holds the start, the health pass that decides the automatic switch, or the
+  screen (it waits 10 s at most): the mode on — a
   missing proxy port is added through the agent's `apply` (whose own check proves main:<port>), the
   proxy then shows the hub's IPv4 and «📣 Разослать» is offered; the mode off — a proxy port left on the
   hub is taken off. Only the proxy ports change: the hub's other TCP ports (443/2096 among them), its
-  UDP ports and its upstream are sent back exactly as they are, and a hub whose set lacks a VPN port is
-  not touched at all. A failed `apply` is not repeated more often than once an hour per port (the
+  UDP ports and its upstream are sent back exactly as they are, a hub whose set lacks a VPN port is
+  not touched at all (the button says why), and a live forward that differs from the bot's copy
+  (changed on the hub by hand) is not overwritten. A failed `apply` is not repeated more often than once an hour per port (the
   port the agent's check names waits, another proxy goes on the next pass); the superadmins get ONE
   message per (port, error), with the agent's error. «🔍 Проверить» now says ⚠️ «режим включён, но hub
   не форвардит SOCKS5:31337» (with the last error) and offers **«🔁 Довести прокси до hub»** (TOTP,

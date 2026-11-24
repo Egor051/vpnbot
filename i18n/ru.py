@@ -2315,6 +2315,8 @@ STRINGS: dict[str, str] = {
     "fb_proxy_reconcile_nothing": "✅ Прокси уже там, где их ждёт режим: на hub ничего менять не нужно.",
     "fb_proxy_reconcile_off": "Режим выключен — прокси идут напрямую на main, на hub их портов нет.",
     "fb_proxy_reconcile_no_hub": "Нет hub с агентом — доводить прокси некуда.",
+    "fb_proxy_reconcile_vpn_gap": "⚠️ Прокси не доведены: в TCP-наборе hub {name} ({have}) нет VPN-портов {missing} — без них бот набор не отправляет. Сначала «🔍 Проверить»: проброс hub.",
+    "fb_proxy_reconcile_busy": "Сейчас идёт переключение режима — прокси доведутся после него.",
     "fb_reconcile_failed_on": "⚠️ {proxy}: порт {port} на hub не применён ({error}) — пользователи пока получают адрес main; VPN-порты hub не тронуты.",
     "fb_reconcile_failed_off": "⚠️ {proxy}: порт {port} снять с hub не удалось ({error}); VPN-порты hub не тронуты.",
     "fb_reconcile_deferred": "⏳ {proxy}: порт {port} — прошлый apply на hub не прошёл ({error}); бот повторит позже сам, «🔁 Довести прокси до hub» — сразу.",

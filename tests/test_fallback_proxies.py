@@ -26,7 +26,7 @@ import pytest
 from test_fallback_mode import HUB, MAIN, ORIGIN, Fallback, _ready
 from test_relay import ADMIN
 
-from bot.fallback import preflight_text, proxy_notice_text, report_text
+from bot.fallback import preflight_text, proxy_notice_text, proxy_reconcile_text, report_text
 from bot.formatters import socks5_proxy_text
 from i18n import t
 from models.dto import ProxyAccess
@@ -461,6 +461,7 @@ async def test_the_mode_off_takes_a_left_over_proxy_port_off_and_keeps_every_oth
     await fb.relays_repo.update_agent_forward(
         hub.id, target_host=ORIGIN, tcp_ports=(443, 2096, 8080, SOCKS_PORT), udp_ports=(443,),
     )
+    fb.client.replies["status"] = fb.status_reply(tcp=[443, 2096, 8080, SOCKS_PORT])  # the live hub agrees
     await fb.service.refresh_state()
     result = await fb.service.reconcile_proxies()
     assert _applies(fb) == [f"apply target={ORIGIN} tcp=443,2096,8080 udp=443"], "only the proxy port goes"
@@ -477,25 +478,76 @@ async def test_the_reconcile_never_sends_a_set_without_the_vpn_ports(fb: Any) ->
     await fb.service.refresh_state()
     result = await fb.service.reconcile_proxies(ADMIN, force=True)
     assert not result.applied and _applies(fb) == [], "a hub without 2096 is the preflight's, not the reconcile's"
+    assert result.skipped == "vpn_gap" and not result.settled
+    text = proxy_reconcile_text(result)
+    assert t("fb_proxy_reconcile_vpn_gap", name="he1", have="443", missing="2096") == text
+    assert text != t("fb_proxy_reconcile_nothing"), "the button never says «nothing to change» then"
 
 
 async def test_the_reconcile_does_not_stand_behind_a_running_switch(fb: Any) -> None:
     await _mode_on_without_the_proxy(fb)
     async with fb.service._lock:  # a switch (DNS, DoH) is running
         result = await fb.service.reconcile_proxies(wait=False)
-    assert not result.applied and _applies(fb) == []
+    assert not result.applied and _applies(fb) == [] and result.skipped == "busy"
 
 
-async def test_the_health_loop_reconciles_on_every_pass(fb: Any) -> None:
+async def test_the_health_loop_reconciles_on_every_pass_without_waiting_for_the_agent(fb: Any) -> None:
+    import asyncio
+
     from services.fallback_auto import FallbackAutoSwitch
 
     await _mode_on_without_the_proxy(fb)
     auto = FallbackAutoSwitch(fb.service, clock=lambda: 0.0)
+    release = asyncio.Event()
+    call = fb.client.call
+
+    async def slow_hub(host: str, port: int, request: str, **kw: Any) -> AgentReply:
+        if request.startswith("apply"):
+            await release.wait()  # the agent's apply takes minutes (its timeout is 300 s)
+        return await call(host, port, request, **kw)
+
+    fb.client.call = slow_hub
+    await asyncio.wait_for(auto.observe([], {}), timeout=1.0)  # the pass's switch decision does not wait
+    task = fb.service._reconcile_task
+    assert task is not None and not task.done()
     await auto.observe([], {})
+    assert fb.service._reconcile_task is task, "one reconcile at a time"
+    release.set()
+    await task
     assert _applies(fb) == [f"apply target={ORIGIN} tcp=443,2096,{SOCKS_PORT} udp=443"]
     assert fb.endpoints.socks5().via_hub
     await auto.observe([], {})
+    await fb.service._reconcile_task
     assert len(_applies(fb)) == 1
+
+
+async def test_a_forward_changed_on_the_hub_by_hand_is_not_overwritten(fb: Any) -> None:
+    await _mode_on_without_the_proxy(fb)
+    alerts: list[Any] = []
+
+    async def alert(item: Any) -> None:
+        alerts.append(item)
+
+    fb.service.proxy_alert = alert
+    # The live hub forwards one more port than the bot's copy says (an edit on the relay).
+    fb.client.replies["status"] = fb.status_reply(tcp=[443, 2096, 9000])
+    result = await fb.service.reconcile_proxies()
+    assert _applies(fb) == [], "the live forward is not the bot's copy: nothing is overwritten"
+    [route] = result.routes
+    assert not route.ok and "not the bot's copy" in (route.error or "") and "9000" in (route.error or "")
+    assert len(alerts) == 1 and fb.endpoints.socks5().via_hub is False
+    # The live hub already forwards what the mode wants: the apply only syncs the copy.
+    fb.client.replies["status"] = fb.status_reply(tcp=[443, 2096, SOCKS_PORT])
+    synced = await fb.service.reconcile_proxies(ADMIN, force=True)
+    assert synced.settled and _applies(fb) == [f"apply target={ORIGIN} tcp=443,2096,{SOCKS_PORT} udp=443"]
+    # Another upstream on the hub: not overwritten either.
+    await fb.relays_repo.update_agent_forward(
+        (await fb.service.overview(ADMIN)).hub.id, target_host=ORIGIN, tcp_ports=(443, 2096), udp_ports=(443,),
+    )
+    await fb.service.refresh_state()
+    fb.client.replies["status"] = fb.status_reply(target="relay.example.net")
+    moved = await fb.service.reconcile_proxies(ADMIN, force=True)
+    assert len(_applies(fb)) == 1 and "relay.example.net" in (moved.routes[0].error or "")
 
 
 async def test_the_screen_reconciles_when_it_opens(fb: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -619,3 +671,35 @@ async def test_mtproto_off_shows_nothing_of_it_in_proxy_or_the_broadcast(fb: Any
     assert await fb.service.proxy_notice() == ("socks5",)
     notice = proxy_notice_text(await fb.service.proxy_notice(), fb.endpoints)
     assert "MTProto" not in notice and "t.me/proxy" not in notice
+
+
+async def test_the_screen_does_not_wait_for_a_slow_agent(fb: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from test_admin_fallback_ui import FakeCallback, _fsm
+
+    from bot.handlers import admin_fallback
+
+    async def yes(*_: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(admin_fallback, "ensure_private_callback", yes)
+    monkeypatch.setattr(admin_fallback, "_SCREEN_RECONCILE_WAIT", 0.05)
+    await _mode_on_without_the_proxy(fb)
+    release = asyncio.Event()
+    call = fb.client.call
+
+    async def slow_hub(host: str, port: int, request: str, **kw: Any) -> AgentReply:
+        if request.startswith("apply"):
+            await release.wait()
+        return await call(host, port, request, **kw)
+
+    fb.client.call = slow_hub
+    services = SimpleNamespace(fallback=fb.service, users=fb.service.users, totp=None, settings=fb.settings)
+    screen = FakeCallback("admin:fb")
+    await asyncio.wait_for(admin_fallback.fallback_panel(screen, _fsm(), services), timeout=2.0)  # type: ignore[arg-type]
+    assert t("fb_proxy_direct", proxy="SOCKS5", address=f"<code>{MAIN}:{SOCKS_PORT}</code>") in screen.message.edits[-1][0]
+    release.set()
+    await fb.service._reconcile_task
+    assert fb.endpoints.socks5().via_hub, "the reconcile went on after the screen was drawn"

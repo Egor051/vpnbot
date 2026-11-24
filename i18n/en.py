@@ -2304,6 +2304,8 @@ STRINGS: dict[str, str] = {
     "fb_proxy_reconcile_nothing": "✅ The proxies are where the mode wants them: nothing to change on the hub.",
     "fb_proxy_reconcile_off": "The mode is off — the proxies go straight to main, the hub has none of their ports.",
     "fb_proxy_reconcile_no_hub": "No hub with an agent — nowhere to bring the proxies.",
+    "fb_proxy_reconcile_vpn_gap": "⚠️ The proxies were not brought over: the TCP set of the hub {name} ({have}) lacks the VPN ports {missing} — the bot never sends a set without them. «🔍 Check» first: the hub's forward.",
+    "fb_proxy_reconcile_busy": "A switch of the mode is running — the proxies follow after it.",
     "fb_reconcile_failed_on": "⚠️ {proxy}: port {port} not applied on the hub ({error}) — users still get main's address; the hub's VPN ports untouched.",
     "fb_reconcile_failed_off": "⚠️ {proxy}: port {port} could not be taken off the hub ({error}); the hub's VPN ports untouched.",
     "fb_reconcile_deferred": "⏳ {proxy}: port {port} — the last apply on the hub failed ({error}); the bot retries later by itself, «🔁 Bring the proxies to the hub» — at once.",

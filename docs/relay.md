@@ -1492,16 +1492,21 @@ banned address for as long as the mode was on (prod, v3.3.0 installed after the 
 also brings the hub's proxy ports to what the mode wants whenever it looks —
 `FallbackService.reconcile_proxies`:
 
-- **when**: at startup (right after `refresh_state()`, in the background — the agent's `apply` never
-  holds the bot's start), on every pass of the fallback's health loop (the relay health loop's pass
-  listener, `FallbackAutoSwitch.observe`), when the «🛟 Режим фолбэка» screen opens, and with
-  «🔁 Довести прокси до hub»; never while a switch holds the lock (the loop does not wait for it);
+- **when**: at startup (right after `refresh_state()`), on every pass of the fallback's health loop
+  (the relay health loop's pass listener, `FallbackAutoSwitch.observe`), when the «🛟 Режим фолбэка»
+  screen opens, and with «🔁 Довести прокси до hub». All but the button run in the background, one at a
+  time: an agent's `apply` (up to its 300 s timeout) never holds the bot's start or the health pass
+  that decides the automatic switch, and the screen waits for it 10 s at most. A switch in progress is
+  waited for in the background, never interleaved;
 - **what**: the mode on and a proxying module on whose port the hub does not forward → the port is
   added (the same agent `apply`: its check proves main:<port> or rolls back), the proxy then shows the
   hub's IPv4 and «📣 Разослать» is offered; a proxy port the hub forwards that the mode does not want
   (the mode off, the module off) → taken off. Only the configured proxy ports are ever added or taken
   off: the rest of the hub's TCP set (443/2096 and anything else), its UDP set and its upstream are
-  sent back exactly as they are, and a hub whose set lacks a VPN port is left to the preflight;
+  sent back exactly as they are, and a hub whose set lacks a VPN port is left to the preflight (the
+  button says so). Before the `apply` the hub is asked for its live forward: one that is neither the
+  bot's copy nor already the wanted set (changed on the relay by hand, another upstream) is **not
+  overwritten** — a failure with that reason;
 - **a failure**: the port is not sent again for an hour (`RECONCILE_BACKOFF_SECONDS`; the button does
   not wait). When the agent's check names the port it could not reach, only that one waits — another
   proxy goes on the next pass without it. The superadmins get ONE message per (port, error), with the

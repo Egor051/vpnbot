@@ -248,6 +248,11 @@ class ProxyReconcile:
     deferred: tuple[ProxyRoute, ...] = ()
     # Ports that can never be forwarded: the hub's own SSH port.
     blocked: tuple[ProxyRoute, ...] = ()
+    # Why nothing was looked at: "" (it was), "no_hub" (no hub with an agent), "vpn_gap"
+    # (the hub's TCP set lacks a VPN port — never sent without them), "busy" (a switch
+    # held the lock and the caller did not wait). *detail*: the gap's params.
+    skipped: str = ""
+    detail: tuple[tuple[str, str], ...] = ()
 
     @property
     def applied(self) -> bool:
@@ -256,7 +261,8 @@ class ProxyReconcile:
     @property
     def settled(self) -> bool:
         """The hub's proxy ports are what the mode wants (or were made so now)."""
-        return all(route.ok for route in self.routes) and not self.deferred and not self.blocked
+        return (not self.skipped and all(route.ok for route in self.routes)
+                and not self.deferred and not self.blocked)
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,15 +585,17 @@ class FallbackService:
         if actor_user_id is not None:
             await self.users.require_superadmin(actor_user_id)
         if not wait and self._lock.locked():
-            return ProxyReconcile(mode_on=self._mode_on)
+            return ProxyReconcile(mode_on=self._mode_on, skipped="busy")
         async with self._lock:
             result = await self._reconcile_proxies(actor_user_id, force=force)
         await self._flush_proxy_alerts()
         return result
 
     def reconcile_in_background(self) -> asyncio.Task[ProxyReconcile]:
-        """:meth:`reconcile_proxies` without holding the caller (the bot's startup: the
-        agent's ``apply`` may take a while). One at a time; :meth:`shutdown` cancels it."""
+        """:meth:`reconcile_proxies` without holding the caller — the bot's startup, the
+        health loop (its pass decides the automatic switch and must not wait for an
+        agent's ``apply``, up to its 300 s timeout), the screen. One at a time: a call
+        while one runs gets that one. :meth:`shutdown` cancels it."""
         task = self._reconcile_task
         if task is None or task.done():
             task = asyncio.create_task(self.reconcile_proxies(), name="fallback-proxy-reconcile")
@@ -616,7 +624,7 @@ class FallbackService:
         mode_on = await self.repo.mode_on()
         hub = select_hub(await self.relays_repo.list_hubs())
         if hub is None or hub.agent is None or agent_uninstalled(hub.agent):
-            return ProxyReconcile(mode_on=mode_on)
+            return ProxyReconcile(mode_on=mode_on, skipped="no_hub")
         agent = hub.agent
         vpn_tcp, vpn_udp = self.hub_ports()
         if not set(vpn_tcp) <= set(agent.tcp_ports):
@@ -626,7 +634,10 @@ class FallbackService:
                 self._vpn_gap_logged = agent.tcp_ports
                 logger.warning("Fallback: the hub's TCP set %s lacks the VPN ports %s — proxies not reconciled",
                                format_ports(agent.tcp_ports), format_ports(vpn_tcp))
-            return ProxyReconcile(mode_on=mode_on)
+            missing = sorted(set(vpn_tcp) - set(agent.tcp_ports))
+            return ProxyReconcile(mode_on=mode_on, skipped="vpn_gap", detail=(
+                ("name", hub.name), ("have", format_ports(agent.tcp_ports) or "—"), ("missing", format_ports(missing)),
+            ))
         self._vpn_gap_logged = None
         universe = self._proxy_universe()
         wanted = {port: kind for kind, port in (await self.proxy_ports()).items()} if mode_on else {}
@@ -660,13 +671,19 @@ class FallbackService:
         error: str | None = None
         transient = False
         try:
-            await self.relays.change_forward(
-                actor_user_id, hub.id, target_host=agent.target_host, tcp=format_ports(tcp), udp=format_ports(udp),
-                allow_hub=True,
-            )
+            # The set above is built from the bot's copy of the hub's forward: the hub is
+            # asked first, and a live forward that is neither that copy nor already the
+            # wanted set (changed on the relay by hand) is not overwritten.
+            error = await self._live_forward_differs(hub, tcp)
+            if error is None:
+                await self.relays.change_forward(
+                    actor_user_id, hub.id, target_host=agent.target_host, tcp=format_ports(tcp),
+                    udp=format_ports(udp), allow_hub=True,
+                )
         except ServiceError as exc:
             error = str(exc.params.get("error") or exc)[:300]
             transient = exc.key in _TRANSIENT_KEYS
+        if error is not None:
             logger.warning("Fallback: the hub's proxy ports not reconciled (tcp %s): %s", format_ports(tcp), error)
         routes = tuple(
             ProxyRoute(kind, port, ok=error is None, via_hub=(port in to_add) == (error is None), error=error)
@@ -699,6 +716,25 @@ class FallbackService:
             relay_id=hub.id,
         )
         return ProxyReconcile(mode_on=mode_on, routes=routes, deferred=tuple(deferred), blocked=blocked)
+
+    async def _live_forward_differs(self, hub: Relay, tcp: tuple[int, ...]) -> str | None:
+        """None: the hub's live forward (its fresh ``status``) is the bot's copy — or
+        already *tcp* with the same UDP set and upstream; an agent whose status does not
+        carry the forward is trusted. Else why it is not overwritten. Raises the status
+        call's ServiceError (the hub does not answer: the apply would not either)."""
+        assert hub.agent is not None
+        agent = hub.agent
+        payload = (await self.relays.system_status(hub.id)).payload
+        live_tcp, live_udp = _ports_of(payload.get("tcp")), _ports_of(payload.get("udp"))
+        live_target = str(payload.get("target_host") or "").lower().rstrip(".")
+        same_udp = live_udp is None or set(live_udp) == set(agent.udp_ports)
+        same_target = not live_target or live_target == agent.target_host.lower().rstrip(".")
+        if live_tcp is None or (same_udp and same_target and set(live_tcp) in (set(agent.tcp_ports), set(tcp))):
+            return None
+        return (f"the hub's live forward (tcp={format_ports(live_tcp)} udp={format_ports(live_udp or ())} "
+                f"-> {live_target or '?'}) is not the bot's copy (tcp={format_ports(agent.tcp_ports)} "
+                f"udp={format_ports(agent.udp_ports)} -> {agent.target_host}): not overwritten — "
+                f"see «🔍 Проверить»")
 
     def _forget_proxy_failure(self, port: int) -> None:
         self._proxy_failed.pop(port, None)

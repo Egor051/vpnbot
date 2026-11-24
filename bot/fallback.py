@@ -128,9 +128,11 @@ def _route_line(route: ProxyRoute, target: str) -> str:
     return t("fb_route_on" if target == FAILOVER else "fb_route_off", **params)
 
 
-def proxy_reconcile_text(result: ProxyReconcile, *, hub: bool = True) -> str:
+def proxy_reconcile_text(result: ProxyReconcile) -> str:
     """What «🔁 Довести прокси до hub» did: each port sent and its outcome, each port still
-    waiting — or that there was nothing to do."""
+    waiting — why nothing was looked at — or that there was nothing to do."""
+    if result.skipped:
+        return t(f"fb_proxy_reconcile_{result.skipped}", **{key: h(value) for key, value in result.detail})
     target = FAILOVER if result.mode_on else "normal"
     side = "on" if result.mode_on else "off"
     lines: list[str] = []
@@ -145,8 +147,6 @@ def proxy_reconcile_text(result: ProxyReconcile, *, hub: bool = True) -> str:
                        error=h((route.error or "")[:200])))
     if lines:
         return "\n".join(lines)
-    if not hub:
-        return t("fb_proxy_reconcile_no_hub")
     return t("fb_proxy_reconcile_nothing") if result.mode_on else t("fb_proxy_reconcile_off")
 
 

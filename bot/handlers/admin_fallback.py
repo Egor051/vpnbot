@@ -16,6 +16,7 @@ never echoed back (services/fallback.py, adapters/cloudflare_dns.py).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import cast
 
@@ -71,6 +72,8 @@ from utils.formatting import code, h
 router = Router()
 logger = logging.getLogger(__name__)
 
+# How long opening the screen waits for the proxy reconcile it starts (seconds).
+_SCREEN_RECONCILE_WAIT = 10.0
 # Typed steps: state → (prompt key, what the service does with the text).
 _ADDRESS_STATES = {"main": AdminFallbackStates.main_ipv4, "hub": AdminFallbackStates.hub_ipv4}
 
@@ -177,10 +180,12 @@ async def fallback_panel(callback: CallbackQuery, state: FSMContext, services: S
 
 async def _reconcile_quietly(services: Services) -> None:
     """The screen opens with the hub's proxy ports where the mode wants them
-    (services/fallback.py, «RECONCILED»): the bot's own reconcile — its backoff holds,
-    a running switch is not waited for, and nothing it says stops the screen."""
+    (services/fallback.py, «RECONCILED»): the bot's own reconcile, in the background —
+    its backoff holds, and the screen waits for it at most :data:`_SCREEN_RECONCILE_WAIT`
+    seconds (an agent's apply may take minutes; it goes on, the screen does not wait)."""
     try:
-        await _service(services).reconcile_proxies(wait=False)
+        task = _service(services).reconcile_in_background()
+        await asyncio.wait({task}, timeout=_SCREEN_RECONCILE_WAIT)
     except Exception:
         logger.warning("Fallback: the proxy reconcile on the screen failed", exc_info=True)
 
@@ -331,9 +336,7 @@ async def fallback_proxy_reconcile(callback: CallbackQuery, state: FSMContext, s
         await safe_callback_answer(callback, t("fb_proxy_reconcile_running"))
         fallback = _service(services)
         result = await fallback.reconcile_proxies(callback.from_user.id, force=True)
-        overview = await fallback.overview(callback.from_user.id)
-        hub = overview.hub is not None and overview.hub.agent is not None
-        await _show(callback, services, proxy_reconcile_text(result, hub=hub))
+        await _show(callback, services, proxy_reconcile_text(result))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
