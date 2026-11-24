@@ -72,6 +72,8 @@ DANGEROUS_ACTIONS: dict[str, str] = {
     "relay_sshd_override": "dangerous_relay_sshd_override",
     # «📣 Разослать новую ссылку прокси» (bot/handlers/admin_fallback.py): a broadcast to proxy users.
     "fallback_proxy_notice": "dangerous_fallback_proxy_notice",
+    # «🔁 Довести прокси до hub» (bot/handlers/admin_fallback.py): the agent's apply on the hub.
+    "fallback_proxy_reconcile": "dangerous_fallback_proxy_reconcile",
     # The fallback mode (bot/handlers/admin_fallback.py): the switch itself, the hub
     # role, the DNS API token and the settings the switch writes.
     "fallback_switch": "dangerous_fallback_switch",

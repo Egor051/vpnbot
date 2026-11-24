@@ -260,6 +260,13 @@ async def main() -> None:
                 await bundle_reconcile_runner.shutdown()
             except Exception:
                 logger.warning("All-in-One bulk reconcile shutdown failed", exc_info=True)
+            # The startup reconcile of the hub's proxy ports, if it is still running.
+            fallback = getattr(services, "fallback", None)
+            if fallback is not None:
+                try:
+                    await fallback.shutdown()
+                except Exception:
+                    logger.warning("Fallback proxy reconcile shutdown failed", exc_info=True)
             if fsm_cleanup_task is not None:
                 fsm_cleanup_task.cancel()
                 await asyncio.gather(fsm_cleanup_task, return_exceptions=True)
