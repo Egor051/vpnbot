@@ -223,3 +223,18 @@ def test_adopt_takes_the_domain_the_screen_picked_among_several(host: WizardCert
     assert host.outcome(12) == "succeeded"
     assert host.conf()["Le_ReloadCmd"] == b64(RELOAD)
     assert host.conf(f"old.{DOMAIN}")["Le_ReloadCmd"] == b64("systemctl restart hysteria-server")
+
+
+def test_verify_fails_when_a_reader_is_configured_to_read_another_pair(host: WizardCertHost) -> None:
+    """hysteria restarted on the registry's files but configured to read another path
+    would go on serving that one: the run is not a success — it is rolled back."""
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64("systemctl restart hysteria-server")})
+    host.lay_out(chain, key)
+    host.write("/etc/hysteria/config.yaml", "tls:\n  cert: /etc/letsencrypt/live/x/fullchain.pem\n"
+                                            "  key: /etc/letsencrypt/live/x/privkey.pem\n")
+    assert host.wizard(13, "plan", action="adopt").returncode == 0
+    assert host.wizard(13, "execute", action="adopt").returncode == 1
+    assert host.outcome(13) == "rolled_back"
+    result = [e for e in host.events(13) if e["event"] == "result"][-1]
+    assert "does not read the registry's files" in result["text"]
+    assert host.conf()["Le_ReloadCmd"] == b64("systemctl restart hysteria-server")

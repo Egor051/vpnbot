@@ -26,7 +26,8 @@ back as the plan found it. Parameter `action`:
             already rolled back by the helper itself — the run still fails, so the host goes
             back entirely
   verify    vpn-bot-cert status: the domain is the bot's, its reloadcmd, its pair is valid
-            for 7+ days and covers the names, every installed reader holds it and took it
+            for 7+ days and covers the names, every installed reader holds it, took it and
+            is configured to read the registry's files (not a pair of its own)
   rollback  the backup restored (a domain the run created is moved aside so acme.sh does
             not renew it), then every installed reader acted on again (vpn-bot-cert act)
 
@@ -369,6 +370,9 @@ def step_verify(ctx: Any) -> int:
         if plan["action"] in ("issue", "renew") and plan.get("pair_sha") and dom.get("pair_sha") == plan["pair_sha"]:
             bad.append("acme.sh's pair is still the old one")
     for c in readers(st):
+        if c.get("reads_registry") is False:
+            # Restarted on the registry's files, but configured to serve another pair.
+            bad.append(f"{c['name']}: it does not read the registry's files ({c.get('reads')})")
         if c.get("in_sync") is not True:
             bad.append(f"{c['name']}: its files are not acme.sh's current pair")
         elif c.get("took_current") is False:

@@ -563,3 +563,58 @@ def test_issue_renew_and_adopt_wait_for_an_acme_cron_run(host: CertHost) -> None
     host.file("/proc/4242/cmdline").unlink()
     host.next_pair([DOMAIN])
     assert host.cert("renew", "--force").returncode == 0
+
+
+def test_acme_cron_holds_off_the_domain_while_the_helper_works_on_it(host: CertHost) -> None:
+    """acme.sh --cron renews only a domain whose Le_NextRenewTime has passed: while the
+    helper's own acme.sh runs, the domain's is an hour ahead — a cron run that starts then
+    skips it —, and afterwards it is acme.sh's new value, or the old one put back."""
+    import time
+
+    old_due = str(int(time.time()) - 100)  # due NOW: exactly when cron would race
+    chain, key = host.acme_domain(conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "",
+                                        "Le_ReloadCmd": b64(RELOAD), "Le_NextRenewTime": old_due})
+    host.lay_out(chain, key)
+    host.token()
+    host.next_pair([DOMAIN])
+    assert host.cert("renew", "--force", "--zone", ZONE).returncode == 0
+    during = next(e for e in host.acme_log() if e.get("renew"))
+    assert int(during["next_renew_at_call"]) >= int(time.time()) + 3000
+    after = int(host.conf()["Le_NextRenewTime"])
+    assert after > int(time.time()) + 50 * 86400, "acme.sh's own new value is kept"
+    # A renewal that fails puts the old value back (cron renews it as before).
+    conf = host.file("/root/.acme.sh/example.net_ecc/example.net.conf")
+    conf.write_text(conf.read_text(encoding="utf-8").replace(f"Le_NextRenewTime='{after}'",
+                                                             f"Le_NextRenewTime='{old_due}'"), encoding="utf-8")
+    host.flag("acme-fail")
+    assert host.cert("renew", "--force").returncode == 5
+    assert host.conf()["Le_NextRenewTime"] == old_due
+
+
+def test_adoption_holds_cron_off_and_puts_the_time_back(host: CertHost) -> None:
+    import time
+
+    old_due = str(int(time.time()) - 5)
+    chain, key = host.acme_domain(conf={"Le_NextRenewTime": old_due})
+    host.lay_out(chain, key)
+    assert host.cert("adopt").returncode == 0
+    during = next(e for e in host.acme_log() if e.get("install_cert"))
+    assert int(during["next_renew_at_call"]) >= int(time.time()) + 3000
+    assert host.conf()["Le_NextRenewTime"] == old_due
+
+
+def test_nginx_with_another_vhost_still_reads_the_registry(host: CertHost) -> None:
+    """Another vhost with a certificate of its own is a finding (reads_ok false), not a
+    reader that misses the registry's pair (reads_registry stays true)."""
+    adopted_host(host)
+    host.write("/etc/nginx/conf.d/decoy.conf", "ssl_certificate /etc/vpn-bot/tls/fullchain.pem;\n"
+                                               "ssl_certificate_key /etc/vpn-bot/tls/privkey.pem;\n")
+    host.write("/etc/nginx/conf.d/other.conf", "ssl_certificate /srv/other/fullchain.pem;\n"
+                                               "ssl_certificate_key /srv/other/privkey.pem;\n")
+    _, st = host.json("status")
+    nginx = next(c for c in st["consumers"] if c["name"] == "nginx")
+    assert nginx["reads_ok"] is False and nginx["reads_registry"] is True
+    host.write("/etc/nginx/conf.d/decoy.conf", "ssl_certificate /srv/other/fullchain.pem;\n")
+    _, st = host.json("status")
+    nginx = next(c for c in st["consumers"] if c["name"] == "nginx")
+    assert nginx["reads_registry"] is False

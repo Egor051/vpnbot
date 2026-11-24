@@ -75,9 +75,11 @@ VERBS
       written. The wizard's rollback runs it after it restored a backup, so every reader
       runs the restored pair again.
 
-acme.sh takes no lock, and its cron does not take this helper's: issue / renew / adopt wait
-(up to 5 minutes, then refuse) while another acme.sh process runs — a cron renewal —, and a
-cron renewal's own `deploy` waits for this helper's lock.
+acme.sh takes no lock, and its cron does not take this helper's. While the helper's own
+acme.sh works on a domain (issue / renew / adopt) that domain's Le_NextRenewTime is pushed an
+hour ahead — `acme.sh --cron` skips a domain that is not due — and put back afterwards unless
+acme.sh wrote a new one; THEN the helper waits (up to 5 minutes, then refuses) for an acme.sh
+already running. A cron renewal's own `deploy` waits for this helper's lock.
 
 Exit codes: 0 ok; 1 a consumer failed and its group was rolled back; 2 usage; 3 refused
 (nothing to adopt, no token, a bad pair, another domain); 5 cannot (a tool or a file).
@@ -106,7 +108,7 @@ import sys
 import tempfile
 import time
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -142,6 +144,10 @@ LOCK_WAIT = 900
 # take ours: before issue / renew / adopt run acme.sh, another acme.sh process — a cron
 # renewal — is waited for (then refused), so the two never change one domain together.
 ACME_BUSY_WAIT = float(os.environ.get("VPN_BOT_CERT_SELFTEST_ACME_WAIT", "0")) if SELFTEST else 300.0
+# … and a cron run that starts AFTER that wait must leave the domain alone: acme.sh --cron
+# renews a domain only once its Le_NextRenewTime has passed, so the helper pushes it this
+# far ahead while its own acme.sh works on the domain (cron_held_off).
+CRON_HOLD_SECONDS = 3600
 SETTLE_SECONDS = float(os.environ.get("VPN_BOT_CERT_SELFTEST_SETTLE", "0")) if SELFTEST else 2.0
 MAX_PEM_BYTES = 1 << 20
 MAX_NAMES = 10
@@ -878,26 +884,29 @@ def group_files(group: Sequence[Consumer]) -> list[tuple[FileSpec, Consumer]]:
     return list(seen.values())
 
 
-def reads(ctx: Ctx, c: Consumer) -> tuple[bool | None, str]:
-    """What the consumer is configured to read, against the registry (None: unknown)."""
+def reads(ctx: Ctx, c: Consumer) -> tuple[bool | None, str, bool | None]:
+    """What the consumer is configured to read, against the registry: (it reads only
+    what the registry lays out, the detail, it reads the registry's pair at all). None:
+    unknown. The two differ for nginx only — another vhost with a certificate of its
+    own is a finding, not a reader that misses the registry's pair."""
     want = {f.source: f.path for f in c.files}
     if c.name == "hysteria":
         text = read_text(ctx.host(HYSTERIA_CONFIG))
         if text is None:
-            return None, f"{HYSTERIA_CONFIG} is not readable"
+            return None, f"{HYSTERIA_CONFIG} is not readable", None
         cert = re.search(r"^\s*cert:\s*['\"]?([^'\"\s#]+)", text, re.MULTILINE)
         key = re.search(r"^\s*key:\s*['\"]?([^'\"\s#]+)", text, re.MULTILINE)
         got = {"fullchain": cert.group(1) if cert else "", "key": key.group(1) if key else ""}
         if re.search(r"^\s*acme:", text, re.MULTILINE) and not (cert and key):
-            return False, "hysteria issues its own certificate (acme: in its config) — not this registry's"
+            return False, "hysteria issues its own certificate (acme: in its config) — not this registry's", False
         ok = got == want
-        return ok, f"tls.cert={got['fullchain'] or '—'} tls.key={got['key'] or '—'}"
+        return ok, f"tls.cert={got['fullchain'] or '—'} tls.key={got['key'] or '—'}", ok
     if c.name == "subscription":
         cert, key = ctx.env("SUBSCRIPTION_TLS_CERT"), ctx.env("SUBSCRIPTION_TLS_KEY")
         if not cert and not key:
-            return None, "SUBSCRIPTION_TLS_CERT/KEY are not set (no public TLS port)"
+            return None, "SUBSCRIPTION_TLS_CERT/KEY are not set (no public TLS port)", None
         ok = cert == want["fullchain"] and key == want["key"]
-        return ok, f"SUBSCRIPTION_TLS_CERT={cert or '—'} SUBSCRIPTION_TLS_KEY={key or '—'}"
+        return ok, f"SUBSCRIPTION_TLS_CERT={cert or '—'} SUBSCRIPTION_TLS_KEY={key or '—'}", ok
     if c.name == "nginx":
         texts: list[str] = [read_text(ctx.host(NGINX_CONF)) or ""]
         nginx_root = os.path.realpath(ctx.host("/etc/nginx"))
@@ -913,12 +922,13 @@ def reads(ctx: Ctx, c: Consumer) -> tuple[bool | None, str]:
                     texts.append(read_text(Path(real)) or "")
         used = sorted({m.group(1) for t in texts for m in re.finditer(r"^\s*ssl_certificate(?:_key)?\s+([^;\s]+)\s*;", t, re.MULTILINE)})
         if not used:
-            return None, "no ssl_certificate in the nginx config"
+            return None, "no ssl_certificate in the nginx config", None
+        registry = set(want.values()) <= set(used)
         foreign = [p for p in used if p not in want.values() and not p.startswith("/etc/ssl/")]
         if foreign:
-            return False, "nginx also reads " + ", ".join(foreign) + " — not laid out by vpn-bot-cert"
-        return True, "ssl_certificate " + ", ".join(used)
-    return None, ""
+            return False, "nginx also reads " + ", ".join(foreign) + " — not laid out by vpn-bot-cert", registry
+        return True, "ssl_certificate " + ", ".join(used), registry
+    return None, "", None
 
 
 # --------------------------------------------------------------------------- #
@@ -1056,11 +1066,11 @@ def status(ctx: Ctx) -> dict[str, Any]:
         ok, why = installed(ctx, c)
         files = [file_status(ctx, f, c, src) for f in c.files] if ok else []
         in_sync = None if not ok or src is None else all(f["same"] for f in files)
-        reads_ok, reads_detail = reads(ctx, c) if ok else (None, "")
+        reads_ok, reads_detail, reads_registry = reads(ctx, c) if ok else (None, "", None)
         deployed = taken.get(c.name, {}).get("sha") if isinstance(taken.get(c.name), dict) else None
         consumers.append({
             "name": c.name, "unit": c.unit, "action": c.action, "installed": ok, "why": why, "files": files,
-            "in_sync": in_sync, "reads_ok": reads_ok, "reads": reads_detail,
+            "in_sync": in_sync, "reads_ok": reads_ok, "reads": reads_detail, "reads_registry": reads_registry,
             "took_current": None if src is None or deployed is None else deployed == src.pair_sha,
         })
     report: dict[str, Any] = {
@@ -1462,6 +1472,35 @@ def wait_for_acme(ctx: Ctx, log: list[str]) -> None:
         time.sleep(2)
 
 
+@contextlib.contextmanager
+def cron_held_off(ctx: Ctx, domain: AcmeDomain | None, log: list[str]) -> Iterator[None]:
+    """While the helper's acme.sh works on *domain*, `acme.sh --cron` skips it: its
+    Le_NextRenewTime is pushed CRON_HOLD_SECONDS ahead (never pulled earlier), and put back
+    afterwards unless acme.sh wrote a new one (a renewal that went through). The wait for
+    an acme.sh already running comes AFTER this, inside it — the two together leave no
+    moment in which a cron run can take the domain."""
+    if domain is None or not domain.conf_path.is_file():
+        yield
+        return
+    old = parse_conf(read_text(domain.conf_path) or "").get("Le_NextRenewTime", "")
+    hold = int(time.time()) + CRON_HOLD_SECONDS
+    try:
+        due = int(old)
+    except ValueError:
+        due = 0
+    if due >= hold:
+        yield
+        return
+    conf_set(ctx, domain.conf_path, {"Le_NextRenewTime": str(hold)})
+    log.append(f"{domain.name}: acme.sh --cron holds off it until the helper is done")
+    try:
+        yield
+    finally:
+        now_value = parse_conf(read_text(domain.conf_path) or "").get("Le_NextRenewTime", "")
+        if now_value == str(hold):
+            conf_set(ctx, domain.conf_path, {"Le_NextRenewTime": old})
+
+
 def acme_argv(ctx: Ctx, *args: str) -> list[str]:
     home = str(ctx.host(ACME_HOME))
     return [f"{home}/{ACME_ENTRY}", "--home", home, "--config-home", home, *args]
@@ -1586,8 +1625,8 @@ def issue(ctx: Ctx, raw_names: str, zone: str) -> dict[str, Any]:
     lock = Lock(ctx)
     lock.acquire(LOCK_WAIT)
     try:
-        wait_for_acme(ctx, log)
         if not acme_installed(ctx):
+            wait_for_acme(ctx, log)
             install_acme(ctx, log)
         domains = load_domains(ctx)
         ours = adopted(domains)
@@ -1610,16 +1649,19 @@ def issue(ctx: Ctx, raw_names: str, zone: str) -> dict[str, Any]:
         args = ["--issue", "--dns", "dns_cf", "--server", CA_SERVER, "--keylength", keylength, "--force", "-d", main]
         for alt in alts:
             args += ["-d", alt]
-        rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT,
-                      env={"CF_Token": token, "CF_Zone_ID": zone_id(ctx, token, zone), NESTED_ENV: lock.token()})
-        log.append(f"acme.sh --issue -d {' -d '.join([main, *alts])} --keylength {keylength}: exit {rc}")
-        if rc != 0:
-            raise Cannot(f"acme.sh --issue failed (exit {rc}): {out.strip()[-600:]}")
+        zid = zone_id(ctx, token, zone)
         ecc = keylength.startswith("ec")
-        domain = next((d for d in load_domains(ctx) if d.name.lower() == main and d.ecc == ecc), None)
-        if domain is None:
-            raise Cannot(f"acme.sh issued {main} but its directory is not there")
-        domain = install_cert(ctx, domain, lock, log)
+        with cron_held_off(ctx, current, log):
+            wait_for_acme(ctx, log)
+            rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT,
+                          env={"CF_Token": token, "CF_Zone_ID": zid, NESTED_ENV: lock.token()})
+            log.append(f"acme.sh --issue -d {' -d '.join([main, *alts])} --keylength {keylength}: exit {rc}")
+            if rc != 0:
+                raise Cannot(f"acme.sh --issue failed (exit {rc}): {out.strip()[-600:]}")
+            domain = next((d for d in load_domains(ctx) if d.name.lower() == main and d.ecc == ecc), None)
+            if domain is None:
+                raise Cannot(f"acme.sh issued {main} but its directory is not there")
+            domain = install_cert(ctx, domain, lock, log)
         report = deploy(ctx, domain)
     finally:
         lock.release()
@@ -1636,28 +1678,31 @@ def renew(ctx: Ctx, zone: str | None) -> dict[str, Any]:
     lock = Lock(ctx)
     lock.acquire(LOCK_WAIT)
     try:
-        wait_for_acme(ctx, log)
         domain = bot_domain(ctx, load_domains(ctx))
         try:
             token = read_bot_token(ctx)
         except Refused as exc:
             token = None
             log.append(f"renewing with acme.sh's own saved credential: {exc}")
+        updates: dict[str, str] = {}
         if token is not None:
-            updates = {"CF_Token": token}
+            updates["CF_Token"] = token
             if zone:
-                if not all(n == zone or n.endswith("." + zone) for n in domain.names):
+                if not all(n.removeprefix("*.") == zone or n.endswith("." + zone) for n in domain.names):
                     raise Refused(f"{domain.name}: not in the zone {zone}")
                 updates["CF_Zone_ID"] = zone_id(ctx, token, zone)
-            conf_set(ctx, domain.conf_path, updates)
-            log.append(f"{domain.name}: acme.sh renews with the bot's token ({fingerprint(token)}) from now on")
         args = ["--renew", "-d", domain.name, "--force"]
         if domain.ecc:
             args.append("--ecc")
-        rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT, env={NESTED_ENV: lock.token()})
-        log.append(f"acme.sh --renew -d {domain.name} --force: exit {rc}")
-        if rc != 0:
-            raise Cannot(f"acme.sh --renew failed (exit {rc}): {out.strip()[-600:]}")
+        with cron_held_off(ctx, domain, log):
+            wait_for_acme(ctx, log)
+            if updates and token is not None:
+                conf_set(ctx, domain.conf_path, updates)
+                log.append(f"{domain.name}: acme.sh renews with the bot's token ({fingerprint(token)}) from now on")
+            rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT, env={NESTED_ENV: lock.token()})
+            log.append(f"acme.sh --renew -d {domain.name} --force: exit {rc}")
+            if rc != 0:
+                raise Cannot(f"acme.sh --renew failed (exit {rc}): {out.strip()[-600:]}")
         fresh = next((d for d in load_domains(ctx) if d.dir == domain.dir), domain)
         report = deploy(ctx, fresh)
     finally:
@@ -1703,8 +1748,9 @@ def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool) -> dict[str, Any]:
     lock = Lock(ctx)
     lock.acquire(LOCK_WAIT)
     try:
-        wait_for_acme(ctx, log)
-        fresh = install_cert(ctx, domain, lock, log)
+        with cron_held_off(ctx, domain, log):
+            wait_for_acme(ctx, log)
+            fresh = install_cert(ctx, domain, lock, log)
         report = deploy(ctx, fresh)
     finally:
         lock.release()

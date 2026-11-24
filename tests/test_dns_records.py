@@ -251,3 +251,18 @@ async def test_a_token_change_waits_for_a_running_switch(world: Fallback) -> Non
         assert not task.done() and world.token_file.load() == TOKEN
     await task
     assert world.token_file.load() == OTHER
+
+
+async def test_delete_removes_only_the_record_the_bot_wrote(world: Fallback) -> None:
+    """Another A record of the name — even with the same address — is not the bot's."""
+    written = await world.dns_service.upsert_a(ADMIN, "created.example.net", MAIN, purpose="host")
+    assert written.record is not None and written.record.record_id
+    other = world.cf.add("created.example.net", MAIN)
+    assert await world.dns_service.delete_a(ADMIN, "created.example.net") is True
+    assert [r["id"] for r in world.cf.a("created.example.net")] == [other]
+    # Replaced out of band (the saved id is gone): nothing is deleted at Cloudflare.
+    await world.records_repo.save("gone.example.net", purpose="host", content=MAIN, zone_id="z1",
+                                  record_id="r-gone", adopted=False, now="now", actor=ADMIN)
+    stranger = world.cf.add("gone.example.net", MAIN)
+    assert await world.dns_service.delete_a(ADMIN, "gone.example.net") is False
+    assert [r["id"] for r in world.cf.a("gone.example.net")] == [stranger]

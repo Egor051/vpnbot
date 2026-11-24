@@ -282,9 +282,9 @@ class DnsService:
         return RecordWrite(name=target, content=record.content, change=change, record=saved)
 
     async def delete_a(self, actor_user_id: int, name: str) -> bool:
-        """Delete an owned record at Cloudflare — only one the bot created; an adopted one
-        only loses its ownership. A name the bot does not own is refused. True when
-        Cloudflare's record was deleted."""
+        """Delete an owned record at Cloudflare — only one the bot created, by its saved id;
+        an adopted one only loses its ownership. A name the bot does not own is refused.
+        True when Cloudflare's record was deleted."""
         await self.users.require_superadmin(actor_user_id)
         target = _name(name)
         owned = await self.repo.get(target)
@@ -294,11 +294,14 @@ class DnsService:
         if not owned.adopted:
             zone = await self.zone(target)
             try:
+                # Only THE record the bot wrote (its saved id), and only while it still holds
+                # what the bot wrote: another A record of the name — even with the same
+                # address — is not the bot's.
                 records = await self.dns.records(zone.id, target, "A")
-                for record in records:
-                    if owned.content is None or record.content == owned.content:
-                        await self.dns.delete_record(zone.id, record.id)
-                        deleted = True
+                mine = next((r for r in records if owned.record_id and r.id == owned.record_id), None)
+                if mine is not None and (owned.content is None or mine.content == owned.content):
+                    await self.dns.delete_record(zone.id, mine.id)
+                    deleted = True
             except DnsApiError as exc:
                 await self.repo.record_error(target, str(exc), now=self.clock.now())
                 raise InvalidOperation(str(exc), key="dns_err_api", params={"error": str(exc)}) from None

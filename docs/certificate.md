@@ -78,10 +78,13 @@ days), the daily self-check alerts, and «📦 Разложить заново»
 again.
 
 acme.sh takes no lock of its own, and its cron (`acme.sh --cron` in root's crontab) does not take
-`vpn-bot-cert`'s: `issue` / `renew` / `adopt` wait — up to 5 minutes, then refuse — while another
-acme.sh process runs, and a cron renewal's `deploy` waits for the helper's lock. (A cron run that
-starts in the minute or two the helper's own acme.sh runs is not caught: the cron line itself is
-the host's and is not rewritten.)
+`vpn-bot-cert`'s. So while the helper's own acme.sh works on a domain (`issue` / `renew` /
+`adopt`), that domain's `Le_NextRenewTime` is pushed an hour ahead — `acme.sh --cron` renews only
+a domain that is due, so a cron run that starts meanwhile skips it — and put back afterwards
+unless acme.sh wrote a new one. Then the helper waits (up to 5 minutes, then refuses) for an
+acme.sh that was already running. Together: no moment in which cron and the helper change one
+domain at once, and root's crontab is never rewritten. A cron renewal's own `deploy` waits for
+the helper's lock.
 
 When acme.sh runs the reloadcmd from inside `issue` / `renew` / `adopt` (the environment variable
 `VPN_BOT_CERT_NESTED` names the lock the parent holds), `deploy` defers: the parent deploys right
@@ -153,7 +156,8 @@ lines before → after, the certificate before → after, each reader and what h
 «✅ Применить», then apply (a backup of the acme.sh domain directory, every reader's files and the
 state, then the helper) → verify (`vpn-bot-cert status`: the domain is the bot's, reloadcmd ours,
 no file targets, the pair valid for 7+ days and covering the names, every installed reader holds the
-pair and took it; for issue / renew a NEW pair) → rollback on a failure (the backup restored — a
+pair, took it and is configured to read the registry's files — not a pair of its own; for issue /
+renew a NEW pair) → rollback on a failure (the backup restored — a
 domain the run created is moved aside so acme.sh does not renew it —, then `vpn-bot-cert act`). One
 global lock (the wizard's), the audit log (`wizard_*`, `dns_*`). No step changes the host's network:
 no dead-man.

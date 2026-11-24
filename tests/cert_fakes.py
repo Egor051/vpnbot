@@ -90,6 +90,17 @@ def take_next(d, ecc):
     shutil.copy(sd / "next" / "fullchain.cer", ddir / "fullchain.cer")
     shutil.copy(sd / "next" / "key", ddir / f"{d}.key")
 
+def log_next(d, ecc, what):
+    path = conf_path(d, ecc)
+    if path.exists():
+        with open(sd / "acme.log", "a") as fh:
+            fh.write(json.dumps({what: d, "next_renew_at_call": read_conf(path).get("Le_NextRenewTime")}) + "\n")
+
+def renewed(d, ecc):
+    # acme.sh writes the next renewal time after a certificate was issued.
+    import time
+    save(conf_path(d, ecc), "Le_NextRenewTime", str(int(time.time()) + 60 * 86400))
+
 if "--set-default-ca" in argv:
     sys.exit(0)
 if "--install-cert" in argv:
@@ -97,6 +108,7 @@ if "--install-cert" in argv:
     path = conf_path(d, ecc)
     if not path.exists():
         print("not a cert name"); sys.exit(1)
+    log_next(d, ecc, "install_cert")
     for key, flag in (("Le_RealCertPath", "--cert-file"), ("Le_RealCACertPath", "--ca-file"),
                       ("Le_RealKeyPath", "--key-file"), ("Le_RealFullChainPath", "--fullchain-file")):
         save(path, key, opt(flag, ""))
@@ -106,6 +118,7 @@ if "--install-cert" in argv:
 if "--issue" in argv:
     d = domains[0]
     ecc = opt("--keylength", "ec-256").startswith("ec")
+    log_next(d, ecc, "issue")
     take_next(d, ecc)
     path = conf_path(d, ecc)
     save(path, "Le_Domain", d)
@@ -115,6 +128,7 @@ if "--issue" in argv:
     if os.environ.get("CF_Token") and os.environ.get("CF_Zone_ID"):
         save(path, "CF_Token", os.environ["CF_Token"])
         save(path, "CF_Zone_ID", os.environ["CF_Zone_ID"])
+    renewed(d, ecc)
     sys.exit(0)
 if "--renew" in argv:
     d, ecc = domains[0], "--ecc" in argv
@@ -124,7 +138,9 @@ if "--renew" in argv:
         t = conf.get("CF_Token", "")
         fh.write(json.dumps({"renew_with_conf_token_fp": hashlib.sha256(t.encode()).hexdigest()[:8] if t else None,
                              "renew_zone": conf.get("CF_Zone_ID")}) + "\n")
+    log_next(d, ecc, "renew")
     take_next(d, ecc)
+    renewed(d, ecc)
     sys.exit(0 if reload(d, ecc, decode(conf.get("Le_ReloadCmd", ""))) == 0 else 1)
 print("fake acme.sh: unsupported", argv); sys.exit(2)
 '''
