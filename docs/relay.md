@@ -1496,8 +1496,10 @@ also brings the hub's proxy ports to what the mode wants whenever it looks —
   (the relay health loop's pass listener, `FallbackAutoSwitch.observe`), when the «🛟 Режим фолбэка»
   screen opens, and with «🔁 Довести прокси до hub». All but the button run in the background, one at a
   time: an agent's `apply` (up to its 300 s timeout) never holds the bot's start or the health pass
-  that decides the automatic switch, and the screen waits for it 10 s at most. A switch in progress is
-  waited for in the background, never interleaved;
+  that decides the automatic switch, and the screen waits for it 10 s at most. The switch's lock is
+  held only to plan and to record — never across the agent calls — so a switch (the automatic one
+  above all) never waits behind a reconcile; a plan the switch made stale is not sent, and one that
+  went out while the mode flipped is planned again at once;
 - **what**: the mode on and a proxying module on whose port the hub does not forward → the port is
   added (the same agent `apply`: its check proves main:<port> or rolls back), the proxy then shows the
   hub's IPv4 and «📣 Разослать» is offered; a proxy port the hub forwards that the mode does not want
@@ -1511,7 +1513,8 @@ also brings the hub's proxy ports to what the mode wants whenever it looks —
   not wait). When the agent's check names the port it could not reach, only that one waits — another
   proxy goes on the next pass without it. The superadmins get ONE message per (port, error), with the
   agent's own error and a button to the screen; an alert raised before the bot is up is delivered on
-  the next pass. A «relay busy» refusal is neither backed off nor told.
+  the next pass. Nothing sent is no failure: the hub not answering its `status`, a «relay busy»
+  refusal, a stale plan — neither backed off nor told, the next pass asks again.
 
 Never fix it by switching the SOCKS5 module off and on: `disable_protocol` deletes every SOCKS5 access.
 

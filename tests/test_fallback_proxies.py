@@ -703,3 +703,60 @@ async def test_the_screen_does_not_wait_for_a_slow_agent(fb: Any, monkeypatch: p
     release.set()
     await fb.service._reconcile_task
     assert fb.endpoints.socks5().via_hub, "the reconcile went on after the screen was drawn"
+
+
+async def test_a_switch_does_not_wait_behind_a_slow_reconcile_and_a_stale_plan_is_redone(fb: Any) -> None:
+    import asyncio
+
+    hub = await _ready(fb)
+    # The mode off with SOCKS5_PORT left on the hub: the reconcile takes it off — slowly.
+    await fb.relays_repo.update_agent_forward(
+        hub.id, target_host=ORIGIN, tcp_ports=(443, 2096, SOCKS_PORT), udp_ports=(443,),
+    )
+    fb.client.replies["status"] = fb.status_reply(tcp=[443, 2096, SOCKS_PORT])
+    await fb.service.refresh_state()
+    started, release = asyncio.Event(), asyncio.Event()
+    call = fb.client.call
+
+    async def slow_hub(host: str, port: int, request: str, **kw: Any) -> AgentReply:
+        if request.startswith("apply") and not release.is_set():
+            started.set()
+            await release.wait()  # the agent's apply takes minutes (its timeout is 300 s)
+        return await call(host, port, request, **kw)
+
+    fb.client.call = slow_hub
+    task = fb.service.reconcile_in_background()
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    assert not fb.service._lock.locked(), "the agent call is made without the switch's lock"
+    report = await asyncio.wait_for(fb.service.enable(ADMIN), timeout=5.0)  # the switch goes at once
+    assert report.complete and fb.service.mode_on
+    release.set()
+    result = await task
+    # The removal planned for the mode off went out; the mode is on now: planned again at once.
+    assert _applies(fb)[-2:] == [f"apply target={ORIGIN} tcp=443,2096 udp=443",
+                                 f"apply target={ORIGIN} tcp=443,2096,{SOCKS_PORT} udp=443"]
+    assert result.mode_on and result.settled and fb.endpoints.socks5().via_hub
+
+
+async def test_a_hub_that_does_not_answer_its_status_is_asked_again_next_pass(fb: Any) -> None:
+    from services.relay_ssh import RelaySshError
+
+    await _mode_on_without_the_proxy(fb)
+    alerts: list[Any] = []
+
+    async def alert(item: Any) -> None:
+        alerts.append(item)
+
+    fb.service.proxy_alert = alert
+    status = fb.relay_service.system_status
+
+    async def timed_out(relay_id: int) -> Any:
+        raise RelaySshError("relay не ответил вовремя", key="relay_ssh_timeout")
+
+    fb.relay_service.system_status = timed_out
+    blip = await fb.service.reconcile_proxies()
+    assert _applies(fb) == [] and [r.ok for r in blip.routes] == [False]
+    assert fb.service.proxy_failure(SOCKS_PORT) is None and alerts == [], "nothing was sent: no backoff, no alert"
+    fb.relay_service.system_status = status
+    back = await fb.service.reconcile_proxies()  # the next pass, well within the hour
+    assert back.settled and _applies(fb) == [f"apply target={ORIGIN} tcp=443,2096,{SOCKS_PORT} udp=443"]

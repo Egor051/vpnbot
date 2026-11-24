@@ -279,6 +279,24 @@ class ProxyAlert:
 
 
 @dataclass(frozen=True, slots=True)
+class _ReconcilePlan:
+    """What one reconcile sends (read under the switch's lock, sent without it)."""
+
+    mode_on: bool
+    hub: Relay
+    # port → kind of each port to add or take off now; the ports among them to add.
+    due: dict[int, str]
+    adding: frozenset[int]
+    tcp: tuple[int, ...]
+    udp: tuple[int, ...]
+    deferred: tuple[ProxyRoute, ...]
+    blocked: tuple[ProxyRoute, ...]
+    before: dict[str, str]
+    # Monotonic time of the plan (the backoff counts from it).
+    at: float
+
+
+@dataclass(frozen=True, slots=True)
 class SwitchReport:
     target: str
     preflight: Preflight | None
@@ -454,6 +472,9 @@ class FallbackService:
         self._verify_timeout = verify_timeout
         self._verify_interval = verify_interval
         self._lock = asyncio.Lock()
+        # Reconciles one at a time (services/fallback.py, «RECONCILED»): they hold the
+        # switch's lock only to plan and to record, never across an agent call.
+        self._reconcile_lock = asyncio.Lock()
         self._zones: dict[str, DnsZone] = {}
         # What the health loop asks synchronously (refresh_state keeps it current).
         self._mode_on = False
@@ -578,16 +599,34 @@ class FallbackService:
 
         A port whose ``apply`` failed waits :data:`RECONCILE_BACKOFF_SECONDS` before it is
         sent again — *force* («🔁 Довести прокси до hub») does not wait — and the
-        superadmins hear about it once per (port, error) (:attr:`proxy_alert`). *wait*
-        False: while a switch (or another reconcile) holds the lock, nothing this time —
-        the health loop does not stand behind a switch. *actor_user_id* None: the bot
-        itself (startup, the health loop, the screen). An agent's refusal never raises."""
+        superadmins hear about it once per (port, error) (:attr:`proxy_alert`). The hub
+        not answering its ``status`` is no such failure: nothing was sent, the next pass
+        asks again.
+
+        The switch's lock is held only to read the plan and to record the outcome — never
+        across the agent calls (an ``apply`` may take up to its 300 s timeout): a switch,
+        the automatic one above all, does not wait behind a reconcile. Reconciles run one
+        at a time. *wait* False: while a switch or another reconcile runs, nothing this
+        time. *actor_user_id* None: the bot itself (startup, the health loop, the
+        screen). An agent's refusal never raises."""
         if actor_user_id is not None:
             await self.users.require_superadmin(actor_user_id)
-        if not wait and self._lock.locked():
+        if not wait and (self._lock.locked() or self._reconcile_lock.locked()):
             return ProxyReconcile(mode_on=self._mode_on, skipped="busy")
-        async with self._lock:
-            result = await self._reconcile_proxies(actor_user_id, force=force)
+        async with self._reconcile_lock:
+            # Twice at most: a switch that flipped the mode while the agent was called
+            # (the plan was for the other mode) is followed at once, not a pass later.
+            for _ in range(2):
+                async with self._lock:
+                    planned = await self._plan_reconcile(force=force)
+                if isinstance(planned, ProxyReconcile):
+                    result = planned
+                    break
+                error, transient = await self._send_reconcile(actor_user_id, planned)
+                async with self._lock:
+                    result = await self._record_reconcile(actor_user_id, planned, error, transient)
+                    if await self.repo.mode_on() == planned.mode_on:
+                        break
         await self._flush_proxy_alerts()
         return result
 
@@ -620,7 +659,9 @@ class FallbackService:
                 found.setdefault(port, kind)
         return found
 
-    async def _reconcile_proxies(self, actor_user_id: int | None, *, force: bool) -> ProxyReconcile:
+    async def _plan_reconcile(self, *, force: bool) -> ProxyReconcile | _ReconcilePlan:
+        """What the hub's TCP set should become (under the switch's lock); a
+        :class:`ProxyReconcile` when there is nothing to send."""
         mode_on = await self.repo.mode_on()
         hub = select_hub(await self.relays_repo.list_hubs())
         if hub is None or hub.agent is None or agent_uninstalled(hub.agent):
@@ -665,57 +706,85 @@ class FallbackService:
         # waiting for its backoff) — minus the due removals, plus the due additions.
         dropping = {port for port in due if port in to_drop}
         adding = {port for port in due if port in to_add}
-        tcp = tuple(sorted({port for port in agent.tcp_ports if port not in dropping} | adding))
-        udp = tuple(agent.udp_ports) or vpn_udp
-        before = self._proxy_snapshot()
-        error: str | None = None
-        transient = False
+        return _ReconcilePlan(
+            mode_on=mode_on, hub=hub, due=due, adding=frozenset(adding),
+            tcp=tuple(sorted({port for port in agent.tcp_ports if port not in dropping} | adding)),
+            udp=tuple(agent.udp_ports) or vpn_udp, deferred=tuple(deferred), blocked=blocked,
+            before=self._proxy_snapshot(), at=now,
+        )
+
+    async def _send_reconcile(self, actor_user_id: int | None, plan: _ReconcilePlan) -> tuple[str | None, bool]:
+        """The agent calls of *plan*, WITHOUT the switch's lock. Returns (error, transient):
+        transient — nothing was sent (the plan went stale, the hub did not answer its
+        ``status``, the relay was busy): the next pass simply tries again."""
+        hub, agent = plan.hub, plan.hub.agent
+        assert agent is not None
+        if await self.repo.mode_on() != plan.mode_on:
+            return "the mode was switched meanwhile — planned again", True
+        current = await self.relays_repo.get_by_id(hub.id)
+        if current is None or current.agent is None or (
+            current.agent.tcp_ports, current.agent.udp_ports, current.agent.target_host,
+        ) != (agent.tcp_ports, agent.udp_ports, agent.target_host):
+            return "the hub's forward changed meanwhile (a switch?) — planned again on the next pass", True
         try:
-            # The set above is built from the bot's copy of the hub's forward: the hub is
-            # asked first, and a live forward that is neither that copy nor already the
-            # wanted set (changed on the relay by hand) is not overwritten.
-            error = await self._live_forward_differs(hub, tcp)
-            if error is None:
-                await self.relays.change_forward(
-                    actor_user_id, hub.id, target_host=agent.target_host, tcp=format_ports(tcp),
-                    udp=format_ports(udp), allow_hub=True,
-                )
+            # The set is built from the bot's copy of the hub's forward: the hub is asked
+            # first, and a live forward that is neither that copy nor already the wanted
+            # set (changed on the relay by hand) is not overwritten.
+            differs = await self._live_forward_differs(hub, plan.tcp)
         except ServiceError as exc:
-            error = str(exc.params.get("error") or exc)[:300]
-            transient = exc.key in _TRANSIENT_KEYS
+            return str(exc.params.get("error") or exc)[:300], True
+        if differs is not None:
+            return differs, False
+        try:
+            await self.relays.change_forward(
+                actor_user_id, hub.id, target_host=agent.target_host, tcp=format_ports(plan.tcp),
+                udp=format_ports(plan.udp), allow_hub=True,
+            )
+        except ServiceError as exc:
+            return str(exc.params.get("error") or exc)[:300], exc.key in _TRANSIENT_KEYS
+        return None, False
+
+    async def _record_reconcile(
+        self, actor_user_id: int | None, plan: _ReconcilePlan, error: str | None, transient: bool,
+    ) -> ProxyReconcile:
+        """What *plan*'s calls did (under the switch's lock): the proxies' address, the
+        notice, the backoff and the alerts, the audit."""
+        hub = plan.hub
         if error is not None:
-            logger.warning("Fallback: the hub's proxy ports not reconciled (tcp %s): %s", format_ports(tcp), error)
+            log = logger.info if transient else logger.warning
+            log("Fallback: the hub's proxy ports not reconciled (tcp %s): %s", format_ports(plan.tcp), error)
         routes = tuple(
-            ProxyRoute(kind, port, ok=error is None, via_hub=(port in to_add) == (error is None), error=error)
-            for port, kind in due.items()
+            ProxyRoute(kind, port, ok=error is None, via_hub=(port in plan.adding) == (error is None), error=error)
+            for port, kind in plan.due.items()
         )
         if error is None:
-            for port in due:
+            for port in plan.due:
                 self._forget_proxy_failure(port)
             await self.refresh_state()
-            await self._note_proxy_change(before)
+            await self._note_proxy_change(plan.before)
         elif not transient:
             # The agent's check names the port it could not reach: only that one waits
             # (another proxy goes on the next pass without it). Named none — all of them.
-            named = {int(port) for port in _TCP_CONNECT_PORT.findall(error)} & set(due)
+            named = {int(port) for port in _TCP_CONNECT_PORT.findall(error)} & set(plan.due)
             main = await self.main_ipv4()
             for route in routes:
                 if named and route.port not in named:
                     continue
-                self._proxy_failed[route.port] = (error, now)
+                self._proxy_failed[route.port] = (error, plan.at)
                 if (route.port, error) not in self._proxy_told:
                     self._proxy_told.add((route.port, error))
                     self._proxy_unsent[route.port, error] = ProxyAlert(
-                        route=route, mode_on=mode_on, hub=hub.name, main=main,
+                        route=route, mode_on=plan.mode_on, hub=hub.name, main=main,
                         retry_minutes=int(RECONCILE_BACKOFF_SECONDS // 60),
                     )
-        await self._audit(
-            actor_user_id, "fallback_proxy_reconcile",
-            {"mode_on": mode_on, "tcp": list(tcp), "routes": {f"{r.kind}:{r.port}": r.ok for r in routes},
-             **({"error": error} if error else {})},
-            relay_id=hub.id,
-        )
-        return ProxyReconcile(mode_on=mode_on, routes=routes, deferred=tuple(deferred), blocked=blocked)
+        if not transient:
+            await self._audit(
+                actor_user_id, "fallback_proxy_reconcile",
+                {"mode_on": plan.mode_on, "tcp": list(plan.tcp),
+                 "routes": {f"{r.kind}:{r.port}": r.ok for r in routes}, **({"error": error} if error else {})},
+                relay_id=hub.id,
+            )
+        return ProxyReconcile(mode_on=plan.mode_on, routes=routes, deferred=plan.deferred, blocked=plan.blocked)
 
     async def _live_forward_differs(self, hub: Relay, tcp: tuple[int, ...]) -> str | None:
         """None: the hub's live forward (its fresh ``status``) is the bot's copy — or
