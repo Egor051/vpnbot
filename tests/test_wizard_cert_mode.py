@@ -302,15 +302,13 @@ def test_verify_fails_when_what_hysteria_reads_cannot_be_told(host: WizardCertHo
     assert host.conf()["Le_ReloadCmd"] == b64("systemctl restart hysteria-server")
 
 
-def test_the_helper_runs_in_its_own_group_killed_whole_on_a_timeout(tmp_path: Path,
-                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_helper_runs_in_its_own_group_killed_whole_on_a_timeout(tmp_path: Path) -> None:
     """The mode helper's own timeout kills vpn-bot-cert AND the acme.sh it runs before it
-    returns — the rollback that follows never races a renewal still in flight."""
-    import importlib.machinery
-    import importlib.util
+    returns — the rollback that follows never races a renewal still in flight. (Driven in a
+    child interpreter, as the launcher runs it: importing the mode helper here would add it
+    to this process's coverage while its real runs happen in subprocesses.)"""
     import os
     import time
-    from types import SimpleNamespace
 
     stubs = tmp_path / "bin"
     stubs.mkdir()
@@ -318,26 +316,32 @@ def test_the_helper_runs_in_its_own_group_killed_whole_on_a_timeout(tmp_path: Pa
     stub = stubs / "vpn-bot-cert"
     stub.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nwait\n", encoding="utf-8")
     stub.chmod(0o755)
-    monkeypatch.setenv("VPN_BOT_WIZARD_SELFTEST", "1")
-    monkeypatch.setenv("VPN_BOT_WIZARD_ROOT", str(tmp_path / "root"))
-    monkeypatch.setenv("VPN_BOT_WIZARD_SELFTEST_BIN", str(stubs))
-    monkeypatch.setenv("PATH", f"{stubs}:{os.environ['PATH']}")
-    loader = importlib.machinery.SourceFileLoader("vpn_bot_wizard_cert_under_test", str(WIZ / "vpn-bot-wizard-cert"))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[loader.name] = module
-    try:
-        loader.exec_module(module)
-        assert module.HELPER_TIMEOUT < module.lib.MODES["cert"].timeout("apply") - 120
-        logged: list[str] = []
-        ctx = SimpleNamespace(log=SimpleNamespace(write=logged.append))
-        rc, out = module.run_group(ctx, ["vpn-bot-cert", "renew", "--force"], 1)
-        assert rc == 124 and "process group killed" in out and logged
-        child = int(pidfile.read_text(encoding="utf-8"))
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and os.path.exists(f"/proc/{child}"):
-            time.sleep(0.05)
-        assert not os.path.exists(f"/proc/{child}"), "acme.sh's process survived the timeout"
-    finally:
-        sys.modules.pop(loader.name, None)
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import importlib.machinery, importlib.util, json, sys\n"
+        "from types import SimpleNamespace\n"
+        "loader = importlib.machinery.SourceFileLoader('vpn_bot_wizard_cert', sys.argv[1])\n"
+        "spec = importlib.util.spec_from_loader(loader.name, loader)\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "sys.modules[loader.name] = mod\n"
+        "loader.exec_module(mod)\n"
+        "logged = []\n"
+        "ctx = SimpleNamespace(log=SimpleNamespace(write=logged.append))\n"
+        "rc, out = mod.run_group(ctx, ['vpn-bot-cert', 'renew', '--force'], 1)\n"
+        "print(json.dumps({'rc': rc, 'out': out, 'logged': len(logged), 'budget': mod.HELPER_TIMEOUT,\n"
+        "                  'step': mod.lib.MODES['cert'].timeout('apply')}))\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "VPN_BOT_WIZARD_SELFTEST": "1", "VPN_BOT_WIZARD_ROOT": str(tmp_path / "root"),
+           "VPN_BOT_WIZARD_SELFTEST_BIN": str(stubs), "PATH": f"{stubs}:{os.environ['PATH']}"}
+    proc = subprocess.run([sys.executable, "-I", str(driver), str(WIZ / "vpn-bot-wizard-cert")],
+                          capture_output=True, text=True, env=env, timeout=60, check=False)
+    assert proc.returncode == 0, proc.stderr
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert got["rc"] == 124 and "process group killed" in got["out"] and got["logged"] == 1
+    assert got["budget"] < got["step"] - 120, "vpn-bot-cert's budget must end before the launcher's step"
+    child = int(pidfile.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and os.path.exists(f"/proc/{child}"):
+        time.sleep(0.05)
+    assert not os.path.exists(f"/proc/{child}"), "acme.sh's process survived the timeout"
