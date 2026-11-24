@@ -47,7 +47,7 @@ reader that reads something the registry does not lay out.
 | `deploy [--domain D] [--all] [--dry-run] [--json]` | THE reloadcmd (below). |
 | `issue --names a,b --zone ZONE` | DNS-01 (`dns_cf`) with the bot's token, Let's Encrypt, the domain's key type (`ec-256` for a new one), `--force`; then the install-cert above, then deploy. acme.sh is installed first when it is missing. The certificate's name cannot change here (that is a domain change). |
 | `renew --force [--zone ZONE]` | `acme.sh --renew --force` of the bot's domain — to prove a renewal works end to end. With the bot's token, the domain's saved `CF_Token` / `CF_Zone_ID` are set to it first (acme.sh sources the domain's conf on a renewal), so cron renews with the same token afterwards. Then deploy. |
-| `adopt [--domain D] [--dry-run]` | The migration (below): the domain is taken as it is, only its install-cert is rewritten. With several domains naming `vpn-bot-cert deploy`, `--domain` picks the one that stays the bot's and every other is **released** (its reloadcmd emptied, nothing else of its install-cert touched). |
+| `adopt [--domain D] [--dry-run]` | The migration (below): the domain is taken as it is, only its install-cert is rewritten. With several domains naming `vpn-bot-cert deploy`, `--domain` picks the one that stays the bot's. Every **other** domain that still reaches the readers is **released**: a reloadcmd naming the helper is emptied, and so is every `Le_Real*` path into the registry (acme.sh copies to those itself after a renewal, without calling the helper); its other targets and its own reloadcmd stay. `issue` releases them the same way, and an adopted host with such a writer added by hand can be adopted again to release it. |
 | `act` | Every installed reader's check and action on the files it has — nothing is written. The wizard's rollback uses it. |
 
 `deploy`, `issue`, `renew` and `adopt` take `--expect-pair SHA` (16 hex of status' `pair_sha`): the
@@ -107,7 +107,7 @@ same check): the message is **deleted** the moment it is read. Before it is stor
 through the API (`services/dns.py`):
 
 1. `GET /user/tokens/verify` — active;
-2. the zone of the certificate's name (else `HYSTERIA2_SNI`) is visible to it;
+2. the zone of the names typed for «🆕 Выпустить» (else the certificate's name, else `HYSTERIA2_SNI`) is visible to it — on a fresh host with neither, the names are typed first;
 3. its records can be read;
 4. a TXT record `_vpn-bot-token-check.<zone>` is created **and deleted** — the only proof of
    «Zone · DNS · Edit» Cloudflare gives a token that may not read its own permissions (DNS-01 does

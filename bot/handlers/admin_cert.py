@@ -301,7 +301,7 @@ async def cert_token_input(message: Message, state: FSMContext, services: Servic
             return
         status, _ = await _status(services, actor)
         try:
-            name = _cert(services).token_check_name(status)
+            name = _cert(services).token_check_name(status, actor)
             check = await _dns(services).set_token(actor, raw, name)
         except InvalidOperation as exc:
             await message.answer(f"{h(service_error_text(exc))}\n{t('cert_try_again')}", reply_markup=cancel_keyboard("cert:token"))

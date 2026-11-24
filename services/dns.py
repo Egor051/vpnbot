@@ -97,7 +97,11 @@ class DnsService:
         self.clock = clock
         self.token_file = token_file
         self.dns = dns
-        self._zones: dict[str, DnsZone] = {}
+        # The zones as the stored token sees them. The fallback mode uses THIS dict as its
+        # own cache (services/fallback.py): a token set or deleted on any screen clears it
+        # for both — a zone id another token (account) saw is never reused.
+        self.zone_cache: dict[str, DnsZone] = {}
+        self._zones = self.zone_cache
         # Held while the token file changes. The fallback mode uses THIS lock as its own
         # (services/fallback.py): a switch writes names with the token loaded per call, so
         # a new token (or none) must not land in the middle of it — whichever screen it

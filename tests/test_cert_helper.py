@@ -851,3 +851,70 @@ def test_a_timed_out_command_takes_its_children_with_it(mod: ModuleType, tmp_pat
     while time.monotonic() < deadline and os.path.exists(f"/proc/{child}"):
         time.sleep(0.05)
     assert not os.path.exists(f"/proc/{child}"), "the grandchild survived the timeout"
+
+
+# --------------------------------------------------------------------------- #
+# Sixth review round
+# --------------------------------------------------------------------------- #
+WRITER = f"old.{DOMAIN}"
+
+
+def _writer(host: CertHost, reloadcmd: str = "systemctl reload nginx") -> None:
+    """Another domain whose own install-cert copies into the registry (and elsewhere)."""
+    host.acme_domain(WRITER, conf={"Le_RealFullChainPath": TLS_CHAIN, "Le_RealKeyPath": TLS_KEY,
+                                   "Le_RealCertPath": "/srv/other/cert.pem", "Le_ReloadCmd": b64(reloadcmd)})
+
+
+def test_adoption_releases_another_domain_copying_into_the_registry(host: CertHost) -> None:
+    """acme.sh copies to Le_Real* itself after a renewal, without calling the helper: the
+    other domain's registry paths are emptied — its other targets and its own reloadcmd
+    are not the bot's to drop."""
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64("/usr/local/sbin/acme-reload.sh")})
+    host.lay_out(chain, key)
+    _writer(host)
+    _, plan = host.json("adopt", "--domain", DOMAIN, "--dry-run")
+    rel = plan["release"]
+    assert [r["domain"] for r in rel] == [WRITER]
+    assert rel[0]["conf_diff"] == [f"- Le_RealKeyPath='{TLS_KEY}'\n+ Le_RealKeyPath=''",
+                                   f"- Le_RealFullChainPath='{TLS_CHAIN}'\n+ Le_RealFullChainPath=''"]
+    assert host.cert("adopt", "--domain", DOMAIN).returncode == 0
+    conf = host.conf(WRITER)
+    assert conf["Le_RealFullChainPath"] == "" and conf["Le_RealKeyPath"] == ""
+    assert conf["Le_RealCertPath"] == "/srv/other/cert.pem" and conf["Le_ReloadCmd"] == b64("systemctl reload nginx")
+    _, st = host.json("status")
+    assert st["adopted"] and not any(p["key"] == "writer" for p in st["problems"])
+
+
+def test_an_issue_releases_another_domain_copying_into_the_registry(host: CertHost) -> None:
+    adopted_host(host)
+    _writer(host)
+    host.token()
+    host.next_pair([DOMAIN])
+    proc = host.cert("issue", "--names", DOMAIN, "--zone", ZONE)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert host.conf(WRITER)["Le_RealFullChainPath"] == "" and host.conf(WRITER)["Le_RealKeyPath"] == ""
+
+
+def test_an_adopted_host_with_a_writer_can_be_adopted_again_to_release_it(host: CertHost) -> None:
+    """A writer set up by hand after the adoption: «adopt» again releases it (nothing else
+    changes for the bot's domain)."""
+    adopted_host(host)
+    _writer(host)
+    _, plan = host.json("adopt", "--dry-run")
+    assert plan["conf_diff"] == [] and [r["domain"] for r in plan["release"]] == [WRITER]
+    assert host.cert("adopt").returncode == 0
+    assert host.conf(WRITER)["Le_RealKeyPath"] == "" and host.conf()["Le_ReloadCmd"] == b64(RELOAD)
+
+
+def test_status_judges_the_directory_it_means_not_the_first_of_the_name(host: CertHost) -> None:
+    """The ECC directory is the bot's, an RSA one of the same name still copies into the
+    registry: the problems are about the ECC one (no bogus reloadcmd finding) and the RSA
+    one is the writer."""
+    adopted_host(host)
+    host.acme_domain(ecc=False, days=61, conf={"Le_ReloadCmd": b64("systemctl reload nginx")})
+    _, st = host.json("status")
+    assert st["target_dir"] == f"/root/.acme.sh/{DOMAIN}_ecc"
+    keys = {p["key"] for p in st["problems"]}
+    assert "reloadcmd" not in keys, st["problems"]
+    writer = [p for p in st["problems"] if p["key"] == "writer"]
+    assert writer and f"/root/.acme.sh/{DOMAIN}:" in writer[0]["text"]

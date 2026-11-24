@@ -147,6 +147,13 @@ def bot_domain(st: dict[str, Any]) -> dict[str, Any] | None:
     return domain_named(st, st.get("domain") or st.get("candidate"))
 
 
+def writers(st: dict[str, Any], keep: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """acme.sh domains other than *keep* whose own install-cert copies into the registry."""
+    return [d for d in st.get("domains", [])
+            if (keep is None or d.get("dir") != keep.get("dir"))
+            and set((d.get("real_paths") or {}).values()) & set(REGISTRY_FILES)]
+
+
 def readers(st: dict[str, Any]) -> list[dict[str, Any]]:
     return [c for c in st.get("consumers", []) if c.get("installed")]
 
@@ -217,10 +224,16 @@ def plan_issue(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]
         lines.append("acme.sh: not installed — the pinned release 3.1.1 is installed first (sha256-checked)")
     before = current["reloadcmd"] if current else ""
     lines.append(f"acme.sh reloadcmd: {before or '—'!r} → {st['reload_cmd']!r}, no file targets of its own")
+    hand = writers(st, current)
+    for d in hand:
+        # Its own install-cert would copy over the new pair after its renewals.
+        paths = ", ".join(sorted(set(d["real_paths"].values()) & set(REGISTRY_FILES)))
+        lines.append(f"Released: {d['dir']} copies to {paths} itself — those Le_Real* paths are emptied")
     lines.append("Readers:")
     lines += readers_text(st, "issue")
     lines.append("Note: Let's Encrypt allows 5 certificates for the same names per week.")
-    return lines, {"domain": main, "new_domain": current is None, "names": names}
+    return lines, {"domain": main, "new_domain": current is None, "names": names,
+                   "release_dirs": [str(d["dir"]) for d in hand]}
 
 
 def plan_renew(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
@@ -428,6 +441,10 @@ def step_verify(ctx: Any) -> int:
                 bad.append("the SAN does not cover " + ", ".join(missing))
         if plan["action"] in ("issue", "renew") and plan.get("pair_sha") and dom.get("pair_sha") == plan["pair_sha"]:
             bad.append("acme.sh's pair is still the old one")
+        if plan["action"] in ("adopt", "issue"):
+            # They take the readers over: no other domain may still copy into them.
+            for other in writers(st, dom):
+                bad.append(f"{other['dir']} still copies to the registry's files itself")
     for c in readers(st):
         if c.get("reads_registry") is False:
             # Restarted on the registry's files, but configured to serve another pair.

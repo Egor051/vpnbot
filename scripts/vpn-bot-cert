@@ -74,7 +74,9 @@ VERBS
       with the reloadcmd above and no file targets), then deploy (changed only: a consumer
       whose copy already equals acme.sh's is not restarted). --dry-run prints the change.
       With several domains naming `vpn-bot-cert deploy`, --domain picks the one that stays
-      the bot's; every other is released (its reloadcmd emptied).
+      the bot's. Every other domain still reaching the readers is released: a reloadcmd
+      naming this helper emptied, and every Le_Real* path into the registry emptied (acme.sh
+      copies to those itself after a renewal). `issue` releases them the same way.
   deploy / issue / renew / adopt --expect-pair SHA
       The run was planned on acme.sh's pair SHA (16 hex of status' pair_sha): refused
       (exit 3, nothing changed) when acme.sh holds another one by the time it starts.
@@ -1205,7 +1207,9 @@ def problems(r: Mapping[str, Any]) -> list[dict[str, str]]:
     if r["ambiguous"]:
         add("red", "domain", "cannot tell which acme.sh domain is the bot's: " + ", ".join(r["ambiguous"]))
     name = r["domain"] or r["candidate"]
-    dom = next((d for d in r["domains"] if d["name"] == name), None) if name else None
+    named = [d for d in r["domains"] if d["name"] == name] if name else []
+    # An rsa and an ecc directory share the name: the one status means (target_dir).
+    dom = next((d for d in named if d["dir"] == r.get("target_dir")), named[0] if named else None)
     if dom is None:
         if not r["ambiguous"]:
             add("yellow", "domain", "no acme.sh domain serves the registry's readers — «Выпустить» issues one")
@@ -1766,6 +1770,9 @@ def issue(ctx: Ctx, raw_names: str, zone: str, *, expect: str | None = None) -> 
             if domain is None:
                 raise Cannot(f"acme.sh issued {main} but its directory is not there")
             domain = install_cert(ctx, domain, lock, log)
+            # Any other domain still reaching the readers (a hand-made install-cert) stops.
+            for other in to_release(load_domains(ctx), domain):
+                release(ctx, other, log)
             # A token replaced while acme.sh issued: cron renews with the one in the file now.
             sync_token(ctx, domain, zone, log, unless=token)
             report = deploy(ctx, domain)
@@ -1854,19 +1861,20 @@ def sync_token(ctx: Ctx, domain: AcmeDomain, zone: str | None, log: list[str], *
 def adoption_plan(ctx: Ctx, explicit: str | None) -> tuple[AcmeDomain, list[AcmeDomain], dict[str, Any]]:
     """The domain to adopt, the ones released, and deploy's dry run with the conf diffs.
 
-    Several domains may already name vpn-bot-cert deploy (set by hand, or a domain moved):
-    status offers each of them, the one picked stays (or becomes) the bot's and every
-    other is RELEASED — its reloadcmd emptied, so its renewals stop laying its own pair
-    out over the picked one's. Its other install-cert targets are not the bot's to drop."""
+    Every OTHER acme.sh domain that would still reach the bot's readers is RELEASED: one
+    naming vpn-bot-cert deploy (set by hand, or a domain moved) gets its reloadcmd
+    emptied, and any domain's Le_Real* path into the registry is emptied too — acme.sh
+    copies to those paths itself after a renewal, without calling this helper. Its other
+    install-cert targets are not the bot's to drop."""
     domains = load_domains(ctx)
     ours = adopted(domains)
-    if explicit is None and len(ours) == 1:
-        raise Refused(f"{ours[0].name} is already the bot's (reloadcmd {RELOAD_CMD})")
-    if explicit is None and ours:
+    if explicit is None and len(ours) > 1:
         raise Refused("more than one acme.sh domain names vpn-bot-cert deploy: " + ", ".join(d.dir.name for d in ours)
                       + " — pass --domain")
     if explicit is not None:
         domain = bot_domain(ctx, domains, explicit)
+    elif ours:
+        domain = ours[0]
     else:
         cands = candidates(ctx, domains)
         if not cands:
@@ -1876,9 +1884,9 @@ def adoption_plan(ctx: Ctx, explicit: str | None) -> tuple[AcmeDomain, list[Acme
             raise Refused("more than one acme.sh domain could be the bot's: " + ", ".join(d.dir.name for d in cands)
                           + " — pass --domain")
         domain = cands[0]
-    others = [d for d in ours if d.dir != domain.dir]
-    if domain.reload_kind == "ours" and not any(domain.real_paths().values()) and not others:
-        raise Refused(f"{domain.name} is already the bot's")
+    released = to_release(domains, domain)
+    if domain.reload_kind == "ours" and not any(domain.real_paths().values()) and not released:
+        raise Refused(f"{domain.name} is already the bot's (reloadcmd {RELOAD_CMD})")
     before = dict(domain.real_paths())
     before["Le_ReloadCmd"] = domain.reloadcmd
     after = {k: "" for k in _REAL_KEYS}
@@ -1888,15 +1896,39 @@ def adoption_plan(ctx: Ctx, explicit: str | None) -> tuple[AcmeDomain, list[Acme
     plan = deploy(ctx, domain, dry_run=True)
     plan["conf"] = ctx.unroot(domain.conf_path)
     plan["conf_diff"] = diff
-    plan["release"] = [{"domain": d.name, "dir": ctx.unroot(d.dir), "conf": ctx.unroot(d.conf_path),
-                        "conf_diff": [f"- Le_ReloadCmd='{shown(ctx, d.reloadcmd)}'\n+ Le_ReloadCmd=''"]} for d in others]
-    return domain, others, plan
+    plan["release"] = [release_entry(ctx, d) for d in released]
+    return domain, released, plan
+
+
+def release_changes(d: AcmeDomain) -> dict[str, str]:
+    """What stops *d* reaching the bot's readers: a reloadcmd that is ours, every Le_Real*
+    path that is a registry file."""
+    changes = {"Le_ReloadCmd": ""} if d.reload_kind == "ours" else {}
+    paths = registry_paths()
+    changes.update({k: "" for k, v in d.real_paths().items() if v in paths})
+    return changes
+
+
+def to_release(domains: Sequence[AcmeDomain], keep: AcmeDomain) -> list[AcmeDomain]:
+    """Every domain but *keep* that still reaches the bot's readers."""
+    return [d for d in domains if d.dir != keep.dir and release_changes(d)]
+
+
+def release_entry(ctx: Ctx, d: AcmeDomain) -> dict[str, Any]:
+    changes = release_changes(d)
+    raw = {**d.real_paths(), "Le_ReloadCmd": d.reloadcmd}
+    return {"domain": d.name, "dir": ctx.unroot(d.dir), "conf": ctx.unroot(d.conf_path),
+            "conf_diff": [f"- {k}='{shown(ctx, raw[k])}'\n+ {k}=''" for k in (*_REAL_KEYS, "Le_ReloadCmd") if k in changes]}
 
 
 def release(ctx: Ctx, domain: AcmeDomain, log: list[str]) -> None:
-    """*domain* stops being the bot's: its reloadcmd emptied (acme.sh's own value for none)."""
-    conf_set(ctx, domain.conf_path, {"Le_ReloadCmd": ""})
-    log.append(f"{domain.dir.name}: released — its reloadcmd is empty, its renewals no longer lay anything out")
+    """*domain* no longer reaches the bot's readers (release_changes)."""
+    changes = release_changes(domain)
+    if not changes:
+        return
+    conf_set(ctx, domain.conf_path, changes)
+    log.append(f"{domain.dir.name}: released — {', '.join(sorted(changes))} emptied; its renewals no longer reach "
+               "the bot's readers")
 
 
 def expect_pair(ctx: Ctx, domain: AcmeDomain | None, expected: str | None) -> None:
@@ -1915,7 +1947,7 @@ def expect_pair(ctx: Ctx, domain: AcmeDomain | None, expected: str | None) -> No
 
 
 def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool, expect: str | None = None) -> dict[str, Any]:
-    domain, others, plan = adoption_plan(ctx, explicit)
+    domain, released, plan = adoption_plan(ctx, explicit)
     if dry_run:
         return plan
     log: list[str] = []
@@ -1927,7 +1959,7 @@ def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool, expect: str | None =
             expect_pair(ctx, domain, expect)
             # Released first: a renewal of another domain waiting on the lock then finds it is
             # no longer the bot's (deploy skips a domain that does not name it).
-            for other in others:
+            for other in released:
                 release(ctx, other, log)
             fresh = domain
             if domain.reload_kind != "ours" or any(domain.real_paths().values()):

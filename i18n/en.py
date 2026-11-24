@@ -2539,7 +2539,7 @@ STRINGS: dict[str, str] = {
     "cert_err_status": "vpn-bot-cert status did not answer: {error}",
     "cert_err_bad_name": "Not a DNS name: {value}",
     "cert_err_names_count": "1 to {max} names, please.",
-    "cert_err_no_name": "No name: neither the certificate's nor HYSTERIA2_SNI.",
+    "cert_err_no_name": "No name to check the zone with: neither the certificate's nor HYSTERIA2_SNI. Set the names first: «🆕 Issue / reissue» → «✏️ Other names».",
     "cert_err_other_zone": "Not in the zone {zone}: {names} — one certificate, one zone.",
     "dns_err_token_format": "That does not look like a Cloudflare token.",
     "dns_err_bad_name": "Not a DNS name: {value}",

@@ -488,7 +488,9 @@ class FallbackService:
         # Reconciles one at a time (services/fallback.py, «RECONCILED»): they hold the
         # switch's lock only to plan and to record, never across an agent call.
         self._reconcile_lock = asyncio.Lock()
-        self._zones: dict[str, DnsZone] = {}
+        # Shared with the DNS service (its zone_cache): a token changed from the
+        # certificate screen clears the fallback's zones too.
+        self._zones: dict[str, DnsZone] = dns_service.zone_cache if dns_service is not None else {}
         # What the health loop asks synchronously (refresh_state keeps it current).
         self._mode_on = False
         self._names: frozenset[str] = frozenset()

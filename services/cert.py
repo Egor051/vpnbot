@@ -194,9 +194,11 @@ class CertService:
     def forget_names(self, actor_user_id: int) -> None:
         self._names.pop(actor_user_id, None)
 
-    def token_check_name(self, status: CertStatus | None) -> str:
-        """The name whose zone a new token must manage: the certificate's, else HYSTERIA2_SNI."""
-        names = self.default_names(status)
+    def token_check_name(self, status: CertStatus | None, actor_user_id: int | None = None) -> str:
+        """The name whose zone a new token must manage: the names the superadmin typed for
+        «🆕 Выпустить» (a fresh host has no certificate and maybe no HYSTERIA2_SNI), else
+        the certificate's, else HYSTERIA2_SNI."""
+        names = self.chosen_names(actor_user_id, status) if actor_user_id is not None else self.default_names(status)
         if not names:
             raise InvalidOperation("нет имени для проверки зоны", key="cert_err_no_name")
         return names[0].removeprefix("*.")

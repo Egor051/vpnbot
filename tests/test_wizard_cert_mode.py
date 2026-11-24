@@ -345,3 +345,17 @@ def test_the_helper_runs_in_its_own_group_killed_whole_on_a_timeout(tmp_path: Pa
     while time.monotonic() < deadline and os.path.exists(f"/proc/{child}"):
         time.sleep(0.05)
     assert not os.path.exists(f"/proc/{child}"), "acme.sh's process survived the timeout"
+
+
+def test_adopt_releases_a_writer_and_verify_holds_the_registry_to_one_domain(host: WizardCertHost) -> None:
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64("/usr/local/sbin/acme-reload.sh")})
+    host.lay_out(chain, key)
+    other = f"old.{DOMAIN}"
+    host.acme_domain(other, conf={"Le_ReloadCmd": b64("systemctl reload nginx")})
+    assert host.wizard(19, "plan", action="adopt", names=DOMAIN).returncode == 0
+    text = host.plan_text(19)
+    assert f"/root/.acme.sh/{other}_ecc/{other}.conf" in text and "+ Le_RealKeyPath=''" in text
+    proc = host.wizard(19, "execute", action="adopt", names=DOMAIN)
+    assert proc.returncode == 0, host.events(19)
+    assert host.outcome(19) == "succeeded"
+    assert host.conf(other)["Le_RealKeyPath"] == "" and host.conf(other)["Le_RealFullChainPath"] == ""

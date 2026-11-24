@@ -290,3 +290,41 @@ def test_a_reader_with_only_wrong_permissions_gets_the_redeploy_button() -> None
                                       "perms_ok": False, "owner": "root:root", "mode": "0644"}]
     assert CertStatus(raw=data).out_of_sync is True
     assert "cert:go:deploy" in _callbacks(screen_keyboard(CertStatus(raw=data)))
+
+
+async def test_on_a_fresh_host_the_token_is_checked_against_the_names_typed_for_the_issue(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No certificate and no HYSTERIA2_SNI: the token cannot be checked against any zone
+    until names are typed — then against theirs (else the token could never be set)."""
+    data = report()
+    data.update(domains=[], domain=None, candidate=None, candidates=[], problems=[])
+    world.runner.data = data
+    monkeypatch.setattr(world.cert, "settings", SimpleNamespace(hysteria2_sni=""))
+    world.fb.token_file.delete()
+    state = _fsm()
+    await state.set_state(CertStates.token)
+    first = FakeMessage(NEW)
+    await admin_cert.cert_token_input(first, state, world.services)  # type: ignore[arg-type]
+    assert not world.fb.token_file.exists()
+    assert "✏️" in first.everything(), "the refusal says how to give a name"
+    names_state = _fsm()
+    await names_state.set_state(CertStates.names)
+    await admin_cert.cert_names_input(FakeMessage(f"vpn.{ZONE}"), names_state, world.services)  # type: ignore[arg-type]
+    second = FakeMessage(NEW)
+    await admin_cert.cert_token_input(second, state, world.services)  # type: ignore[arg-type]
+    assert world.fb.token_file.load() == NEW and ZONE in second.everything()
+
+
+async def test_a_token_set_on_the_certificate_screen_clears_the_fallbacks_zones(world: World) -> None:
+    """One zone cache for the DNS service and the fallback switch: a token rotated here
+    never leaves the switch a zone id another token saw."""
+    fb = world.fb
+    assert fb.service._zones is fb.dns_service.zone_cache
+    await fb.service.check_zone(ADMIN, ZONE)
+    assert ZONE in fb.service._zones
+    state = _fsm()
+    await state.set_state(CertStates.token)
+    await admin_cert.cert_token_input(FakeMessage(NEW), state, world.services)  # type: ignore[arg-type]
+    assert fb.token_file.load() == NEW
+    assert ZONE not in fb.service._zones
