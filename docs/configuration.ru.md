@@ -268,8 +268,8 @@ stats-label ключа (`hy2_<rnd>`), тот же, что возвращает `
 ### `HYSTERIA2_INSECURE` — по умолчанию выключен (валидный сертификат)
 
 Сервер предъявляет валидный сертификат Let's Encrypt для `HYSTERIA2_SNI`,
-который выпускает и продлевает `acme.sh` (dns_duckdns) вне этого репозитория —
-см. `deploy/hysteria/config.yaml`. С настоящим сертификатом клиентам не нужно
+который выпускает и продлевает `acme.sh` (DNS-01 через Cloudflare, `dns_cf`), а раскладывает бот —
+см. [certificate.ru.md](certificate.ru.md) и `deploy/hysteria/config.yaml`. С настоящим сертификатом клиентам не нужно
 пропускать проверку TLS, поэтому `HYSTERIA2_INSECURE` по умолчанию `false`, и
 `insecure=1` вообще не добавляется в выдаваемые ссылки.
 

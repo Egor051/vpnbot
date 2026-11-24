@@ -23,9 +23,17 @@ class WizardParamError(InvalidOperation):
     """A parameter that does not fit its declared type."""
 
 
+# The text kinds of scripts/wizard/vpn-bot-wizard-lib, typed identically: a comma list of
+# lowercase DNS names (at most MAX_NAMES, distinct) and a Cloudflare zone's NAME (not its id:
+# 32 hex look like a secret to utils/redact and would be masked in the run's params); "" = not given.
+_DNS_NAME_RE = re.compile(r"^(?=.{1,253}$)(\*\.)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_ZONE_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+MAX_NAMES = 10
+
+
 @dataclass(frozen=True, slots=True)
 class ParamSpec:
-    kind: str  # "int" | "bool" | "enum"
+    kind: str  # "int" | "bool" | "enum" | "names" | "zone"
     default: str
     minimum: int = 0
     maximum: int = 0
@@ -49,6 +57,17 @@ class ParamSpec:
             if value not in self.choices:
                 raise WizardParamError(f"{name}: не из списка", key="wizard_param_invalid", params={"name": name})
             return str(value)
+        if self.kind == "names":
+            raw = value if isinstance(value, str) else ",".join(value) if isinstance(value, (list, tuple)) else None
+            names = [n.strip() for n in raw.split(",") if n.strip()] if raw is not None else None
+            if (names is None or len(names) > MAX_NAMES or len(set(names)) != len(names)
+                    or not all(_DNS_NAME_RE.match(n) for n in names)):
+                raise WizardParamError(f"{name}: не DNS-имена", key="wizard_param_invalid", params={"name": name})
+            return ",".join(names)
+        if self.kind == "zone":
+            if not isinstance(value, str) or (value and not _ZONE_RE.match(value)):
+                raise WizardParamError(f"{name}: не имя зоны", key="wizard_param_invalid", params={"name": name})
+            return value
         raise WizardParamError(f"{name}: неизвестный тип", key="wizard_param_invalid", params={"name": name})
 
 
@@ -62,6 +81,9 @@ class WizardMode:
     # nothing to confirm: its execute phase starts right away.
     needs_confirmation: bool
     params: Mapping[str, ParamSpec] = field(default_factory=dict)
+    # A button of its own in «🧙 Мастер настройки». False: started from its own screen
+    # with the parameters that screen works out («🔐 Сертификат и DNS»).
+    menu: bool = True
 
     def validate(self, raw: Mapping[str, object]) -> dict[str, str]:
         unknown = set(raw) - set(self.params)
@@ -98,6 +120,21 @@ MODES: dict[str, WizardMode] = {
         dangerous=True,
         needs_confirmation=True,
         params={"force": ParamSpec("bool", "0")},
+    ),
+    # «🔐 Сертификат и DNS» (docs/certificate.md): issue / renew / adopt / deploy through the
+    # root helper vpn-bot-cert — a plan with the diff first, TOTP, then apply → verify.
+    "cert": WizardMode(
+        key="cert",
+        helper="vpn-bot-wizard-cert",
+        read_only=False,
+        dangerous=True,
+        needs_confirmation=True,
+        params={
+            "action": ParamSpec("enum", "deploy", choices=("issue", "renew", "adopt", "deploy")),
+            "names": ParamSpec("names", ""),
+            "zone": ParamSpec("zone", ""),
+        },
+        menu=False,
     ),
 }
 

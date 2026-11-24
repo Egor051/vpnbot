@@ -254,6 +254,11 @@ guard before any service is reached. There is **no new button in the main menu**
 
 ## TLS termination
 
+> **The certificate is managed from the bot now** ([certificate.md](certificate.md)): the files below
+> are a reader of the registry of `vpn-bot-cert` (`subscription`, try-restart), laid out by
+> `vpn-bot-cert deploy` — acme.sh's reloadcmd once the domain is adopted in «🔐 Сертификат и DNS».
+> The hand-made `--install-cert` and the hook below are how a host not adopted yet works.
+
 **The process terminates TLS itself** (`ssl_context` on the public port). There is no reverse
 proxy in this stack and this PR does not introduce one — adding nginx just to forward a single
 route would be a new privileged daemon, a new config surface and a new restart dependency for

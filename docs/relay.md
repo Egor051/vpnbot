@@ -1327,8 +1327,11 @@ through it, and its own key count sees none of them. «🛟 Remove the hub role�
 ### The DNS API token
 
 The DNS is switched through Cloudflare's API. It needs an **API token** with nothing but
-**«Zone · DNS · Edit»** on the failover names' zone. **Do not reuse** acme.sh's token: it serves
-something else (ACME `dns_cf` on the main server), and the switch does not get in its way.
+**«Zone · DNS · Edit»** on the failover names' zone. It is the bot's **one** token: the certificate's
+DNS-01 (acme.sh `dns_cf`) and the bot's own DNS records use the same file and the same check —
+before it is stored it is verified, the zone must be visible and readable, and a TXT probe is
+created and deleted ([certificate.md](certificate.md#the-cloudflare-token-one-per-bot)). A token
+that cannot edit the zone is refused and not stored.
 
 The token is entered only in the admin panel (**🔑 DNS API token**) — no `.env`, no CLI. The
 message with it is **deleted at once** after it is read (if Telegram refuses, the bot asks to

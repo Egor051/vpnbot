@@ -246,7 +246,7 @@ def test_runner_refuses_a_second_run_while_the_lock_is_held(host: Host) -> None:
     assert finished(host.events(8))["outcome"] == "failed"
 
 
-@pytest.mark.parametrize("helper", ["vpn-bot-wizard-selfcheck", "vpn-bot-wizard-dump", "vpn-bot-wizard-update"])
+@pytest.mark.parametrize("helper", ["vpn-bot-wizard-selfcheck", "vpn-bot-wizard-dump", "vpn-bot-wizard-update", "vpn-bot-wizard-cert"])
 def test_every_mode_helper_speaks_the_contract(host: Host, helper: str) -> None:
     assert host.helper(helper, "shell", "--run", "1").returncode == 2
     assert host.helper(helper, "plan").returncode == 2

@@ -263,10 +263,12 @@ running even when `vpn-bot.service` is down.
 `deploy/hysteria/config.yaml` is the tracked source of truth for
 `/etc/hysteria/config.yaml` — plain QUIC on UDP/443 (no salamander
 obfuscation). `tls.cert`/`tls.key` point at a valid Let's Encrypt cert for the
-server's domain, issued and renewed by `acme.sh` (`dns_duckdns`) outside this
-repo — `acme.sh --install-cert` writes to these same paths and its
-`reloadcmd` restarts `hysteria-server`, so no manual cert/key edits are
-needed.
+server's domain, issued and renewed by `acme.sh` (DNS-01 through Cloudflare,
+`dns_cf`). Once the domain is adopted in «🔐 Сертификат и DNS» these paths are the
+`hysteria` reader of `vpn-bot-cert`'s registry: acme.sh's reloadcmd is
+`vpn-bot-cert deploy`, which lays the pair out and restarts `hysteria-server`
+([certificate.md](certificate.md)); before that the hand-made `--install-cert`
+and its reloadcmd do it. No manual cert/key edits are needed.
 
 **Never `cp` the repo file in directly** — its `trafficStats.secret` is a
 placeholder, and a bare copy overwrites the live stats secret, so

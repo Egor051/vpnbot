@@ -1,18 +1,21 @@
-"""DNS of the fallback mode: the Cloudflare API, DNS-over-HTTPS and the API token's file.
+"""The bot's DNS: the Cloudflare API, DNS-over-HTTPS and the API token's file.
 
 docs/relay.md «Режим фолбэка (hub)». Three small pieces, all behind one injectable
 HTTP transport so the tests never leave the process:
 
-* :class:`CloudflareDns` — the few Cloudflare API v4 calls the mode needs: verify
+* :class:`CloudflareDns` — the few Cloudflare API v4 calls the bot needs: verify
   the token, find the zone of a name (``GET /zones?name=`` walking up its labels —
   this works with a token that has nothing but «Zone · DNS · Edit» on that zone),
-  read the A/AAAA records of a name, create / patch an A record. Every write sets
-  ``proxied=false`` and ``ttl=60``: a proxied (orange) record would send the VPN to
+  read the A/AAAA records of a name, create / patch an A record, create and delete a
+  TXT record (the token check's probe, services/dns.py), delete a record. Every A write
+  sets ``proxied=false`` and ``ttl=60``: a proxied (orange) record would send the VPN to
   Cloudflare's HTTP proxy, and a long TTL would keep clients on the old address.
 * :func:`doh_resolve_a` — what public resolvers answer for a name RIGHT NOW, asked
   over DNS-over-HTTPS (JSON API of cloudflare-dns.com and dns.google). Never the
   system resolver: the host's own cache (and its TTL) says nothing about clients.
-* :class:`CloudflareTokenFile` — the token, one line in a 0600 file owned by the
+* :class:`CloudflareTokenFile` — the token (ONE per bot: the fallback mode, the
+  bot's DNS records and the certificate's DNS-01 all use it — root's vpn-bot-cert
+  reads this same file), one line in a 0600 file owned by the
   bot (the checks of the relay SSH key and the TOTP key: a regular file, no
   symlink, private to the bot's uid). It is entered in the admin panel only — no
   ``.env``, no CLI — and registered with :func:`utils.redact.register_secret`
@@ -270,6 +273,18 @@ class CloudflareDns:
                 json_body={"content": ipv4, "ttl": FAILOVER_TTL, "proxied": False},
             )
         )
+
+    async def create_txt(self, zone_id: str, name: str, content: str) -> DnsRecord:
+        """A TXT record (the token check's probe — services/dns.py — creates one and deletes it)."""
+        return _record(
+            await self._call(
+                "POST", f"/zones/{quote(zone_id, safe='')}/dns_records",
+                json_body={"type": "TXT", "name": name.lower(), "content": content, "ttl": FAILOVER_TTL},
+            )
+        )
+
+    async def delete_record(self, zone_id: str, record_id: str) -> None:
+        await self._call("DELETE", f"/zones/{quote(zone_id, safe='')}/dns_records/{quote(record_id, safe='')}")
 
 
 def _require_ipv4(value: str) -> None:

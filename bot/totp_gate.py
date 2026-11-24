@@ -80,6 +80,10 @@ DANGEROUS_ACTIONS: dict[str, str] = {
     "fallback_hub": "dangerous_fallback_hub",
     "fallback_token": "dangerous_fallback_token",
     "fallback_settings": "dangerous_fallback_settings",
+    # «🔐 Сертификат и DNS» (bot/handlers/admin_cert.py): a run of the wizard's «cert»
+    # mode (issue / renew / adopt / deploy) and the bot's ONE Cloudflare token.
+    "wizard_cert": "dangerous_wizard_cert",
+    "dns_token": "dangerous_dns_token",
 }
 
 RESUME_KEY = "totp_resume"

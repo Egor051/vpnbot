@@ -135,3 +135,12 @@ class AdminFallbackStates(StatesGroup):
     direct_host = State()
     # «🛟 Сделать hub»: the origin name.
     origin = State()
+
+
+class CertStates(StatesGroup):
+    """«🔐 Сертификат и DNS» typed steps (bot/handlers/admin_cert.py)."""
+
+    # The names of «Выпустить» (comma-separated).
+    names = State()
+    # The bot's Cloudflare token: the message is deleted as soon as it is read.
+    token = State()

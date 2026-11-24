@@ -26,6 +26,8 @@ from services.protocol_modules import ProtocolModulesService
 from services.protocol_uninstall import ProtocolUninstallService
 from services.proxy import ProxyService
 from services.relay_health import RelayHealthSupervisor
+from services.cert import CertService
+from services.dns import DnsService
 from services.fallback import FallbackService
 from services.relays import RelayService
 from services.server_status import ServerStatusService
@@ -137,3 +139,9 @@ class Services:
     # фолбэка»): the hub role, the DNS failover set, the switch. None in test
     # doubles: the relay screens then show nothing about it.
     fallback: FallbackService | None = None
+    # The bot's ONE Cloudflare token and the DNS records it owns (services/dns.py). None
+    # in test doubles.
+    dns: DnsService | None = None
+    # «🔐 Сертификат и DNS» (services/cert.py): vpn-bot-cert's status and the wizard's
+    # «cert» runs. None in test doubles.
+    cert: CertService | None = None

@@ -268,8 +268,8 @@ the same id `hy2_auth` returns.
 ### `HYSTERIA2_INSECURE` — off by default (valid cert)
 
 The server presents a valid Let's Encrypt certificate for `HYSTERIA2_SNI`,
-issued and renewed by `acme.sh` (dns_duckdns) outside this repo — see
-`deploy/hysteria/config.yaml`. With a real cert there is no need for clients to
+issued and renewed by `acme.sh` (DNS-01 through Cloudflare, `dns_cf`) and laid out by the bot —
+see [certificate.md](certificate.md) and `deploy/hysteria/config.yaml`. With a real cert there is no need for clients to
 skip TLS validation, so `HYSTERIA2_INSECURE` defaults to `false` and
 `insecure=1` is not added to issued links at all.
 

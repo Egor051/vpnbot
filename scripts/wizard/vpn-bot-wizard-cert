@@ -1,0 +1,403 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-wizard-cert — the «Сертификат и DNS» mode of the setup wizard (docs/certificate.md).
+
+A thin wrapper around the root helper /usr/local/sbin/vpn-bot-cert (the registry of the
+certificate's readers, deploy with a rollback per group, acme.sh) in the wizard's
+contract, so every change of the certificate is a run: a plan with the diff first, the
+superadmin's confirmation (TOTP), then apply → verify, and a rollback that puts the host
+back as the plan found it. Parameter `action`:
+
+  adopt    the hand-made acme.sh domain becomes the bot's: its install-cert is rewritten
+           (reloadcmd = vpn-bot-cert deploy, no file targets) — the certificate is NOT
+           reissued; readers whose copy differs get the current pair
+  issue    a certificate for `names` (DNS-01 through Cloudflare, zone `zone`, the bot's
+           token), then the install-cert above, then deploy
+  renew    `acme.sh --renew --force` of the bot's domain (and acme.sh switched to the bot's
+           token for the zone `zone`), then deploy — the proof that renewals work
+  deploy   the current pair to every reader whose copy differs (changed only)
+
+  plan      what changes: vpn-bot-cert's dry run (adopt, deploy) or the status today
+            against what the action will do (issue, renew) — the acme.sh conf lines, the
+            certificate, every reader and what happens to it. Recorded in
+            <run>.cert-plan.json for apply and rollback.
+  apply     a backup of everything the action may touch (the acme.sh domain directory, every
+            reader's files, vpn-bot-cert's state), then the helper; a reader that failed is
+            already rolled back by the helper itself — the run still fails, so the host goes
+            back entirely
+  verify    vpn-bot-cert status: the domain is the bot's, its reloadcmd, its pair is valid
+            for 7+ days and covers the names, every installed reader holds it and took it
+  rollback  the backup restored (a domain the run created is moved aside so acme.sh does
+            not renew it), then every installed reader acted on again (vpn-bot-cert act)
+
+No step touches the host's network configuration (DNS-01 writes TXT records at Cloudflare,
+not here), so no dead-man is armed; a step that overruns is killed by the runner and rolled
+back.
+"""
+
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+
+def _load_lib() -> ModuleType:
+    path = Path(__file__).resolve().parent / "vpn-bot-wizard-lib"
+    st = os.stat(path, follow_symlinks=False)
+    if os.geteuid() == 0 and os.environ.get("VPN_BOT_WIZARD_SELFTEST") != "1" and (st.st_uid != 0 or st.st_mode & 0o022):
+        sys.exit(f"{Path(__file__).name}: {path} must be root-owned and not group/other-writable")
+    loader = importlib.machinery.SourceFileLoader("vpn_bot_wizard_lib", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+lib = _load_lib()
+MODE = "cert"
+CERT_HELPER = "/usr/local/sbin/vpn-bot-cert"
+ACME_HOME = "/root/.acme.sh"
+STATE_FILE = "/var/lib/vpn-bot-cert/state.json"
+PLAN_ARTIFACT = "cert-plan.json"
+HELPER_TIMEOUT = 1100
+VERIFY_MIN_DAYS = 7
+
+
+def helper_argv(*args: str) -> list[str]:
+    return ["vpn-bot-cert" if lib.SELFTEST else CERT_HELPER, *args]
+
+
+def call(ctx: Any, *args: str, timeout: int = 120) -> tuple[int, dict[str, Any], str]:
+    """vpn-bot-cert <args> --json: (exit code, its JSON object, the rest of its output)."""
+    rc, out = ctx.run(helper_argv(*args, "--json"), timeout=timeout)
+    obj: dict[str, Any] = {}
+    rest = []
+    for line in out.splitlines():
+        if line.startswith("{") and not obj:
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                rest.append(line)
+                continue
+            if isinstance(parsed, dict):
+                obj = parsed
+                continue
+        rest.append(line)
+    return rc, obj, "\n".join(rest).strip()
+
+
+def failure(obj: dict[str, Any], rest: str, rc: int) -> str:
+    return str(obj.get("refused") or obj.get("error") or (rest.splitlines()[-1] if rest else f"exit {rc}"))
+
+
+def bot_domain(st: dict[str, Any]) -> dict[str, Any] | None:
+    name = st.get("domain") or st.get("candidate")
+    return next((d for d in st.get("domains", []) if d.get("name") == name), None) if name else None
+
+
+def readers(st: dict[str, Any]) -> list[dict[str, Any]]:
+    return [c for c in st.get("consumers", []) if c.get("installed")]
+
+
+# --------------------------------------------------------------------------- #
+# The plan's text
+# --------------------------------------------------------------------------- #
+ACTION_TITLES = {
+    "adopt": "adopt the acme.sh setup as it is (no reissue)",
+    "issue": "issue a certificate",
+    "renew": "force a renewal",
+    "deploy": "lay the current certificate out to every reader",
+}
+
+
+def cert_line(d: dict[str, Any] | None) -> str:
+    if d is None:
+        return "none"
+    return (f"{d['name']} ({'ecc' if d.get('ecc') else 'rsa'}): SAN {', '.join(d.get('san') or []) or '—'}, "
+            f"until {d.get('not_after') or '?'} ({d.get('days_left')} d)")
+
+
+def groups_text(report: dict[str, Any]) -> list[str]:
+    lines = []
+    for g in report.get("groups", []):
+        files = [f"{f['path']}: {f['change']}" for f in g.get("files", [])]
+        act = g.get("act") or []
+        lines.append(f"  {'+'.join(g['consumers'])}: " + ("; ".join(files) or "—"))
+        lines.append("      then: " + (", ".join(act) if act else "nothing (already current)"))
+    for s in report.get("skipped", []):
+        lines.append(f"  {s['consumer']}: not touched — {s['why']}")
+    return lines
+
+
+def readers_text(st: dict[str, Any], action: str) -> list[str]:
+    lines = []
+    verbs = {"restart": "restart", "reload": "nginx -t, reload", "try-restart": "restart if running"}
+    for c in st.get("consumers", []):
+        if not c.get("installed"):
+            lines.append(f"  {c['name']}: not touched — {c['why']}")
+            continue
+        paths = ", ".join(f["path"] for f in c.get("files", [])) or "—"
+        lines.append(f"  {c['name']}: {paths} ← the {'new' if action in ('issue', 'renew') else 'current'} pair; "
+                     f"{verbs.get(c['action'], c['action'])} {c['unit']}")
+    return lines
+
+
+def plan_issue(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    names = [n for n in ctx.params["names"].split(",") if n]
+    zone = ctx.params["zone"]
+    if not names or not zone:
+        raise lib.WizardError("issue needs the names and the Cloudflare zone (the bot passes both)")
+    current = bot_domain(st)
+    tok = st.get("token") or {}
+    if not tok.get("fp"):
+        raise lib.WizardError("the bot has no readable Cloudflare token — set it first («Токен Cloudflare»)")
+    if current is not None and current["name"] not in names:
+        raise lib.WizardError(f"the certificate's name would change ({current['name']} → {names[0]}): that is a domain "
+                              "change, not a reissue")
+    main = current["name"] if current is not None else names[0]
+    lines = [
+        f"Certificate now:  {cert_line(current)}",
+        f"Certificate after: {main}" + (f" + {', '.join(n for n in names if n != main)}" if len(names) > 1 else "")
+        + f" — Let's Encrypt, DNS-01 via Cloudflare (zone {zone}), key {current['keylength'] if current else 'ec-256'}",
+        f"Cloudflare token: the bot's ({tok['fp']}); acme.sh keeps it for its renewals",
+    ]
+    if not st.get("acme", {}).get("installed"):
+        lines.append("acme.sh: not installed — the pinned release 3.1.1 is installed first (sha256-checked)")
+    before = current["reloadcmd"] if current else ""
+    lines.append(f"acme.sh reloadcmd: {before or '—'!r} → {st['reload_cmd']!r}, no file targets of its own")
+    lines.append("Readers:")
+    lines += readers_text(st, "issue")
+    lines.append("Note: Let's Encrypt allows 5 certificates for the same names per week.")
+    return lines, {"domain": main, "new_domain": current is None, "names": names}
+
+
+def plan_renew(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    if not st.get("adopted"):
+        raise lib.WizardError("no acme.sh domain is the bot's yet — adopt it first («Принять текущий сертификат»)")
+    current = bot_domain(st)
+    assert current is not None
+    tok, acme_tok = st.get("token") or {}, current.get("token") or {}
+    lines = [
+        f"Certificate now: {cert_line(current)}",
+        f"After: acme.sh --renew --force — a NEW certificate for the same names ({', '.join(current['names'])})",
+    ]
+    if tok.get("fp") and ctx.params["zone"]:
+        if acme_tok.get("fp") != tok["fp"]:
+            lines.append(f"Cloudflare token of acme.sh: {acme_tok.get('fp') or acme_tok.get('source')} → the bot's "
+                         f"({tok['fp']}), zone {ctx.params['zone']}")
+        else:
+            lines.append(f"Cloudflare token: the bot's ({tok['fp']}) — unchanged")
+    else:
+        lines.append("Cloudflare token: acme.sh's own saved credential (the bot has none)")
+    lines.append("Readers:")
+    lines += readers_text(st, "renew")
+    lines.append("Note: Let's Encrypt allows 5 certificates for the same names per week.")
+    return lines, {"domain": current["name"], "new_domain": False, "names": current["names"]}
+
+
+def plan_dry(ctx: Any, verb: str) -> tuple[list[str], dict[str, Any], bool]:
+    rc, report, rest = call(ctx, verb, "--dry-run")
+    if rc != 0 or "groups" not in report:
+        raise lib.WizardError(f"vpn-bot-cert {verb} --dry-run: {failure(report, rest, rc)}")
+    lines = [f"Domain: {report['domain']} — pair {report['source']['pair_sha']}, until {report['source']['not_after']}"]
+    if report.get("conf_diff"):
+        lines.append(f"acme.sh conf {report.get('conf', '')}:")
+        lines += [f"  {ln}" for d in report["conf_diff"] for ln in d.splitlines()]
+    lines.append("Readers:")
+    lines += groups_text(report)
+    noop = verb == "deploy" and all(g["result"] == "unchanged" for g in report["groups"])
+    return lines, {"domain": report["domain"], "new_domain": False, "names": report["source"]["san"]}, noop
+
+
+def step_plan(ctx: Any) -> int:
+    action = ctx.params["action"]
+    rc, st, rest = call(ctx, "status")
+    if rc != 0 or "consumers" not in st:
+        text = f"vpn-bot-cert status failed: {failure(st, rest, rc)}"
+        ctx.event("plan", text=text)
+        print(text, file=sys.stderr)
+        return 1
+    noop = False
+    try:
+        if action == "issue":
+            lines, record = plan_issue(ctx, st)
+        elif action == "renew":
+            lines, record = plan_renew(ctx, st)
+        else:
+            lines, record, noop = plan_dry(ctx, action)
+    except lib.WizardError as exc:
+        ctx.event("plan", text=f"{ACTION_TITLES[action]}: {exc}")
+        print(str(exc), file=sys.stderr)
+        return 1
+    current = bot_domain(st)
+    record.update(action=action, pair_sha=(current or {}).get("pair_sha"), not_after=(current or {}).get("not_after"),
+                  acme_dir=(current or {}).get("dir"))
+    lib.write_private(lib.artifact_path(ctx.run_id, PLAN_ARTIFACT), json.dumps(record, sort_keys=True).encode())
+    text = "\n".join([f"Action: {ACTION_TITLES[action]}", *lines])
+    if noop:
+        text += "\nNothing to do: every reader already holds the current pair."
+    ctx.event("plan", text=text, noop=noop)
+    print(text)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# apply / verify / rollback
+# --------------------------------------------------------------------------- #
+def load_plan(ctx: Any) -> dict[str, Any]:
+    try:
+        data = json.loads(lib.artifact_path(ctx.run_id, PLAN_ARTIFACT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise lib.WizardError("the plan's record is missing — start the run again") from None
+    if not isinstance(data, dict) or data.get("action") != ctx.params["action"]:
+        raise lib.WizardError("the plan's record does not match this run")
+    return data
+
+
+def touched_paths(st: dict[str, Any], plan: dict[str, Any]) -> list[str]:
+    """What the action may change: vpn-bot-cert's state, the acme.sh domain directory (its
+    conf and pair) and every file of every reader."""
+    paths = [STATE_FILE]
+    if plan.get("acme_dir"):
+        paths.append(str(plan["acme_dir"]))
+    for c in st.get("consumers", []):
+        paths += [spec["path"] for spec in c.get("files") or []]
+    return sorted(set(paths))
+
+
+REGISTRY_FILES = (
+    "/etc/hysteria/cert.pem", "/etc/hysteria/key.pem", "/etc/vpn-bot/tls/fullchain.pem", "/etc/vpn-bot/tls/privkey.pem",
+)
+
+
+def step_apply(ctx: Any) -> int:
+    try:
+        plan = load_plan(ctx)
+    except lib.WizardError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    action = ctx.params["action"]
+    rc, st, rest = call(ctx, "status")
+    if rc != 0:
+        print(f"vpn-bot-cert status failed: {failure(st, rest, rc)}", file=sys.stderr)
+        return 1
+    now = bot_domain(st)
+    if not plan.get("new_domain") and (now is None or now["name"] != plan["domain"]):
+        print(f"the domain changed since the plan ({plan['domain']} → {now['name'] if now else 'none'}) — start again",
+              file=sys.stderr)
+        return 1
+    # Every reader's files, also those of a reader not installed now (nothing to lose).
+    paths = sorted(set(touched_paths(st, plan)) | set(REGISTRY_FILES))
+    lib.backup_paths(ctx.run_id, paths, log=ctx.log)
+    ctx.say(f"vpn-bot-cert {action}")
+    if action == "issue":
+        args = ["issue", "--names", ctx.params["names"], "--zone", ctx.params["zone"]]
+    elif action == "renew":
+        args = ["renew", "--force"] + (["--zone", ctx.params["zone"]] if ctx.params["zone"] else [])
+    elif action == "adopt":
+        args = ["adopt", "--domain", plan["domain"]]
+    else:
+        args = ["deploy"]
+    rc, report, rest = call(ctx, *args, timeout=HELPER_TIMEOUT)
+    summary = summarize(action, report) if "groups" in report else failure(report, rest, rc)
+    ctx.event("result", text=summary, verdict="ok" if rc == 0 else "failed")
+    print(summary)
+    if rc != 0:
+        print(f"vpn-bot-cert {action}: exit {rc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def summarize(action: str, report: dict[str, Any]) -> str:
+    lines = [f"{ACTION_TITLES[action]}: {report.get('domain')} — pair {report['source']['pair_sha']}, "
+             f"until {report['source']['not_after']}"]
+    for g in report.get("groups", []):
+        lines.append(f"{'+'.join(g['consumers'])}: {g['result']}" + (f" — {g['error']}" if g.get("error") else ""))
+        for a in g.get("actions", []):
+            lines.append(f"  {a['text']}")
+    for s in report.get("skipped", []):
+        lines.append(f"{s['consumer']}: not touched — {s['why']}")
+    return "\n".join(lines)
+
+
+def step_verify(ctx: Any) -> int:
+    try:
+        plan = load_plan(ctx)
+    except lib.WizardError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    rc, st, rest = call(ctx, "status")
+    if rc != 0:
+        print(f"vpn-bot-cert status failed: {failure(st, rest, rc)}", file=sys.stderr)
+        return 1
+    bad: list[str] = []
+    dom = bot_domain(st)
+    if not st.get("adopted") or dom is None or dom["name"] != plan["domain"]:
+        bad.append(f"{plan['domain']} is not the bot's domain (reloadcmd {st.get('reload_cmd')})")
+    else:
+        if dom.get("reloadcmd_kind") != "ours":
+            bad.append(f"reloadcmd is {dom.get('reloadcmd')!r}")
+        if dom.get("real_paths"):
+            bad.append(f"acme.sh still copies to {', '.join(dom['real_paths'].values())} itself")
+        if not dom.get("key_ok"):
+            bad.append(f"acme.sh's pair: {dom.get('error')}")
+        if (dom.get("days_left") or 0) < VERIFY_MIN_DAYS:
+            bad.append(f"{dom.get('days_left')} days left")
+        if plan["action"] == "issue":
+            missing = [n for n in plan["names"] if n not in dom.get("san", []) and n not in dom.get("names", [])]
+            if missing:
+                bad.append("the SAN does not cover " + ", ".join(missing))
+        if plan["action"] in ("issue", "renew") and plan.get("pair_sha") and dom.get("pair_sha") == plan["pair_sha"]:
+            bad.append("acme.sh's pair is still the old one")
+    for c in readers(st):
+        if c.get("in_sync") is not True:
+            bad.append(f"{c['name']}: its files are not acme.sh's current pair")
+        elif c.get("took_current") is False:
+            bad.append(f"{c['name']}: its {c['action']} did not run on the current pair")
+    if bad:
+        for line in bad:
+            print(line, file=sys.stderr)
+        ctx.event("result", text="verify: " + "; ".join(bad), verdict="failed")
+        return 1
+    ctx.say(f"{dom['name'] if dom else '?'}: every reader holds the current pair, {dom.get('days_left') if dom else '?'} days left")
+    return 0
+
+
+def step_rollback(ctx: Any) -> int:
+    try:
+        plan = load_plan(ctx)
+    except lib.WizardError:
+        plan = {}
+    archives = sorted(lib.backup_dir(ctx.run_id).glob("backup-*.tar.gz"))
+    if not archives:
+        print("no backup was taken: nothing to restore (apply failed before it changed anything)")
+        return 0
+    if plan.get("new_domain") and plan.get("domain"):
+        # acme.sh would renew a domain the run created and lay it out again.
+        for suffix in ("_ecc", ""):
+            created = lib.host_path(f"{ACME_HOME}/{plan['domain']}{suffix}")
+            if created.is_dir():
+                aside = lib.backup_dir(ctx.run_id) / f"acme-{created.name}"
+                lib.fence(aside)
+                shutil.move(str(created), str(aside))
+                ctx.say(f"moved {created.name} aside to {aside}")
+    restored = lib.restore_backup(archives[-1], log=ctx.log)
+    ctx.say(f"restored {len(restored)} file(s) from {archives[-1].name}")
+    rc, report, rest = call(ctx, "act", timeout=HELPER_TIMEOUT)
+    if rc != 0:
+        print(f"vpn-bot-cert act: {failure(report, rest, rc)}", file=sys.stderr)
+        return 1
+    ctx.say("every installed reader acted on again with the restored files")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(lib.contract_main(MODE, {"plan": step_plan, "apply": step_apply, "verify": step_verify, "rollback": step_rollback}, sys.argv[1:]))

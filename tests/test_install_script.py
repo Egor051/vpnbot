@@ -681,6 +681,8 @@ WIZARD_HELPERS = [
     "vpn-bot-wizard-selfcheck",
     "vpn-bot-wizard-dump",
     "vpn-bot-wizard-update",
+    "vpn-bot-wizard-cert",
+    "vpn-bot-cert",
     "vpn-bot-totp-reset",
 ]
 

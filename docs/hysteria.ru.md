@@ -31,7 +31,10 @@
    сертификата — копирование новой цепочки в `/etc/hysteria/cert.pem`/`key.pem` с владельцем
    `hysteria` и рестарт сервиса — делается трекнутым хуком `deploy/vpn-bot-acme-reload.sh`,
    который deploy.sh ставит как `/usr/local/sbin/acme-reload.sh` — `--reloadcmd` у acme.sh
-   ([Подписка → TLS-терминация](subscription.ru.md#tls-терминация)).
+   ([Подписка → TLS-терминация](subscription.ru.md#tls-терминация)) — пока домен не принят в
+   «🔐 Сертификат и DNS»; после этого `/etc/hysteria/cert.pem`/`key.pem` — потребитель `hysteria`
+   реестра `vpn-bot-cert`, раскладываются атомарно и откатываются, если рестарт не удался
+   ([certificate.ru.md](certificate.ru.md)).
 2. **Эндпоинт `hy2_auth`** (`python -m hy2_auth`, `deploy/vpnbot-hy2-auth.service`) — небольшой
    **отдельный** процесс, к которому сервер `hysteria` обращается по loopback на каждый handshake.
    Он открывает `vpn.db` **read-only** и проверяет персональный токен ключа в постоянное время

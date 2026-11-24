@@ -116,6 +116,7 @@ from repositories.failover import (
 )
 from repositories.relays import RelayRepository
 from services.audit import AuditService
+from services.dns import DnsService
 from services.errors import InvalidOperation, NotFound, ServiceError
 from services.proxy_endpoint import MTPROTO, PROXY_KINDS, SOCKS5, ProxyEndpoint, ProxyEndpoints
 from services.relay import select_hub
@@ -150,6 +151,14 @@ RECONCILE_BACKOFF_SECONDS = 3600.0
 _TRANSIENT_KEYS = frozenset({"relay_busy"})
 # The port a failed `vpn-relay-apply check` names: "FAIL: TCP connect 198.51.100.1:31337 …".
 _TCP_CONNECT_PORT = re.compile(r"TCP connect \S+?:(\d+)\b")
+
+# services/dns.py's refusals, as this screen names them (bot/keyboards/admin_fallback.py
+# offers the fix for each).
+_DNS_KEYS = {
+    "dns_err_record_count": "fb_err_record_count",
+    "dns_err_record_foreign": "fb_err_record_foreign",
+    "dns_err_no_token": "fb_err_no_token",
+}
 
 Doh = Callable[[str], Awaitable[list[DohAnswer]]]
 Progress = Callable[[str, str, int | None, int | None], Awaitable[None]]
@@ -456,6 +465,7 @@ class FallbackService:
         verify_interval: float = VERIFY_INTERVAL_SECONDS,
         endpoints: ProxyEndpoints | None = None,
         modules: Any | None = None,
+        dns_service: DnsService | None = None,
     ) -> None:
         self.repo = repo
         self.relays_repo = relays_repo
@@ -495,6 +505,11 @@ class FallbackService:
         self.proxy_alert: Callable[[ProxyAlert], Awaitable[None]] | None = None
         self._reconcile_task: asyncio.Task[ProxyReconcile] | None = None
         self._vpn_gap_logged: tuple[int, ...] | None = None
+        # The bot's DNS (services/dns.py): the ONE token check (verify, zone, read, a
+        # TXT probe written and deleted) and the ONE list of the records the bot owns —
+        # the hub's origin is one of them. None (tests of old): the token is only
+        # verified and the origin is written without a row of ownership.
+        self.dns_service = dns_service
 
     # ── state for the health loop ─────────────────────────────────────────────
 
@@ -1055,8 +1070,27 @@ class FallbackService:
     # ── the DNS API token ─────────────────────────────────────────────────────
 
     async def set_token(self, actor_user_id: int, token: str) -> str:
-        """Check the token with the API, then store it (0600). Returns its status."""
+        """Check the token with the API, then store it (0600). Returns its status.
+
+        With the DNS service (the bot): THE check of services/dns.py on the zone of
+        HYSTERIA2_SNI — verify, the zone visible, readable, and writable (a TXT probe
+        created and deleted) — before anything is stored; the same file the certificate's
+        DNS-01 uses (one token per bot)."""
         await self.users.require_superadmin(actor_user_id)
+        if self.dns_service is not None:
+            target = (self.settings.hysteria2_sni or "").strip().lower()
+            if not target:
+                names = await self.repo.list_names()
+                target = names[0].name if names else ""
+            if not valid_dns_name(target):
+                raise InvalidOperation("нет имени для проверки зоны", key="fb_err_bad_name", params={"value": target})
+            check = await self.dns_service.set_token(
+                actor_user_id, token, target, audit_action="failover_token_set", audit_rejected="failover_token_rejected",
+            )
+            async with self._lock:
+                self._zones.clear()
+                self._zones[target] = check.zone
+            return check.status
         value = (token or "").strip()
         if not valid_token(value):
             raise InvalidOperation("не похоже на токен", key="fb_err_token_format")
@@ -1079,6 +1113,11 @@ class FallbackService:
 
     async def delete_token(self, actor_user_id: int) -> bool:
         await self.users.require_superadmin(actor_user_id)
+        if self.dns_service is not None:
+            removed = await self.dns_service.delete_token(actor_user_id, audit_action="failover_token_deleted")
+            async with self._lock:
+                self._zones.clear()
+            return removed
         async with self._lock:
             removed = self.token_file.delete()
             self._zones.clear()
@@ -1193,7 +1232,13 @@ class FallbackService:
             main = await self.main_ipv4()
             if main is None:
                 raise InvalidOperation("нет IPv4 main", key="fb_err_no_main_ipv4")
-            created = await self._ensure_record(name, main)
+            if self.dns_service is not None:
+                # The origin is a record the bot OWNS (dns_records, purpose
+                # 'fallback_origin'): the one list W4/W5 rewrite when main's address moves.
+                written = await self.dns_service.upsert_a(actor_user_id, name, main, purpose="fallback_origin")
+                created = written.change == "created"
+            else:
+                created = await self._ensure_record(name, main)
             answers = await self._wait_resolves(name, main)
             if not NameResult(name=name, ok=True, ipv4=main, doh=tuple(answers)).propagated:
                 raise InvalidOperation(
@@ -1554,6 +1599,17 @@ class FallbackService:
         several A records, a proxied one, or (with *allowed*) one that points at an
         address that is neither the main server nor the hub."""
         self._token()
+        if self.dns_service is not None:
+            # THE write path of every A record the bot touches (services/dns.py):
+            # proxied=false, TTL 60, the same refusals — in this screen's words.
+            try:
+                _, change = await self.dns_service.write_a(name, address, allowed=allowed)
+            except InvalidOperation as exc:
+                key = _DNS_KEYS.get(exc.key or "", "fb_err_dns")
+                raise InvalidOperation(
+                    str(exc), key=key, params=exc.params if key != "fb_err_dns" else {"error": str(exc)}
+                ) from None
+            return change == "created"
         try:
             zone = await self._zone(name)
             records = await self.dns.records(zone.id, name, "A")

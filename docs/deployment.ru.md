@@ -252,10 +252,12 @@ sudo systemctl enable --now vpnbot-hy2-auth
 `deploy/hysteria/config.yaml` — трекнутый источник истины для
 `/etc/hysteria/config.yaml`: чистый QUIC на UDP/443 (без salamander-обфускации).
 `tls.cert`/`tls.key` указывают на валидный сертификат Let's Encrypt для домена
-сервера, который выпускает и продлевает `acme.sh` (`dns_duckdns`) вне этого
-репозитория — `acme.sh --install-cert` перезаписывает эти же пути, а его
-`reloadcmd` рестартит `hysteria-server`, так что вручную править cert/key не
-нужно.
+сервера, который выпускает и продлевает `acme.sh` (DNS-01 через Cloudflare,
+`dns_cf`). После принятия домена в «🔐 Сертификат и DNS» эти пути — потребитель
+`hysteria` реестра `vpn-bot-cert`: reloadcmd acme.sh — `vpn-bot-cert deploy`, он
+раскладывает пару и рестартит `hysteria-server` ([certificate.ru.md](certificate.ru.md));
+до того это делают ручной `--install-cert` и его reloadcmd. Вручную править
+cert/key не нужно.
 
 **Никогда не копируйте файл из репозитория напрямую (`cp`)** — его
 `trafficStats.secret` это плейсхолдер, и голый `cp` затирает живой

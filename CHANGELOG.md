@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **The TLS certificate is part of the bot** (docs/certificate.md). acme.sh keeps ONE install-cert per
+  domain, and a move of the host once left its reloadcmd naming only a part of the readers. The readers
+  are now a REGISTRY in code — `scripts/vpn-bot-cert` (root, `OUT_OF_REPO_HELPERS` required on main,
+  `INSTALL_HELPERS`): hysteria (`/etc/hysteria/{cert,key}.pem`, hysteria:hysteria 0644/0600, restart),
+  nginx and the subscription endpoint (`/etc/vpn-bot/tls/{fullchain,privkey}.pem`, root:vpn-bot 0640;
+  `nginx -t` + reload, try-restart), each active only while its module is installed. `vpn-bot-cert`:
+  `status` (SAN, expiry, key, reloadcmd, the sha of every copy against acme.sh's, owners and modes,
+  the token acme.sh renews with — fingerprints only — and the problems), `deploy` — THE reloadcmd
+  acme.sh registers through `--install-cert` with no file targets: acme.sh's own pair checked with
+  openssl (the key matches, not expired, the SAN covers the names), every changed file staged next to
+  its target, checked again, renamed into place; a reader whose action fails (or that is not active
+  after its restart) gets its OLD files back with its group, the other groups keep the new pair —,
+  `issue` (DNS-01 `dns_cf` with the bot's token, Let's Encrypt; acme.sh 3.1.1 installed when missing,
+  sha256-pinned), `renew --force` (acme.sh switched to the bot's token first) and `adopt`.
+- **«🔐 Сертификат и DNS» in the setup wizard.** The screen shows the certificate, the reloadcmd, every
+  reader, the token and the bot's DNS records; «🔁 Принять текущий сертификат», «🆕 Выпустить /
+  перевыпустить», «🔄 Проверить продление», «📦 Разложить заново» are runs of the new wizard mode `cert`
+  (`scripts/wizard/vpn-bot-wizard-cert`: a plan with the diff, TOTP, apply with a backup → verify by
+  `vpn-bot-cert status` → rollback that restores the backup and acts on every reader again). New
+  parameter kinds `names` / `zone` in both mode tables; the zone travels as its NAME (a 32-hex id is
+  masked as a secret by every redaction) and root asks Cloudflare for its id with the token.
+- **One Cloudflare token per bot, checked before it is stored** (services/dns.py). The fallback mode's
+  file `/etc/vpn-bot/dns_failover/cloudflare_token` is THE token — the fallback, the bot's records and
+  the certificate's DNS-01 use it. «🔑 Токен Cloudflare» (and the fallback's «🔑 Токен DNS API») delete
+  the message at once, then verify the token, require the zone to be visible and readable, and create
+  AND delete a TXT record `_vpn-bot-token-check.<zone>` (the proof of «Zone · DNS · Edit»); a token
+  that fails a step is refused and not stored. docs/relay.md used to say «do not reuse acme.sh's
+  token» — superseded.
+- **The DNS records the bot owns: one list** (schema v48, `dns_records`). Every A write goes through
+  `DnsService.write_a` — `proxied=false`, TTL 60, always; `upsert_a` records the ownership (purpose
+  `fallback_origin` | `host`, adopted or created), `delete_a` deletes only a record the bot owns and
+  created. The fallback hub's origin is a row of it (written by «🛟 Сделать hub»; the migration backfills
+  an existing hub's origin as adopted); the failover set stays the switch's, not ownership.
+- **The self-check's `certs` item is `vpn-bot-cert status`**: one item per problem — the copies at
+  every reader equal acme.sh's, the expiry, reloadcmd = `vpn-bot-cert deploy` (the old hook yellow,
+  anything else red), the cron line, a second acme.sh domain copying over the registry's files. The
+  per-file check stays the fallback on a host without the helper.
+- **Migrating production: adoption.** The hand-made acme.sh domain (`Le_RealFullChainPath` =
+  `/etc/vpn-bot/tls/…`, reloadcmd empty / partial / the old hook) is taken AS IS: only its install-cert
+  is rewritten to one reloadcmd, `vpn-bot-cert deploy`; the certificate is not reissued, and a reader
+  whose copy already is acme.sh's is not restarted. `/usr/local/sbin/acme-reload.sh` stays for a host not
+  adopted yet. The sudoers example grants the bot exactly `/usr/local/sbin/vpn-bot-cert status --json`.
+
 ### Fixed
 
 - **The proxies through the hub are reconciled, not only switched** (docs/relay.md#the-proxies-through-the-hub,

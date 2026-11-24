@@ -117,7 +117,8 @@ DB_PERMS_HELPER="/usr/local/sbin/vpn-bot-db-perms"
 SBIN_DIR="/usr/local/sbin"
 # The other helpers a main server needs from its first minute (docs/wizard.md): the
 # setup wizard the bot launches — «Обновить бота» is how a fresh install reaches its
-# first redeploy — and the emergency TOTP reset, which must be on the host BEFORE the
+# first redeploy —, the certificate's helper («🔐 Сертификат и DNS» issues the first
+# certificate through it, docs/certificate.md) and the emergency TOTP reset, which must be on the host BEFORE the
 # day the phone and the codes are gone. The same entries as deploy.sh's
 # OUT_OF_REPO_HELPERS (role main, required); tests/test_install_script.py keeps them
 # equal. Installed through install_file, so a rollback removes them like the rest.
@@ -127,6 +128,8 @@ INSTALL_HELPERS=(
   scripts/wizard/vpn-bot-wizard-selfcheck
   scripts/wizard/vpn-bot-wizard-dump
   scripts/wizard/vpn-bot-wizard-update
+  scripts/wizard/vpn-bot-wizard-cert
+  scripts/vpn-bot-cert
   scripts/vpn-bot-totp-reset
 )
 CLAIM_DIR="/etc/vpn-bot"
