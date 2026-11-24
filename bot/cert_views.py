@@ -8,6 +8,7 @@ from i18n import t
 from models.dto import OwnedDnsRecord
 from services.cert import CertStatus
 from utils.formatting import code, h
+from utils.redact import redact_value
 
 LEVEL_ICONS = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
 _MAX_PROBLEMS = 12
@@ -20,13 +21,18 @@ def _row(text: str, data: str) -> list[InlineKeyboardButton]:
     return [InlineKeyboardButton(text=text, callback_data=data)]
 
 
+def _shown(value: object) -> str:
+    """Host text for Telegram: vpn-bot-cert redacts it already; utils/redact once more."""
+    return redact_value(str(value or "")) or "—"
+
+
 def _reloadcmd_line(dom: dict[str, object]) -> str:
     kind = str(dom.get("reloadcmd_kind") or "")
     if kind == "ours":
         return t("cert_reload_ours")
     if kind == "legacy":
-        return t("cert_reload_legacy", cmd=code(dom.get("reloadcmd") or "—"))
-    return t("cert_reload_other", cmd=code(dom.get("reloadcmd") or "—"))
+        return t("cert_reload_legacy", cmd=code(_shown(dom.get("reloadcmd"))))
+    return t("cert_reload_other", cmd=code(_shown(dom.get("reloadcmd"))))
 
 
 def _consumer_line(c: dict[str, object]) -> str:
@@ -91,7 +97,7 @@ def screen_text(status: CertStatus | None, records: list[OwnedDnsRecord], *, tok
         lines += ["", t("cert_problems_title")]
         order = {"red": 0, "yellow": 1}
         for p in sorted(status.problems, key=lambda p: order.get(str(p.get("level")), 2))[:_MAX_PROBLEMS]:
-            lines.append(f"{LEVEL_ICONS.get(str(p.get('level')), '•')} {h(p.get('text') or '')}")
+            lines.append(f"{LEVEL_ICONS.get(str(p.get('level')), '•')} {h(redact_value(str(p.get('text') or '')))}")
     return "\n".join(lines)
 
 

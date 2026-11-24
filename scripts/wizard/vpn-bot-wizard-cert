@@ -219,10 +219,17 @@ def plan_dry(ctx: Any, verb: str) -> tuple[list[str], dict[str, Any], bool]:
     if report.get("conf_diff"):
         lines.append(f"acme.sh conf {report.get('conf', '')}:")
         lines += [f"  {ln}" for d in report["conf_diff"] for ln in d.splitlines()]
+    for rel in report.get("release", []):
+        # Another domain naming vpn-bot-cert deploy: it stops being the bot's.
+        lines.append(f"Released (no longer the bot's), acme.sh conf {rel['conf']}:")
+        lines += [f"  {ln}" for d in rel["conf_diff"] for ln in d.splitlines()]
     lines.append("Readers:")
     lines += groups_text(report)
     noop = verb == "deploy" and all(g["result"] == "unchanged" for g in report["groups"])
-    record: dict[str, Any] = {"domain": report["domain"], "new_domain": False, "names": report["source"]["san"]}
+    # The pair the plan describes is the one the dry run read: apply refuses any other.
+    record: dict[str, Any] = {"domain": report["domain"], "new_domain": False, "names": report["source"]["san"],
+                              "pair_sha": report["source"]["pair_sha"],
+                              "release_dirs": [str(rel["dir"]) for rel in report.get("release", [])]}
     if report.get("conf"):
         record["acme_dir"] = str(Path(str(report["conf"])).parent)
     return lines, record, noop
@@ -250,7 +257,8 @@ def step_plan(ctx: Any) -> int:
         return 1
     # The domain the action is about: the plan's own (adopt may name one of several).
     current = domain_named(st, record.get("domain")) or bot_domain(st)
-    record.update(action=action, pair_sha=(current or {}).get("pair_sha"), not_after=(current or {}).get("not_after"))
+    record.update(action=action, not_after=(current or {}).get("not_after"))
+    record.setdefault("pair_sha", (current or {}).get("pair_sha"))
     record.setdefault("acme_dir", (current or {}).get("dir"))
     lib.write_private(lib.artifact_path(ctx.run_id, PLAN_ARTIFACT), json.dumps(record, sort_keys=True).encode())
     text = "\n".join([f"Action: {ACTION_TITLES[action]}", *lines])
@@ -280,6 +288,7 @@ def touched_paths(st: dict[str, Any], plan: dict[str, Any]) -> list[str]:
     paths = [STATE_FILE]
     if plan.get("acme_dir"):
         paths.append(str(plan["acme_dir"]))
+    paths += [str(d) for d in plan.get("release_dirs") or []]
     for c in st.get("consumers", []):
         paths += [spec["path"] for spec in c.get("files") or []]
     return sorted(set(paths))
@@ -306,6 +315,15 @@ def step_apply(ctx: Any) -> int:
         print(f"the domain changed since the plan ({plan['domain']} → {now['name'] if now else 'none'}) — start again",
               file=sys.stderr)
         return 1
+    expected = plan.get("pair_sha")
+    # (Of the domain's directories — an rsa and an ecc one share the name; the helper
+    # checks the very one it acts on.)
+    same_name = [d for d in st.get("domains", []) if d.get("name") == plan["domain"]] or [now]
+    if expected and now is not None and all((d or {}).get("pair_sha") != expected for d in same_name):
+        # A renewal between the plan and the confirmation: the plan no longer describes the run.
+        print(f"acme.sh's certificate changed since the plan ({expected} → {now.get('pair_sha') or 'unreadable'}) — "
+              "start again", file=sys.stderr)
+        return 1
     # Every reader's files, also those of a reader not installed now (nothing to lose).
     paths = sorted(set(touched_paths(st, plan)) | set(REGISTRY_FILES))
     lib.backup_paths(ctx.run_id, paths, log=ctx.log)
@@ -318,6 +336,9 @@ def step_apply(ctx: Any) -> int:
         args = ["adopt", "--domain", plan["domain"]]
     else:
         args = ["deploy"]
+    if expected:
+        # Checked again by the helper under its lock, on the pair it lays out.
+        args += ["--expect-pair", str(expected)]
     rc, report, rest = call(ctx, *args, timeout=HELPER_TIMEOUT)
     summary = summarize(action, report) if "groups" in report else failure(report, rest, rc)
     ctx.event("result", text=summary, verdict="ok" if rc == 0 else "failed")

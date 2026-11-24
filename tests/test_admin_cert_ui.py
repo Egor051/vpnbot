@@ -261,3 +261,18 @@ async def test_every_candidate_gets_a_button_and_a_wildcard_one_can_be_adopted(
     monkeypatch.setattr(world.wizard, "start", start)
     await admin_cert.cert_adopt_pick(FakeCallback("cert:adopt:9"), _fsm(), world.services)  # type: ignore[arg-type]
     assert seen == [{"action": "adopt", "names": f"*.{ZONE}"}]
+
+
+def test_the_screen_never_shows_a_credential_of_the_hosts_reloadcmd() -> None:
+    """vpn-bot-cert redacts the host's own command already; the screen redacts once more
+    (utils/redact) — a hand-made reloadcmd may carry a bearer token."""
+    from bot.cert_views import screen_text
+    from services.cert import CertStatus
+
+    secret = "hcABCDEFGHIJKLMNOPQRSTUV0123456789"
+    data = report()
+    data["domains"][0]["reloadcmd"] = f"curl -H 'Authorization: Bearer {secret}' https://hc.example/ping"
+    data["domains"][0]["reloadcmd_kind"] = "legacy"
+    data["problems"] = [{"level": "red", "key": "reloadcmd", "text": f"reloadcmd is 'curl ... Bearer {secret}'"}]
+    text = screen_text(CertStatus(raw=data), [], token_fp="abcd1234")
+    assert secret not in text and "Bearer ***" in text

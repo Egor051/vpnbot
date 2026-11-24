@@ -35,7 +35,8 @@ VERBS
       `vpn-bot-cert deploy`) or the domain to adopt, every consumer (installed or why not,
       its files: present, sha equal to acme.sh's, owner and mode, what it actually reads),
       the bot's token (fingerprint) and the list of problems with a level. The self-check
-      and the bot's «Сертификат и DNS» read this.
+      and the bot's «Сертификат и DNS» read this. Text of the host's own configuration (a
+      hand-made reloadcmd) is shown redacted — it may carry a credential.
   deploy [--domain D] [--all] [--dry-run] [--json]
       THE reloadcmd. The source is acme.sh's own pair of the domain (Le_Domain and the
       working directory acme.sh gives, else the adopted domain): fullchain.cer +
@@ -49,7 +50,9 @@ VERBS
       A consumer is acted on only when its files changed or the state file says it last
       took another pair (--all: every active consumer). Exit 1 when a group was rolled
       back. When acme.sh runs it from inside `issue` / `renew` / `adopt` (env
-      VPN_BOT_CERT_NESTED) it defers to that verb, which deploys itself afterwards.
+      VPN_BOT_CERT_NESTED) it defers to that verb, which deploys itself afterwards. Run by
+      acme.sh (Le_Domain) for a domain that no longer names it (released by `adopt`
+      meanwhile) it lays nothing out.
   issue --names a[,b...] --zone ZONE [--json]
       acme.sh DNS-01 with Cloudflare (dns_cf) and the BOT's token
       (/etc/vpn-bot/dns_failover/cloudflare_token — the one file of the bot; acme.sh gets it
@@ -70,6 +73,11 @@ VERBS
       the certificate is not reissued. Only its install-cert is rewritten (`--install-cert`
       with the reloadcmd above and no file targets), then deploy (changed only: a consumer
       whose copy already equals acme.sh's is not restarted). --dry-run prints the change.
+      With several domains naming `vpn-bot-cert deploy`, --domain picks the one that stays
+      the bot's; every other is released (its reloadcmd emptied).
+  deploy / issue / renew / adopt --expect-pair SHA
+      The run was planned on acme.sh's pair SHA (16 hex of status' pair_sha): refused
+      (exit 3, nothing changed) when acme.sh holds another one by the time it starts.
   act [--json]
       Every installed reader's check and action on the files it has now — nothing is
       written. The wizard's rollback runs it after it restored a backup, so every reader
@@ -184,6 +192,31 @@ _SKIP_DIRS = frozenset({"ca", "deploy", "dnsapi", "notify", "http.header"})
 _REAL_KEYS = ("Le_RealCertPath", "Le_RealCACertPath", "Le_RealKeyPath", "Le_RealFullChainPath")
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_.~+/=-]{16,}")
 _TOKEN_ASSIGN_RE = re.compile(r"(?i)\b(CF_Token|CF_Key|SAVED_CF_Token|SAVED_CF_Key)\s*=\s*'?[^'\s]+'?")
+# Text of the host's own configuration that status shows (a hand-made reloadcmd may carry
+# a credential: a health-check URL, a header, an API key). First the patterns of
+# utils/redact.py, kept identical by a test; then what such a command line holds besides.
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b(bot_token|token|password|passwd|secret|mtproto_secret|private_key|preshared_key)\s*([:=])\s*[^,\s;]+",
+    re.IGNORECASE,
+)
+_SECRET_QUERY_RE = re.compile(r"(?i)(secret=)[^&\s]+")
+_HEX_SECRET_RE = re.compile(r"\b(?:dd)?[0-9a-fA-F]{32,}\b")
+_TG_BOT_TOKEN_RE = re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{35}\b")
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_.~+/=-]{16,}\b")
+_URL_CREDENTIALS_RE = re.compile(r"(?i)([a-z][a-z0-9+\-.]*://)([^:@/\s]+:[^@/\s]+@)")
+_WG_PRIVATE_KEY_RE = re.compile(r"\b[A-Za-z0-9+/]{43}={1,2}(?=[^A-Za-z0-9+/=]|$)")
+_CREDENTIAL_WORDS = r"(?:token|key|secret|passwd|password|pass|auth|credential|cred)"
+_HEADER_SECRET_RE = re.compile(
+    r"(?i)\b((?:proxy-)?authorization|x-[a-z0-9-]*" + _CREDENTIAL_WORDS + r"[a-z0-9-]*|api-?key)(\s*:\s*)"
+    r"(?:(?:bearer|basic|token|key|apikey|digest)\s+)?[^\s'\"]+"
+)
+_NAMED_SECRET_RE = re.compile(  # API_KEY=…  ?apikey=…  &token=…
+    r"(?i)\b([a-z0-9_.-]*" + _CREDENTIAL_WORDS + r"[a-z0-9_.-]*)=('[^']*'|\"[^\"]*\"|[^\s'\"&;|]+)"
+)
+_FLAG_SECRET_RE = re.compile(  # --api-token VALUE / --password=VALUE
+    r"(?i)(\s--?[a-z0-9-]*" + _CREDENTIAL_WORDS + r"[a-z0-9-]*)(\s+|=)('[^']*'|\"[^\"]*\"|[^\s'\"]+)"
+)
+_USER_SECRET_RE = re.compile(r"(\s(?:-u|--user)(?:\s+|=))('[^']*'|\"[^\"]*\"|[^\s'\"]+)")  # curl -u user:password
 
 
 class Refused(Exception):
@@ -316,6 +349,25 @@ def redact(ctx: Ctx, text: str) -> str:
             text = text.replace(secret, "***")
     text = _BEARER_RE.sub("Bearer ***", text)
     return _TOKEN_ASSIGN_RE.sub(lambda m: f"{m.group(1)}=***", text)
+
+
+def shown(ctx: Ctx, text: str) -> str:
+    """*text* from the host's own configuration as status and a plan show it (the bot puts
+    it in Telegram): redact() and utils/redact's patterns, then any header, NAME=value,
+    --flag value or curl -u named like a credential. Only for showing — what the helper
+    decides on (reload_kind, the conf it writes) reads the raw value."""
+    text = redact(ctx, text)
+    text = _FLAG_SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _USER_SECRET_RE.sub(lambda m: f"{m.group(1)}***", text)
+    text = _HEADER_SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _NAMED_SECRET_RE.sub(lambda m: f"{m.group(1)}=***", text)
+    text = _SECRET_QUERY_RE.sub(r"\1***", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _HEX_SECRET_RE.sub("***", text)
+    text = _TG_BOT_TOKEN_RE.sub("***", text)
+    text = _BEARER_TOKEN_RE.sub("Bearer ***", text)
+    text = _URL_CREDENTIALS_RE.sub(r"\1***@", text)
+    return _WG_PRIVATE_KEY_RE.sub("***", text)
 
 
 def tool_allowed(ctx: Ctx, name: str) -> str | None:
@@ -1028,7 +1080,8 @@ def file_status(ctx: Ctx, spec: FileSpec, c: Consumer, src: Source | None) -> di
 def domain_status(ctx: Ctx, d: AcmeDomain) -> dict[str, Any]:
     out: dict[str, Any] = {
         "name": d.name, "dir": ctx.unroot(d.dir), "ecc": d.ecc, "names": d.names, "keylength": d.keylength,
-        "reloadcmd": d.reloadcmd, "reloadcmd_kind": d.reload_kind,
+        # Shown redacted: a hand-made reloadcmd may carry a credential (the kind reads the raw one).
+        "reloadcmd": shown(ctx, d.reloadcmd), "reloadcmd_kind": d.reload_kind,
         "real_paths": {k: v for k, v in d.real_paths().items() if v},
         "next_renew": d.conf.get("Le_NextRenewTimeStr") or None, "token": acme_token(ctx, d),
         "san": [], "not_after": None, "days_left": None, "sha256": None, "key_ok": None, "error": None,
@@ -1053,7 +1106,9 @@ def domain_status(ctx: Ctx, d: AcmeDomain) -> dict[str, Any]:
 def status(ctx: Ctx) -> dict[str, Any]:
     domains = load_domains(ctx)
     ours = adopted(domains)
-    cands = [] if ours else candidates(ctx, domains)
+    # Several naming vpn-bot-cert deploy: each is offered (adopt --domain keeps the one
+    # picked and releases the others) — there is no other way out of that state.
+    cands = ours if len(ours) > 1 else [] if ours else candidates(ctx, domains)
     target = ours[0] if len(ours) == 1 else (cands[0] if len(cands) == 1 else None)
     src: Source | None = None
     if target is not None:
@@ -1080,7 +1135,7 @@ def status(ctx: Ctx) -> dict[str, Any]:
         "domains": [domain_status(ctx, d) for d in domains],
         "domain": ours[0].name if len(ours) == 1 else None,
         "adopted": len(ours) == 1,
-        "candidate": cands[0].name if not ours and len(cands) == 1 else None,
+        "candidate": cands[0].name if not ours and len(cands) == 1 else None,  # one candidate: adopt needs no pick
         "candidates": sorted({d.name for d in cands}),
         "ambiguous": [d.dir.name for d in (ours if len(ours) > 1 else cands if len(cands) > 1 else [])],
         "consumers": consumers,
@@ -1262,8 +1317,13 @@ class Staged:
     perms_change: bool = False
 
 
-def deploy(ctx: Ctx, domain: AcmeDomain, *, every: bool = False, dry_run: bool = False) -> dict[str, Any]:
+def deploy(ctx: Ctx, domain: AcmeDomain, *, every: bool = False, dry_run: bool = False,
+           expect: str | None = None) -> dict[str, Any]:
     src = load_source(ctx, domain)
+    if expect and src.pair_sha[:16] != expect[:16]:
+        # The very pair laid out below, not a second read of it (see expect_pair).
+        raise Refused(f"{domain.name}: acme.sh's certificate changed since the plan ({expect[:16]} → "
+                      f"{src.pair_sha[:16]}) — plan again")
     state = load_state(ctx)
     taken: dict[str, Any] = state.get("consumers") if isinstance(state.get("consumers"), dict) else {}
     if state.get("domain") not in (None, domain.name):
@@ -1612,7 +1672,7 @@ def _names(raw: str) -> list[str]:
     return names
 
 
-def issue(ctx: Ctx, raw_names: str, zone: str) -> dict[str, Any]:
+def issue(ctx: Ctx, raw_names: str, zone: str, *, expect: str | None = None) -> dict[str, Any]:
     names = _names(raw_names)
     zone = zone.strip().lower().rstrip(".")
     if not _ZONE_RE.match(zone):
@@ -1631,7 +1691,8 @@ def issue(ctx: Ctx, raw_names: str, zone: str) -> dict[str, Any]:
         domains = load_domains(ctx)
         ours = adopted(domains)
         if len(ours) > 1:
-            raise Refused("more than one acme.sh domain is the bot's: " + ", ".join(d.dir.name for d in ours))
+            raise Refused("more than one acme.sh domain is the bot's: " + ", ".join(d.dir.name for d in ours)
+                          + " — adopt one of them first")
         # Not adopted yet: the domain set up by hand IS the one reissued (its install-cert
         # is rewritten below) — a second domain beside it would keep copying its own
         # certificate over the registry's files on every renewal of its own.
@@ -1653,6 +1714,7 @@ def issue(ctx: Ctx, raw_names: str, zone: str) -> dict[str, Any]:
         ecc = keylength.startswith("ec")
         with cron_held_off(ctx, current, log):
             wait_for_acme(ctx, log)
+            expect_pair(ctx, current, expect)
             rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT,
                           env={"CF_Token": token, "CF_Zone_ID": zid, NESTED_ENV: lock.token()})
             log.append(f"acme.sh --issue -d {' -d '.join([main, *alts])} --keylength {keylength}: exit {rc}")
@@ -1672,7 +1734,7 @@ def issue(ctx: Ctx, raw_names: str, zone: str) -> dict[str, Any]:
     return report
 
 
-def renew(ctx: Ctx, zone: str | None) -> dict[str, Any]:
+def renew(ctx: Ctx, zone: str | None, *, expect: str | None = None) -> dict[str, Any]:
     zone = zone.strip().lower().rstrip(".") if zone else None
     if zone is not None and not _ZONE_RE.match(zone):
         raise Refused("--zone must be the Cloudflare zone's name")
@@ -1688,6 +1750,7 @@ def renew(ctx: Ctx, zone: str | None) -> dict[str, Any]:
             args.append("--ecc")
         with cron_held_off(ctx, domain, log):
             wait_for_acme(ctx, log)
+            expect_pair(ctx, domain, expect)
             # The token as it is NOW (after the wait), not as it was when the helper started.
             used = sync_token(ctx, domain, zone, log)
             if used is None:
@@ -1705,30 +1768,61 @@ def renew(ctx: Ctx, zone: str | None) -> dict[str, Any]:
     return report
 
 
+SYNC_ATTEMPTS = 3
+
+
 def sync_token(ctx: Ctx, domain: AcmeDomain, zone: str | None, log: list[str], *, unless: str | None = None) -> str | None:
     """The bot's token (and the zone's id) into the domain's acme.sh conf — the credential
-    cron renews it with. Read at the moment it is written: the superadmin may replace the
-    token while acme.sh runs, and acme.sh itself saves the one it was given. *unless*: the
-    token already written — nothing to do while the file still holds it."""
+    cron renews it with. The superadmin may replace the token at any moment (acme.sh
+    itself saves the one it was given, and the zone's id is a Cloudflare request away):
+    the file is read again after the request, just before the write, and again after
+    it — a token saved meanwhile is written in its turn, so the conf ends with the one
+    the file holds. *unless*: the token already written — nothing to do while the file
+    still holds it. Returns the token the conf holds (None: the bot has none)."""
+    written = unless
+    for _ in range(SYNC_ATTEMPTS):
+        try:
+            token = read_bot_token(ctx)
+        except Refused:
+            return written
+        if token == written:
+            return token
+        updates = {"CF_Token": token}
+        if zone:
+            updates["CF_Zone_ID"] = zone_id(ctx, token, zone)
+        try:
+            still = read_bot_token(ctx)
+        except Refused:
+            still = None
+        if still != token:
+            continue  # replaced (or removed) during the request: the next turn writes the new one
+        conf_set(ctx, domain.conf_path, updates)
+        log.append(f"{domain.name}: acme.sh renews with the bot's token ({fingerprint(token)}) from now on")
+        written = token
     try:
-        token = read_bot_token(ctx)
+        final = read_bot_token(ctx)
     except Refused:
-        return None
-    if unless is not None and token == unless:
-        return token
-    updates = {"CF_Token": token}
-    if zone:
-        updates["CF_Zone_ID"] = zone_id(ctx, token, zone)
-    conf_set(ctx, domain.conf_path, updates)
-    log.append(f"{domain.name}: acme.sh renews with the bot's token ({fingerprint(token)}) from now on")
-    return token
+        return written
+    if final == written:
+        return written
+    raise Cannot(f"{domain.name}: the bot's Cloudflare token kept changing while it was written to acme.sh's conf — "
+                 "run again")
 
 
-def adoption_plan(ctx: Ctx, explicit: str | None) -> tuple[AcmeDomain, dict[str, Any]]:
+def adoption_plan(ctx: Ctx, explicit: str | None) -> tuple[AcmeDomain, list[AcmeDomain], dict[str, Any]]:
+    """The domain to adopt, the ones released, and deploy's dry run with the conf diffs.
+
+    Several domains may already name vpn-bot-cert deploy (set by hand, or a domain moved):
+    status offers each of them, the one picked stays (or becomes) the bot's and every
+    other is RELEASED — its reloadcmd emptied, so its renewals stop laying its own pair
+    out over the picked one's. Its other install-cert targets are not the bot's to drop."""
     domains = load_domains(ctx)
     ours = adopted(domains)
-    if explicit is None and ours:
+    if explicit is None and len(ours) == 1:
         raise Refused(f"{ours[0].name} is already the bot's (reloadcmd {RELOAD_CMD})")
+    if explicit is None and ours:
+        raise Refused("more than one acme.sh domain names vpn-bot-cert deploy: " + ", ".join(d.dir.name for d in ours)
+                      + " — pass --domain")
     if explicit is not None:
         domain = bot_domain(ctx, domains, explicit)
     else:
@@ -1740,21 +1834,46 @@ def adoption_plan(ctx: Ctx, explicit: str | None) -> tuple[AcmeDomain, dict[str,
             raise Refused("more than one acme.sh domain could be the bot's: " + ", ".join(d.dir.name for d in cands)
                           + " — pass --domain")
         domain = cands[0]
-    if domain.reload_kind == "ours" and not any(domain.real_paths().values()):
+    others = [d for d in ours if d.dir != domain.dir]
+    if domain.reload_kind == "ours" and not any(domain.real_paths().values()) and not others:
         raise Refused(f"{domain.name} is already the bot's")
-    before = {k: v for k, v in domain.real_paths().items()}
+    before = dict(domain.real_paths())
     before["Le_ReloadCmd"] = domain.reloadcmd
     after = {k: "" for k in _REAL_KEYS}
     after["Le_ReloadCmd"] = RELOAD_CMD
-    diff = [f"- {k}='{before[k]}'\n+ {k}='{after[k]}'" for k in (*_REAL_KEYS, "Le_ReloadCmd") if before[k] != after[k]]
+    diff = [f"- {k}='{shown(ctx, before[k])}'\n+ {k}='{after[k]}'"
+            for k in (*_REAL_KEYS, "Le_ReloadCmd") if before[k] != after[k]]
     plan = deploy(ctx, domain, dry_run=True)
     plan["conf"] = ctx.unroot(domain.conf_path)
     plan["conf_diff"] = diff
-    return domain, plan
+    plan["release"] = [{"domain": d.name, "dir": ctx.unroot(d.dir), "conf": ctx.unroot(d.conf_path),
+                        "conf_diff": [f"- Le_ReloadCmd='{shown(ctx, d.reloadcmd)}'\n+ Le_ReloadCmd=''"]} for d in others]
+    return domain, others, plan
 
 
-def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool) -> dict[str, Any]:
-    domain, plan = adoption_plan(ctx, explicit)
+def release(ctx: Ctx, domain: AcmeDomain, log: list[str]) -> None:
+    """*domain* stops being the bot's: its reloadcmd emptied (acme.sh's own value for none)."""
+    conf_set(ctx, domain.conf_path, {"Le_ReloadCmd": ""})
+    log.append(f"{domain.dir.name}: released — its reloadcmd is empty, its renewals no longer lay anything out")
+
+
+def expect_pair(ctx: Ctx, domain: AcmeDomain | None, expected: str | None) -> None:
+    """The plan was shown for acme.sh's pair *expected* (16 hex of its pair hash): the run
+    applies only to that pair. A renewal by cron (or by hand) between the plan and the
+    confirmation means the plan no longer describes what would be done."""
+    if not expected or domain is None:
+        return
+    try:
+        now = load_source(ctx, domain).pair_sha[:16]
+    except (Refused, Cannot):
+        now = "unreadable"
+    if now != expected[:16]:
+        raise Refused(f"{domain.name}: acme.sh's certificate changed since the plan ({expected[:16]} → {now}) — "
+                      "plan again")
+
+
+def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool, expect: str | None = None) -> dict[str, Any]:
+    domain, others, plan = adoption_plan(ctx, explicit)
     if dry_run:
         return plan
     log: list[str] = []
@@ -1763,13 +1882,21 @@ def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool) -> dict[str, Any]:
     try:
         with cron_held_off(ctx, domain, log):
             wait_for_acme(ctx, log)
-            fresh = install_cert(ctx, domain, lock, log)
+            expect_pair(ctx, domain, expect)
+            # Released first: a renewal of another domain waiting on the lock then finds it is
+            # no longer the bot's (deploy skips a domain that does not name it).
+            for other in others:
+                release(ctx, other, log)
+            fresh = domain
+            if domain.reload_kind != "ours" or any(domain.real_paths().values()):
+                fresh = install_cert(ctx, domain, lock, log)
             # Still held: a due domain must not be renewed by cron under deploy's feet.
-            report = deploy(ctx, fresh)
+            report = deploy(ctx, fresh, expect=expect)
     finally:
         lock.release()
     report["log"] = log
     report["conf_diff"] = plan["conf_diff"]
+    report["release"] = plan["release"]
     return report
 
 
@@ -1814,6 +1941,9 @@ def human_deploy(r: Mapping[str, Any]) -> str:
         lines.append(f"  {s['consumer']}: skipped — {s['why']}")
     for entry in r.get("conf_diff", []):
         lines.append(entry)
+    for rel in r.get("release", []):
+        lines.append(f"release {rel['dir']} ({rel['conf']}):")
+        lines += rel["conf_diff"]
     return "\n".join(lines)
 
 
@@ -1828,6 +1958,12 @@ def host_mount_namespace_argv(argv: list[str]) -> list[str] | None:
     return ["nsenter", "--mount=/proc/1/ns/mnt", "--", sys.executable, "-I", str(Path(__file__).resolve()), *argv]
 
 
+def _pair_arg(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{16}", value):
+        raise argparse.ArgumentTypeError("16 lowercase hex characters (status' pair_sha)")
+    return value
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="vpn-bot-cert", allow_abbrev=False)
     parser.add_argument("--root", default="", help=argparse.SUPPRESS)
@@ -1835,24 +1971,30 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     sub = parser.add_subparsers(dest="verb", required=True)
     p = sub.add_parser("status", allow_abbrev=False)
     p.add_argument("--json", action="store_true")
+    # --expect-pair SHA: the pair (16 hex of status' pair_sha) the run was planned on —
+    # refused if acme.sh holds another one by the time the run starts (the wizard's plan).
     p = sub.add_parser("deploy", allow_abbrev=False)
     p.add_argument("--domain")
     p.add_argument("--all", action="store_true", dest="every")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--expect-pair", type=_pair_arg)
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("issue", allow_abbrev=False)
     p.add_argument("--names", required=True)
     p.add_argument("--zone", required=True)
+    p.add_argument("--expect-pair", type=_pair_arg)
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("renew", allow_abbrev=False)
     p.add_argument("--force", action="store_true", required=True)
     p.add_argument("--zone")
+    p.add_argument("--expect-pair", type=_pair_arg)
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("act", allow_abbrev=False)
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("adopt", allow_abbrev=False)
     p.add_argument("--domain")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--expect-pair", type=_pair_arg)
     p.add_argument("--json", action="store_true")
     return parser.parse_args(list(argv))
 
@@ -1898,20 +2040,26 @@ def main(argv: list[str]) -> int:
             if not args.dry_run and nested_in_parent(ctx):
                 print("vpn-bot-cert: deploy deferred to the running vpn-bot-cert (it deploys right after acme.sh)")
                 return EXIT_OK
-            domain = bot_domain(ctx, load_domains(ctx), args.domain)
             if args.dry_run:
+                domain = bot_domain(ctx, load_domains(ctx), args.domain)
                 report = deploy(ctx, domain, every=args.every, dry_run=True)
             else:
                 lock = Lock(ctx)
                 lock.acquire(LOCK_WAIT)
                 try:
-                    report = deploy(ctx, domain, every=args.every)
+                    # Resolved under the lock: an adoption may have released the domain
+                    # whose renewal called this (its acme.sh read the reloadcmd before).
+                    domain = bot_domain(ctx, load_domains(ctx), args.domain)
+                    if not args.domain and os.environ.get("Le_Domain") and domain.reload_kind != "ours":
+                        print(f"vpn-bot-cert: {domain.dir.name} no longer names {RELOAD_CMD!r} — nothing laid out")
+                        return EXIT_OK
+                    report = deploy(ctx, domain, every=args.every, expect=args.expect_pair)
                 finally:
                     lock.release()
         elif args.verb == "issue":
-            report = issue(ctx, args.names, args.zone)
+            report = issue(ctx, args.names, args.zone, expect=args.expect_pair)
         elif args.verb == "renew":
-            report = renew(ctx, args.zone)
+            report = renew(ctx, args.zone, expect=args.expect_pair)
         elif args.verb == "act":
             lock = Lock(ctx)
             lock.acquire(LOCK_WAIT)
@@ -1922,7 +2070,7 @@ def main(argv: list[str]) -> int:
             emit(args, report, "\n".join(f"{a['consumer']}: {a['text']}" for a in report["actions"]))
             return EXIT_OK if report["ok"] else EXIT_CONSUMER
         else:
-            report = adopt(ctx, args.domain, dry_run=args.dry_run)
+            report = adopt(ctx, args.domain, dry_run=args.dry_run, expect=args.expect_pair)
         emit(args, report, human_deploy(report))
         return EXIT_OK if report.get("ok", True) else EXIT_CONSUMER
     except Refused as exc:

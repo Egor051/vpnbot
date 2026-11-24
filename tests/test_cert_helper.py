@@ -646,3 +646,155 @@ def test_adoption_keeps_cron_off_the_domain_through_its_deploy(host: CertHost, t
     held = [int(v.split("=", 1)[1].strip("'")) for v in seen]
     assert held and all(v >= int(time.time()) + 3000 for v in held), seen
     assert host.conf()["Le_NextRenewTime"] == old_due
+
+
+# --------------------------------------------------------------------------- #
+# Fourth review round
+# --------------------------------------------------------------------------- #
+SECRET_RELOAD = (
+    "curl -fsS -H 'Authorization: Bearer hcABCDEFGHIJKLMNOPQRSTUV0123' https://hc.example/ping/x;"
+    " API_KEY=sk_live_value_9876543210 /usr/local/bin/notify --api-token tok_value_5555 && "
+    "curl -u bob:hunter2pass https://ops.example/?apikey=qwertyuiop123 && systemctl restart hysteria-server"
+)
+SECRETS = ("hcABCDEFGHIJKLMNOPQRSTUV0123", "sk_live_value_9876543210", "tok_value_5555", "hunter2pass",
+           "qwertyuiop123")
+
+
+def test_a_credential_in_a_hand_made_reloadcmd_is_never_shown(host: CertHost) -> None:
+    """status (JSON and text), a problem's text and the adoption's conf diff show a
+    hand-made reloadcmd redacted — the bot puts them in Telegram. What the helper decides
+    on still reads the raw command."""
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64(SECRET_RELOAD)})
+    host.lay_out(chain, key)
+    _, st = host.json("status")
+    text = host.cert("status").stdout
+    _, plan = host.json("adopt", "--dry-run")
+    for out in (json.dumps(st), text, json.dumps(plan)):
+        assert not [s for s in SECRETS if s in out], out
+    dom = st["domains"][0]
+    assert dom["reloadcmd_kind"] == "other" and "systemctl restart hysteria-server" in dom["reloadcmd"]
+    assert st["candidate"] == DOMAIN, "a reader named in the raw command still makes it the candidate"
+    assert host.cert("adopt").returncode == 0
+    assert host.conf()["Le_ReloadCmd"] == b64(RELOAD)
+
+
+def test_the_redaction_patterns_match_utils_redact(mod: ModuleType) -> None:
+    from utils import redact as bot_redact
+
+    names = [n for n in dir(bot_redact) if n.endswith("_RE") and isinstance(getattr(bot_redact, n), type(mod._NAME_RE))]
+    assert names
+    for name in names:
+        ours, theirs = getattr(mod, name), getattr(bot_redact, name)
+        assert (ours.pattern, ours.flags) == (theirs.pattern, theirs.flags), name
+    ctx = mod.Ctx(root="")
+    sample = "token=abc secret=x https://u:p@h/ Bearer abcdefghijklmnopqrstu " + "f" * 40
+    assert mod.shown(ctx, sample) == bot_redact.redact_value(sample)
+
+
+def test_several_domains_naming_the_helper_are_offered_and_adopt_releases_the_others(host: CertHost) -> None:
+    """Two domains name vpn-bot-cert deploy (by hand, or a domain moved): status offers
+    both, adopt --domain keeps the one picked and empties the other's reloadcmd."""
+    adopted_host(host)
+    other = f"old.{DOMAIN}"
+    host.acme_domain(other, conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "", "Le_ReloadCmd": b64(RELOAD)})
+    _, st = host.json("status")
+    assert st["adopted"] is False and st["candidate"] is None
+    assert st["candidates"] == sorted([DOMAIN, other]) and st["ambiguous"]
+    assert any(p["key"] == "domain" and p["level"] == "red" for p in st["problems"])
+    assert host.cert("adopt").returncode == 3, "no pick: refused"
+    _, plan = host.json("adopt", "--domain", DOMAIN, "--dry-run")
+    assert plan["conf_diff"] == [] and [r["domain"] for r in plan["release"]] == [other]
+    assert plan["release"][0]["conf_diff"] == [f"- Le_ReloadCmd='{RELOAD}'\n+ Le_ReloadCmd=''"]
+    assert host.conf(other)["Le_ReloadCmd"] == b64(RELOAD), "a dry run changes nothing"
+    proc = host.cert("adopt", "--domain", DOMAIN)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert host.conf()["Le_ReloadCmd"] == b64(RELOAD) and host.conf(other)["Le_ReloadCmd"] == ""
+    assert not [e for e in host.acme_log() if "install-cert" in json.dumps(e)], "the kept domain needed no install-cert"
+    _, st = host.json("status")
+    assert st["adopted"] is True and st["domain"] == DOMAIN and not st["ambiguous"]
+
+
+def test_a_renewal_of_a_released_domain_lays_nothing_out(host: CertHost) -> None:
+    """acme.sh read the reloadcmd before adopt released its domain: the deploy it runs
+    finds the domain no longer names the helper and copies nothing over the bot's pair."""
+    chain, _ = adopted_host(host)
+    other = f"old.{DOMAIN}"
+    host.acme_domain(other, conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "", "Le_ReloadCmd": ""})
+    host.reset_calls()
+    proc = host.cert("deploy", Le_Domain=other)
+    assert proc.returncode == 0 and "no longer names" in proc.stdout, proc.stdout + proc.stderr
+    assert host.actions() == [] and host.file(HY_CERT).read_bytes() == chain
+
+
+def test_a_run_planned_on_another_pair_is_refused(host: CertHost) -> None:
+    """--expect-pair: acme.sh renewed between the plan and the confirmation — the run
+    is refused before anything changes (deploy, adopt, renew)."""
+    adopted_host(host)
+    _, st = host.json("status")
+    planned = st["domains"][0]["pair_sha"]
+    assert host.json("deploy", "--expect-pair", planned)[0] == 0
+    host.acme_domain(conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "", "Le_ReloadCmd": b64(RELOAD)}, days=61)
+    before = host.file(HY_CERT).read_bytes()
+    host.reset_calls()
+    host.token()
+    for args in (("deploy",), ("renew", "--force", "--zone", ZONE)):
+        proc = host.cert(*args, "--expect-pair", planned)
+        assert proc.returncode == 3 and "changed since the plan" in proc.stderr, proc.stderr
+    assert host.actions() == [] and host.file(HY_CERT).read_bytes() == before and host.acme_log() == []
+    assert host.cert("deploy", "--expect-pair", "not-a-sha").returncode == 2
+
+
+def test_adopt_refuses_a_pair_renewed_since_the_plan(host: CertHost) -> None:
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64("systemctl restart hysteria-server")})
+    host.lay_out(chain, key)
+    _, plan = host.json("adopt", "--dry-run")
+    host.acme_domain(conf={"Le_ReloadCmd": b64("systemctl restart hysteria-server")}, days=61)
+    proc = host.cert("adopt", "--expect-pair", plan["source"]["pair_sha"])
+    assert proc.returncode == 3 and "changed since the plan" in proc.stderr
+    assert host.conf()["Le_ReloadCmd"] == b64("systemctl restart hysteria-server"), "nothing rewritten"
+
+
+def test_a_token_saved_while_the_zone_is_looked_up_is_the_one_written(
+    host: CertHost, mod: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sync_token reads the token, asks Cloudflare for the zone's id, then writes: a token
+    the superadmin saves during that request must not be overwritten by the old one."""
+    adopted_host(host)
+    host.token()
+    new = "cfNEW_TOKEN_0123456789abcdefghijklmnop"
+    seen: list[str] = []
+
+    def zone_id(_ctx: object, token: str, _zone: str) -> str:
+        seen.append(token)
+        if len(seen) == 1:
+            host.token(new)  # saved in the bot while the request is in flight
+        return ZONE_ID
+
+    monkeypatch.setattr(mod, "zone_id", zone_id)
+    ctx = mod.Ctx(root=str(host.root))
+    domain = next(d for d in mod.load_domains(ctx) if d.name == DOMAIN)
+    log: list[str] = []
+    assert mod.sync_token(ctx, domain, ZONE, log) == new
+    assert seen == [TOKEN, new]
+    assert host.conf()["CF_Token"] == new and host.conf()["CF_Zone_ID"] == ZONE_ID
+    assert TOKEN not in "\n".join(log) and new not in "\n".join(log)
+
+
+def test_a_token_that_keeps_changing_is_not_written_half_way(
+    host: CertHost, mod: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adopted_host(host)
+    host.token()
+    count = [0]
+
+    def zone_id(_ctx: object, _token: str, _zone: str) -> str:
+        count[0] += 1
+        host.token(f"cfTOKEN_{count[0]:02d}_0123456789abcdefghijklmnop")
+        return ZONE_ID
+
+    monkeypatch.setattr(mod, "zone_id", zone_id)
+    ctx = mod.Ctx(root=str(host.root))
+    domain = next(d for d in mod.load_domains(ctx) if d.name == DOMAIN)
+    with pytest.raises(mod.Cannot, match="kept changing"):
+        mod.sync_token(ctx, domain, ZONE, [])
+    assert "CF_Token" not in host.conf()

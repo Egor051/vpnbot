@@ -43,15 +43,22 @@ reader that reads something the registry does not lay out.
 
 | Verb | What |
 |---|---|
-| `status [--json]` | Read-only. Every acme.sh domain (SAN, expiry, key type, whether the key matches, reloadcmd, the Cloudflare credential it renews with — a fingerprint only), the bot's domain (the one whose reloadcmd is `vpn-bot-cert deploy`) or the domain to adopt, every reader (installed or why not, its files: present, equal to acme.sh's, owner and mode, the expiry on the copy), the bot's token (fingerprint), the cron line, and the **problems** with a level. The bot's screen and the self-check show these. |
+| `status [--json]` | Read-only. Every acme.sh domain (SAN, expiry, key type, whether the key matches, reloadcmd, the Cloudflare credential it renews with — a fingerprint only), the bot's domain (the one whose reloadcmd is `vpn-bot-cert deploy`) or the domain to adopt, every reader (installed or why not, its files: present, equal to acme.sh's, owner and mode, the expiry on the copy), the bot's token (fingerprint), the cron line, and the **problems** with a level. The bot's screen and the self-check show these. Text of the host's own configuration (a hand-made reloadcmd may carry a health-check URL, a header or an API key) is shown **redacted** — `utils/redact`'s patterns plus any header, `NAME=value`, `--flag value` or `curl -u` named like a credential; the screen redacts it once more. |
 | `deploy [--domain D] [--all] [--dry-run] [--json]` | THE reloadcmd (below). |
 | `issue --names a,b --zone ZONE` | DNS-01 (`dns_cf`) with the bot's token, Let's Encrypt, the domain's key type (`ec-256` for a new one), `--force`; then the install-cert above, then deploy. acme.sh is installed first when it is missing. The certificate's name cannot change here (that is a domain change). |
 | `renew --force [--zone ZONE]` | `acme.sh --renew --force` of the bot's domain — to prove a renewal works end to end. With the bot's token, the domain's saved `CF_Token` / `CF_Zone_ID` are set to it first (acme.sh sources the domain's conf on a renewal), so cron renews with the same token afterwards. Then deploy. |
-| `adopt [--domain D] [--dry-run]` | The migration (below): the domain is taken as it is, only its install-cert is rewritten. |
+| `adopt [--domain D] [--dry-run]` | The migration (below): the domain is taken as it is, only its install-cert is rewritten. With several domains naming `vpn-bot-cert deploy`, `--domain` picks the one that stays the bot's and every other is **released** (its reloadcmd emptied, nothing else of its install-cert touched). |
 | `act` | Every installed reader's check and action on the files it has — nothing is written. The wizard's rollback uses it. |
 
+`deploy`, `issue`, `renew` and `adopt` take `--expect-pair SHA` (16 hex of status' `pair_sha`): the
+pair the run was planned on. When acme.sh holds another one by the time the run starts (cron renewed
+between the plan and the confirmation) the run is refused, nothing changed — the plan no longer
+describes it. `deploy` compares the very pair it lays out; the others check after the wait for a
+running acme.sh, under the lock, before acme.sh or the conf is touched.
+
 Exit codes: 0 ok; 1 a reader failed and its group was rolled back; 2 usage; 3 refused (nothing to
-adopt, no token, a bad pair, another domain); 5 cannot (a tool or a file).
+adopt, no token, a bad pair, another domain, a pair other than the planned one); 5 cannot (a tool or
+a file).
 
 ### `deploy`: atomic, group by group
 
@@ -108,7 +115,11 @@ through the API (`services/dns.py`):
 
 A token that fails a step is refused with the step's reason, and nothing is stored. The audit
 carries its fingerprint (8 hex of sha256), never the value. The status shows whether acme.sh renews
-with the same token (fingerprints), and «🔄 Проверить продление» switches acme.sh to it.
+with the same token (fingerprints), and «🔄 Проверить продление» switches acme.sh to it. The token
+may be replaced while a renewal runs (and asking Cloudflare for the zone's id takes a request):
+`vpn-bot-cert` reads the file again after that request and again after writing acme.sh's conf, and
+writes the newer token in its turn — the conf ends with the token the file holds (a token that keeps
+changing is refused after three turns instead of being written half way).
 
 A certificate's names must all be in one zone (`CF_Zone_ID` is one zone): issue and renew refuse
 names from another zone while the run is built, before a plan is shown. For `issue` the bot passes
@@ -145,7 +156,7 @@ Buttons:
 
 | Button | Run of the `cert` mode |
 |---|---|
-| «🔁 Принять текущий сертификат» — only before adoption; «🔁 Принять <domain>», one per domain, when several acme.sh domains could be the bot's | `action=adopt` (`names` = the domain picked) |
+| «🔁 Принять текущий сертификат» — only before adoption; «🔁 Принять <domain>», one per domain, when several acme.sh domains could be the bot's — also when several already name `vpn-bot-cert deploy` (the plan lists the ones released) | `action=adopt` (`names` = the domain picked) |
 | «🆕 Выпустить / перевыпустить» → «▶️ Составить план» («✏️ Другие имена» to type them) | `action=issue`, `names`, `zone` |
 | «🔄 Проверить продление» — once adopted | `action=renew` (`zone` with the bot's token) |
 | «📦 Разложить заново» — when a reader's copy differs or did not take it | `action=deploy` |
@@ -153,8 +164,9 @@ Buttons:
 
 Each run is the wizard's contract ([wizard.md](wizard.md)): the plan with the diff (the acme.sh conf
 lines before → after, the certificate before → after, each reader and what happens to it), TOTP,
-«✅ Применить», then apply (a backup of the acme.sh domain directory, every reader's files and the
-state, then the helper) → verify (`vpn-bot-cert status`: the domain is the bot's, reloadcmd ours,
+«✅ Применить», then apply (refused when acme.sh's pair is no longer the one the plan was made on —
+the helper gets it as `--expect-pair` too; a backup of the acme.sh domain directory — and of every
+domain the run releases —, every reader's files and the state, then the helper) → verify (`vpn-bot-cert status`: the domain is the bot's, reloadcmd ours,
 no file targets, the pair valid for 7+ days and covering the names, every installed reader holds the
 pair, took it and is configured to read the registry's files — not a pair of its own; for issue /
 renew a NEW pair) → rollback on a failure (the backup restored — a

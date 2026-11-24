@@ -21,7 +21,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   its target, checked again, renamed into place; a reader whose action fails (or that is not active
   after its restart) gets its OLD files back with its group, the other groups keep the new pair —,
   `issue` (DNS-01 `dns_cf` with the bot's token, Let's Encrypt; acme.sh 3.1.1 installed when missing,
-  sha256-pinned), `renew --force` (acme.sh switched to the bot's token first) and `adopt`.
+  sha256-pinned), `renew --force` (acme.sh switched to the bot's token first) and `adopt` (several
+  domains naming the helper: the one picked stays the bot's, the others are released). What status
+  shows of the host's own configuration (a hand-made reloadcmd) is redacted; a run planned on one pair
+  refuses another (`--expect-pair`); a token replaced mid-renewal is the one acme.sh's conf ends with.
 - **«🔐 Сертификат и DNS» in the setup wizard.** The screen shows the certificate, the reloadcmd, every
   reader, the token and the bot's DNS records; «🔁 Принять текущий сертификат», «🆕 Выпустить /
   перевыпустить», «🔄 Проверить продление», «📦 Разложить заново» are runs of the new wizard mode `cert`

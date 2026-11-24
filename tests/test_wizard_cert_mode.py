@@ -238,3 +238,51 @@ def test_verify_fails_when_a_reader_is_configured_to_read_another_pair(host: Wiz
     result = [e for e in host.events(13) if e["event"] == "result"][-1]
     assert "does not read the registry's files" in result["text"]
     assert host.conf()["Le_ReloadCmd"] == b64("systemctl restart hysteria-server")
+
+
+def test_a_plan_shown_on_another_pair_is_not_applied(host: WizardCertHost) -> None:
+    """acme.sh renews between the plan and the confirmation: the plan's diff and hash no
+    longer describe the run — apply refuses before the backup, nothing changes."""
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64("systemctl restart hysteria-server")})
+    host.lay_out(chain, key)
+    assert host.wizard(14, "plan", action="adopt").returncode == 0
+    host.acme_domain(conf={"Le_ReloadCmd": b64("systemctl restart hysteria-server")}, days=61)
+    host.reset_calls()
+    assert host.wizard(14, "execute", action="adopt").returncode == 1
+    assert host.outcome(14) != "succeeded"
+    assert host.conf()["Le_ReloadCmd"] == b64("systemctl restart hysteria-server")
+    assert host.file("/etc/hysteria/cert.pem").read_bytes() == chain and host.actions() == []
+    assert not [c for c in host.calls_of("vpn-bot-cert") if c.startswith("vpn-bot-cert adopt --domain")]
+
+
+def test_the_helper_gets_the_planned_pair_to_check_under_its_lock(host: WizardCertHost) -> None:
+    chain, key = host.acme_domain(conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "", "Le_ReloadCmd": b64(RELOAD)})
+    host.lay_out(chain, key)
+    host.write("/etc/hysteria/cert.pem", b"stale", 0o644, ("hysteria", "hysteria"))
+    assert host.wizard(15, "plan", action="deploy").returncode == 0
+    assert host.wizard(15, "execute", action="deploy").returncode == 0, host.events(15)
+    deploys = [c for c in host.calls_of("vpn-bot-cert") if c.startswith("vpn-bot-cert deploy --expect-pair ")]
+    assert len(deploys) == 1, host.calls_of("vpn-bot-cert")
+
+
+def test_adopt_among_several_bot_domains_releases_the_others_and_a_rollback_restores_them(
+    host: WizardCertHost,
+) -> None:
+    chain, key = host.acme_domain(conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "", "Le_ReloadCmd": b64(RELOAD)})
+    host.lay_out(chain, key)
+    other = f"old.{DOMAIN}"
+    host.acme_domain(other, conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "", "Le_ReloadCmd": b64(RELOAD)})
+    assert host.wizard(16, "plan", action="adopt", names=DOMAIN).returncode == 0
+    text = host.plan_text(16)
+    assert "Released" in text and f"/root/.acme.sh/{other}_ecc/{other}.conf" in text and "+ Le_ReloadCmd=''" in text
+    # A reader configured to read another pair: verify fails, the run is rolled back.
+    host.write("/etc/hysteria/config.yaml", "tls:\n  cert: /etc/letsencrypt/live/x/fullchain.pem\n"
+                                            "  key: /etc/letsencrypt/live/x/privkey.pem\n")
+    assert host.wizard(16, "execute", action="adopt", names=DOMAIN).returncode == 1
+    assert host.outcome(16) == "rolled_back"
+    assert host.conf(other)["Le_ReloadCmd"] == b64(RELOAD), "the released domain is restored by the rollback"
+    host.file("/etc/hysteria/config.yaml").unlink()
+    assert host.wizard(17, "plan", action="adopt", names=DOMAIN).returncode == 0
+    assert host.wizard(17, "execute", action="adopt", names=DOMAIN).returncode == 0, host.events(17)
+    assert host.outcome(17) == "succeeded"
+    assert host.conf()["Le_ReloadCmd"] == b64(RELOAD) and host.conf(other)["Le_ReloadCmd"] == ""
