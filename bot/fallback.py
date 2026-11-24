@@ -21,6 +21,8 @@ from services.fallback import (
     NameResult,
     Preflight,
     PreflightItem,
+    ProxyAlert,
+    ProxyReconcile,
     ProxyRoute,
     SwitchReport,
 )
@@ -124,6 +126,39 @@ def _route_line(route: ProxyRoute, target: str) -> str:
     if not route.ok:
         return t("fb_route_failed", error=h((route.error or "")[:200]), **params)
     return t("fb_route_on" if target == FAILOVER else "fb_route_off", **params)
+
+
+def proxy_reconcile_text(result: ProxyReconcile) -> str:
+    """What «🔁 Довести прокси до hub» did: each port sent and its outcome, each port still
+    waiting — why nothing was looked at — or that there was nothing to do."""
+    if result.skipped:
+        return t(f"fb_proxy_reconcile_{result.skipped}", **{key: h(value) for key, value in result.detail})
+    target = FAILOVER if result.mode_on else "normal"
+    side = "on" if result.mode_on else "off"
+    lines: list[str] = []
+    for route in (*result.routes, *result.blocked):
+        params = {"proxy": h(PROXY_TITLES.get(route.kind, route.kind)), "port": route.port}
+        if route.ok or route.error == "ssh":
+            lines.append(_route_line(route, target))
+        else:
+            lines.append(t(f"fb_reconcile_failed_{side}", error=h((route.error or "")[:200]), **params))
+    for route in result.deferred:
+        lines.append(t("fb_reconcile_deferred", proxy=h(PROXY_TITLES.get(route.kind, route.kind)), port=route.port,
+                       error=h((route.error or "")[:200])))
+    if lines:
+        return "\n".join(lines)
+    return t("fb_proxy_reconcile_nothing") if result.mode_on else t("fb_proxy_reconcile_off")
+
+
+def proxy_alert_text(alert: ProxyAlert) -> str:
+    """The superadmins' message about a proxy port the reconcile could not move (one per
+    (port, error)): what users get now, the agent's own error, when the bot tries again."""
+    route = alert.route
+    return t(
+        "fb_proxy_alert_on" if alert.mode_on else "fb_proxy_alert_off",
+        hub=h(alert.hub), proxy=h(PROXY_TITLES.get(route.kind, route.kind)), port=route.port,
+        main=h(alert.main or "—"), error=h((route.error or "—")[:300]), minutes=alert.retry_minutes,
+    )
 
 
 def preflight_item_text(item: PreflightItem) -> str:

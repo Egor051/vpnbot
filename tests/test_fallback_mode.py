@@ -305,6 +305,7 @@ class Fallback:
 
     async def close(self) -> None:
         forget_secret(TOKEN)
+        await self.service.shutdown()  # a background proxy reconcile still running
         await self.db.close()
 
 

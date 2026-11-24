@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **The proxies through the hub are reconciled, not only switched** (docs/relay.md#the-proxies-through-the-hub,
+  docs/proxy.md). The hub got SOCKS5_PORT/MTPROTO_PORT only at the moment the mode was switched (or the
+  module toggled); a mode switched on BEFORE v3.3.0 was installed — prod: on since 2026-11-18, hub he2 —
+  never saw that event, so the hub never forwarded the port and «Прокси» kept handing out main's banned
+  IPv4 with port 31337 while the mode was on. Now `FallbackService.reconcile_proxies` brings the hub's
+  proxy ports to what the mode wants:
+  - **when**: at startup (right after `refresh_state()`), on every pass of the fallback's health loop
+    and when the «🛟 Режим фолбэка» screen opens — in the background, one at a time; the switch's lock
+    is held only to plan and to record, never across the agent calls, so neither the start, nor the
+    health pass, nor a switch (the automatic one above all) waits for an agent's `apply`; the screen
+    waits 10 s at most;
+  - **what**: the mode on — a missing proxy port is added through the agent's `apply` (whose own check
+    proves main:<port>), the proxy then shows the hub's IPv4 and «📣 Разослать» is offered; the mode
+    off — a proxy port left on the hub is taken off. Only the proxy ports change: the hub's other TCP
+    ports (443/2096 among them), its UDP ports and its upstream are sent back exactly as they are; a
+    hub whose set lacks a VPN port is not touched (the button says why); a live forward that differs
+    from the bot's copy (changed on the hub by hand) is not overwritten;
+  - **a failure**: a failed `apply` is repeated at most once an hour per port (only the port the
+    agent's check names waits); the superadmins get ONE message per (port, error), with the agent's
+    error. Nothing sent — the hub not answering its `status`, «relay busy», a plan a switch made
+    stale — is neither backed off nor told;
+  - **«🔍 Проверить»** says ⚠️ «режим включён, но hub не форвардит SOCKS5:31337» (with the last error)
+    and offers **«🔁 Довести прокси до hub»** (TOTP, `fallback_proxy_reconcile`; also on the mode's
+    screen while a proxy is still direct) — fixed from the bot, no CLI, and never by switching the
+    SOCKS5 module off and on (that deletes every SOCKS5 access).
+- **The SOCKS5 card no longer shows a «Telegram:» value** that read as a Telegram key of its own and got
+  mistaken for MTProto (off on prod for months): the `t.me/socks` link is a tap-to-add link,
+  «➕ Добавить прокси в Telegram» / «➕ Add the proxy to Telegram», outside any `<code>` block. With
+  MTProto off, «Прокси» no longer shows an MTProto access left active from before (nor its `t.me/proxy`
+  links), and the «📣 Разослать» broadcast never names a proxy that is off.
+
 ## [3.3.0](https://github.com/Egor051/vpnbot/releases/tag/v3.3.0) — 2026-11-19
 
 ### Added

@@ -16,6 +16,7 @@ never echoed back (services/fallback.py, adapters/cloudflare_dns.py).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import cast
 
@@ -27,6 +28,7 @@ from bot.container import Services
 from bot.fallback import (
     candidates_text,
     proxy_notice_text,
+    proxy_reconcile_text,
     failure_keys,
     fallback_text,
     names_text,
@@ -70,6 +72,8 @@ from utils.formatting import code, h
 router = Router()
 logger = logging.getLogger(__name__)
 
+# How long opening the screen waits for the proxy reconcile it starts (seconds).
+_SCREEN_RECONCILE_WAIT = 10.0
 # Typed steps: state → (prompt key, what the service does with the text).
 _ADDRESS_STATES = {"main": AdminFallbackStates.main_ipv4, "hub": AdminFallbackStates.hub_ipv4}
 
@@ -168,9 +172,22 @@ async def fallback_panel(callback: CallbackQuery, state: FSMContext, services: S
             return
         await _leave(state)
         await safe_callback_answer(callback)
+        await _reconcile_quietly(services)
         await _show(callback, services)
     except Exception as exc:
         await answer_callback_error(callback, exc)
+
+
+async def _reconcile_quietly(services: Services) -> None:
+    """The screen opens with the hub's proxy ports where the mode wants them
+    (services/fallback.py, «RECONCILED»): the bot's own reconcile, in the background —
+    its backoff holds, and the screen waits for it at most :data:`_SCREEN_RECONCILE_WAIT`
+    seconds (an agent's apply may take minutes; it goes on, the screen does not wait)."""
+    try:
+        task = _service(services).reconcile_in_background()
+        await asyncio.wait({task}, timeout=_SCREEN_RECONCILE_WAIT)
+    except Exception:
+        logger.warning("Fallback: the proxy reconcile on the screen failed", exc_info=True)
 
 
 @router.callback_query(F.data == "admin:fb:set")
@@ -196,7 +213,8 @@ async def fallback_preflight(callback: CallbackQuery, services: Services) -> Non
         fallback = _service(services)
         preflight = await fallback.preflight(callback.from_user.id)
         overview = await fallback.overview(callback.from_user.id)
-        keys = [item.key for item in preflight.failures]
+        # Warnings too: «режим включён, но hub не форвардит прокси» has its button.
+        keys = [item.key for item in preflight.items if not item.ok]
         await safe_edit_message_text(
             callback.message, preflight_text(preflight), reply_markup=fix_keyboard(keys, hub_id=_hub_id(overview))
         )
@@ -297,6 +315,28 @@ async def fallback_switch(callback: CallbackQuery, state: FSMContext, services: 
         await safe_callback_answer(callback, t("fb_switching"))
         action = callback.data.split(":")[2]
         await _run_switch(callback, services, action)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+# ── «🔁 Довести прокси до hub»: the reconcile, at once (docs/proxy.md) ───────────
+
+
+@router.callback_query(F.data == "admin:fb:pxr")
+async def fallback_proxy_reconcile(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """The mode is on and a proxy is still handed out with main's address: the hub's
+    proxy ports to what the mode wants now (the backoff does not hold). Only the proxy
+    ports change — the hub's VPN ports go back exactly as they are."""
+    try:
+        if not await _guard(callback, services):
+            return
+        assert callback.from_user is not None
+        if not await require_totp(callback, state, services, action="fallback_proxy_reconcile"):
+            return
+        await safe_callback_answer(callback, t("fb_proxy_reconcile_running"))
+        fallback = _service(services)
+        result = await fallback.reconcile_proxies(callback.from_user.id, force=True)
+        await _show(callback, services, proxy_reconcile_text(result))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

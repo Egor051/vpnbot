@@ -41,6 +41,10 @@ def fallback_keyboard(overview: FallbackOverview, configured: bool = True) -> In
         rows.append(_row(t("btn_fb_on"), "admin:fb:on"))
     if overview.state == "partial":
         rows.append(_row(t("btn_fb_repeat"), "admin:fb:retry"))
+    if overview.proxies_direct:
+        # The mode is on and a proxy is still handed out with main's address: the hub
+        # does not forward its port — the reconcile, at once (behind TOTP).
+        rows.append(_row(t("btn_fb_proxy_reconcile"), "admin:fb:pxr"))
     if overview.proxy_notice:
         # A switch moved a proxy: telling its users is offered, never done by itself.
         rows.append(_row(t("btn_fb_proxy_notice"), "admin:fb:pxn"))
@@ -125,6 +129,10 @@ _FIX: dict[str, tuple[str, str]] = {
     "fb_err_record_count": ("btn_fb_fix_names_list", "admin:fb:names"),
     "fb_err_record_foreign": ("btn_fb_fix_names_list", "admin:fb:names"),
     "fb_err_dns": ("btn_fb_fix_names_list", "admin:fb:names"),
+    # The mode on, the proxy handed out with main's address: the hub does not forward
+    # its port (a warning of «Проверить», not a refusal) — the reconcile, at once.
+    "fb_pf_proxy_not_forwarded": ("btn_fb_proxy_reconcile", "admin:fb:pxr"),
+    "fb_pf_proxy_not_forwarded_failed": ("btn_fb_proxy_reconcile", "admin:fb:pxr"),
 }
 # Refusals about the hub itself: its card.
 _HUB_FIX = frozenset({"fb_pf_agent_failed", "fb_pf_agent", "fb_pf_forward", "fb_pf_reach", "fb_pf_loop", "fb_err_hub_loop"})
@@ -164,6 +172,11 @@ def proxy_notice_keyboard() -> InlineKeyboardMarkup:
         _row(t("btn_fb_proxy_notice_skip"), "admin:fb:pxn:no"),
         _row(t("btn_fb_back"), "admin:fb"),
     ])
+
+
+def open_keyboard() -> InlineKeyboardMarkup:
+    """One button: the mode's screen (an alert to the superadmins)."""
+    return InlineKeyboardMarkup(inline_keyboard=[_row(t("btn_fb_open"), "admin:fb")])
 
 
 def back_keyboard() -> InlineKeyboardMarkup:

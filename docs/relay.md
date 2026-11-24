@@ -1486,10 +1486,45 @@ its update back, while no proxy user needs it. A port that cannot be forwarded *
 switch: the VPN goes first, the report says what the proxies did, and users stay on the address that
 works. A port equal to the hub's SSH port is never sent (the agent would refuse it anyway).
 
+**Reconciled, not only at the switch.** The switch is an event, and a mode switched on before the bot
+could forward proxies never saw it: the hub never got SOCKS5_PORT and the proxy stayed on main's
+banned address for as long as the mode was on (prod, v3.3.0 installed after the mode). So the bot
+also brings the hub's proxy ports to what the mode wants whenever it looks —
+`FallbackService.reconcile_proxies`:
+
+- **when**: at startup (right after `refresh_state()`), on every pass of the fallback's health loop
+  (the relay health loop's pass listener, `FallbackAutoSwitch.observe`), when the «🛟 Режим фолбэка»
+  screen opens, and with «🔁 Довести прокси до hub». All but the button run in the background, one at a
+  time: an agent's `apply` (up to its 300 s timeout) never holds the bot's start or the health pass
+  that decides the automatic switch, and the screen waits for it 10 s at most. The switch's lock is
+  held only to plan and to record — never across the agent calls — so a switch (the automatic one
+  above all) never waits behind a reconcile; a plan the switch made stale is not sent, and one that
+  went out while the mode flipped is planned again at once;
+- **what**: the mode on and a proxying module on whose port the hub does not forward → the port is
+  added (the same agent `apply`: its check proves main:<port> or rolls back), the proxy then shows the
+  hub's IPv4 and «📣 Разослать» is offered; a proxy port the hub forwards that the mode does not want
+  (the mode off, the module off) → taken off. Only the configured proxy ports are ever added or taken
+  off: the rest of the hub's TCP set (443/2096 and anything else), its UDP set and its upstream are
+  sent back exactly as they are, and a hub whose set lacks a VPN port is left to the preflight (the
+  button says so). Before the `apply` the hub is asked for its live forward: one that is neither the
+  bot's copy nor already the wanted set (changed on the relay by hand, another upstream) is **not
+  overwritten** — a failure with that reason;
+- **a failure**: the port is not sent again for an hour (`RECONCILE_BACKOFF_SECONDS`; the button does
+  not wait). When the agent's check names the port it could not reach, only that one waits — another
+  proxy goes on the next pass without it. The superadmins get ONE message per (port, error), with the
+  agent's own error and a button to the screen; an alert raised before the bot is up is delivered on
+  the next pass. Nothing sent is no failure: the hub not answering its `status`, a «relay busy»
+  refusal, a stale plan — neither backed off nor told, the next pass asks again.
+
+Never fix it by switching the SOCKS5 module off and on: `disable_protocol` deletes every SOCKS5 access.
+
 **The checks.** «🔍 Проверить» shows the proxy as a row of its own: the mode off — ℹ️ «the port goes
 on at the switch, the apply proves main:<port>»; on — ✅/⚠️ «the hub reaches main:<port>» (the hub's
 own check). An unreachable main:SOCKS5_PORT is a clear refusal of the PROXY (⚠️ and the error), not
-of the VPN: «the hub reaches main on 443/2096» does not count the proxy port.
+of the VPN: «the hub reaches main on 443/2096» does not count the proxy port. The mode on and the proxy
+still handed out «напрямую» — ⚠️ «режим включён, но hub не форвардит SOCKS5:<port>» (with the last
+`apply`'s error, if any) and **«🔁 Довести прокси до hub»** under it (TOTP, `fallback_proxy_reconcile`;
+the same button is on the mode's screen while a proxy is direct): the reconcile at once.
 
 **danted sees the hub.** Every connection through the hub reaches main from the hub's IP. Checked:
 `deploy/danted.conf.example` has `client pass` and `socks pass` `from: 0.0.0.0/0`, no network that

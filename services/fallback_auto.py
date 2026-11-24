@@ -105,6 +105,15 @@ class FallbackAutoSwitch:
 
     async def observe(self, relays: Sequence[Relay], last: Mapping[int, ProbeResult]) -> None:
         """One health pass (a pass listener of the supervisor)."""
+        # The hub's proxy ports follow the mode on every pass, not only at the switch
+        # (services/fallback.py, «RECONCILED»): a mode switched on before the bot could
+        # forward proxies is caught here. In the background — an agent's apply (up to
+        # its 300 s timeout) must not hold this pass's switch decision; its backoff keeps
+        # a failing port from being re-applied every pass.
+        try:
+            self.fallback.reconcile_in_background()
+        except Exception as exc:
+            logger.warning("Fallback auto: the proxy reconcile failed: %s: %s", type(exc).__name__, exc)
         now = self._clock()
         mode_on = self.fallback.mode_on
         if self._mode_was_on is not None and mode_on != self._mode_was_on:

@@ -190,6 +190,11 @@ async def _proxy_menu_view(services: Services, user_id: int, accesses: list[Any]
     available = await current_availability(services)
     socks5_on = Protocol.SOCKS5 in available
     mtproto_on = Protocol.MTPROTO in available
+    # An access of a proxy that is off (MTPROTO_ENABLED=false, the module off) is not
+    # shown: a stale MTProto card with its t.me/proxy links next to SOCKS5 reads as a
+    # Telegram proxy that works.
+    shown = {ProxyAccessType.SOCKS5: socks5_on, ProxyAccessType.MTPROTO: mtproto_on}
+    accesses = [access for access in accesses if shown.get(access.access_type, True)]
     if not accesses and not socks5_on and not mtproto_on:
         text = t("proxy_unavailable")
     elif not accesses:

@@ -29,7 +29,16 @@ out as `SOCKS5_HOST:SOCKS5_PORT` is dead for users in Russia. So, while the mode
   source: `ProxyEndpoints.endpoint()` in services/proxy_endpoint.py. Logins, passwords and secrets stay.
 - **The forward.** «Включить» adds `SOCKS5_PORT/tcp` (and `MTPROTO_PORT` when that module is on) to the
   hub with the same agent `apply` as 443/2096; «Выключить» and switching the module off take it away.
-  Details: [relay.md → The proxies through the hub](relay.md#the-proxies-through-the-hub).
+- **Reconciled, not only switched.** The bot also brings the hub's proxy ports to what the mode wants at
+  startup, on every health pass and when the mode's screen opens — a mode switched on before the bot
+  could forward proxies gets the port too. Only the proxy ports change (443/2096 never). A failed `apply`
+  is retried at most once an hour per port, the superadmins hear about it once per (port, error).
+  «🔍 Проверить» says ⚠️ «режим включён, но hub не форвардит SOCKS5:<port>» and offers **«🔁 Довести
+  прокси до hub»** (TOTP). Do **not** switch the SOCKS5 module off and on to «kick» it: that deletes every
+  SOCKS5 access. Details: [relay.md → The proxies through the hub](relay.md#the-proxies-through-the-hub).
+- **The card.** The SOCKS5 card ends with a tap-to-add link «➕ Добавить прокси в Telegram»
+  (`https://t.me/socks?…`) — not a «Telegram:» value, which read as a key of its own. With MTProto off
+  nothing of it is shown in «Прокси» or sent in the broadcast.
 - **TCP CONNECT only.** UDP ASSOCIATE does not work through the hub (danted hands out its own address
   for UDP); Telegram needs TCP only.
 - **danted** sees every such connection from the hub's IP: `client pass` / `socks pass` must let it in

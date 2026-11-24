@@ -32,6 +32,8 @@ from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
 from bot.handlers import admin, admin_bundles, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, relay_hardening, relay_sshd, security, settings as settings_handler, ssh_port, start, ufw
+from bot.fallback import proxy_alert_text
+from bot.keyboards.admin_fallback import open_keyboard as fallback_open_keyboard
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
 from bot.wizard_notifier import TelegramWizardNotifier
 from bot.middlewares.access import BlockedUserMiddleware
@@ -92,7 +94,7 @@ from services.ufw import UfwApplier, UfwDeadmanMonitor
 from aiogram.types import InlineKeyboardMarkup
 
 from services.relay_health import broadcast_to_admins, build_relay_health_supervisor
-from services.fallback import FallbackService
+from services.fallback import FallbackService, ProxyAlert
 from services.fallback_auto import FallbackAutoSwitch
 from services.relays import RelayService, warn_legacy_relay_env
 from services.relay_ssh import RelayAgentClient, RelayKeyStore, jump_key_store
@@ -781,6 +783,12 @@ async def _build_app(
         modules=protocol_modules_service,
     )
     await fallback_service.refresh_state()
+    # Reconcile, not only the switch: a mode switched on before this version could
+    # forward the proxies never put their port on the hub — the proxies would be handed
+    # out with main's banned address until the next switch. Brought to the hub now (and
+    # on every health pass, and when the screen opens); in the background — the agent's
+    # apply must not hold the bot's startup (services/fallback.py, «RECONCILED»).
+    fallback_service.reconcile_in_background()
     relay_health_supervisor.behind_hub = fallback_service.behind_hub
     # RU relays cut from main, stably: one suggestion — or, with «Автопереключение»,
     # the switch itself, always told (services/fallback_auto.py).
@@ -1026,6 +1034,12 @@ async def _build_app(
         await broadcast_to_admins(bot, settings.admin_ids, text, markup)
 
     fallback_auto.notify = _fallback_notify
+
+    async def _fallback_proxy_alert(alert: ProxyAlert) -> None:
+        await broadcast_to_admins(bot, settings.admin_ids, proxy_alert_text(alert), fallback_open_keyboard())
+
+    # A proxy port the reconcile could not move: once per (port, error).
+    fallback_service.proxy_alert = _fallback_proxy_alert
     host_check_monitor.bot = bot
     ssh_port_monitor.bot = bot
     relay_hardening_monitor.bot = bot

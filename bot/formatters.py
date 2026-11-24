@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from datetime import datetime, timezone
 from urllib.parse import quote
+from html import escape
 
 from aiogram.types import User as TgUser
 
@@ -692,8 +693,11 @@ def socks5_proxy_text(payload: dict[str, object]) -> str:
         f"Password: {code(payload.get('password') or '')}",
         f"URL: {code(payload.get('url') or '')}",
     ]
-    if payload.get("tg_link"):
-        lines.append(f"Telegram: {code(payload.get('tg_link') or '')}")
+    link = str(payload.get("tg_link") or "")
+    if link.startswith("https://t.me/socks?"):
+        # A link to tap, not one more value to copy: a bare «Telegram: <code>…</code>»
+        # read as a Telegram key of its own and got mistaken for MTProto.
+        lines.extend(["", f'<a href="{escape(link, quote=True)}">{h(t("socks5_tg_link"))}</a>'])
     return "\n".join(lines)
 
 
