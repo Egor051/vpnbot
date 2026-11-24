@@ -281,8 +281,63 @@ def test_adopt_among_several_bot_domains_releases_the_others_and_a_rollback_rest
     assert host.wizard(16, "execute", action="adopt", names=DOMAIN).returncode == 1
     assert host.outcome(16) == "rolled_back"
     assert host.conf(other)["Le_ReloadCmd"] == b64(RELOAD), "the released domain is restored by the rollback"
-    host.file("/etc/hysteria/config.yaml").unlink()
+    host.write("/etc/hysteria/config.yaml", "tls:\n  cert: /etc/hysteria/cert.pem\n  key: /etc/hysteria/key.pem\n")
     assert host.wizard(17, "plan", action="adopt", names=DOMAIN).returncode == 0
     assert host.wizard(17, "execute", action="adopt", names=DOMAIN).returncode == 0, host.events(17)
     assert host.outcome(17) == "succeeded"
     assert host.conf()["Le_ReloadCmd"] == b64(RELOAD) and host.conf(other)["Le_ReloadCmd"] == ""
+
+
+def test_verify_fails_when_what_hysteria_reads_cannot_be_told(host: WizardCertHost) -> None:
+    """hysteria's config unreadable (here: absent): what it serves is unknown — the run is
+    not verified, it is rolled back."""
+    chain, key = host.acme_domain(conf={"Le_ReloadCmd": b64("systemctl restart hysteria-server")})
+    host.lay_out(chain, key)
+    host.file("/etc/hysteria/config.yaml").unlink()
+    assert host.wizard(18, "plan", action="adopt").returncode == 0
+    assert host.wizard(18, "execute", action="adopt").returncode == 1
+    assert host.outcome(18) == "rolled_back"
+    result = [e for e in host.events(18) if e["event"] == "result"][-1]
+    assert "cannot tell what it reads" in result["text"]
+    assert host.conf()["Le_ReloadCmd"] == b64("systemctl restart hysteria-server")
+
+
+def test_the_helper_runs_in_its_own_group_killed_whole_on_a_timeout(tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mode helper's own timeout kills vpn-bot-cert AND the acme.sh it runs before it
+    returns — the rollback that follows never races a renewal still in flight."""
+    import importlib.machinery
+    import importlib.util
+    import os
+    import time
+    from types import SimpleNamespace
+
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    pidfile = tmp_path / "acme.pid"
+    stub = stubs / "vpn-bot-cert"
+    stub.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nwait\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("VPN_BOT_WIZARD_SELFTEST", "1")
+    monkeypatch.setenv("VPN_BOT_WIZARD_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("VPN_BOT_WIZARD_SELFTEST_BIN", str(stubs))
+    monkeypatch.setenv("PATH", f"{stubs}:{os.environ['PATH']}")
+    loader = importlib.machinery.SourceFileLoader("vpn_bot_wizard_cert_under_test", str(WIZ / "vpn-bot-wizard-cert"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    try:
+        loader.exec_module(module)
+        assert module.HELPER_TIMEOUT < module.lib.MODES["cert"].timeout("apply") - 120
+        logged: list[str] = []
+        ctx = SimpleNamespace(log=SimpleNamespace(write=logged.append))
+        rc, out = module.run_group(ctx, ["vpn-bot-cert", "renew", "--force"], 1)
+        assert rc == 124 and "process group killed" in out and logged
+        child = int(pidfile.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and os.path.exists(f"/proc/{child}"):
+            time.sleep(0.05)
+        assert not os.path.exists(f"/proc/{child}"), "acme.sh's process survived the timeout"
+    finally:
+        sys.modules.pop(loader.name, None)

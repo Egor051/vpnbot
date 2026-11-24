@@ -167,7 +167,7 @@ MODES: dict[str, Mode] = {
             "names": Param("names", ""),
             "zone": Param("zone", ""),
         },
-        timeouts={"plan": 180, "apply": 1200, "verify": 180, "rollback": 300},
+        timeouts={"plan": 180, "apply": 2700, "verify": 180, "rollback": 300},
     ),
 }
 

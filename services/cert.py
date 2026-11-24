@@ -69,7 +69,12 @@ class CertStatus:
     @property
     def domain(self) -> dict[str, Any] | None:
         name = self.domain_name
-        return next((d for d in self.raw.get("domains", []) if d.get("name") == name), None) if name else None
+        if not name:
+            return None
+        named = [d for d in self.raw.get("domains", []) if isinstance(d, dict) and d.get("name") == name]
+        # An rsa and an ecc directory share the name: the one status means.
+        target = self.raw.get("target_dir")
+        return next((d for d in named if d.get("dir") == target), named[0] if named else None)
 
     @property
     def consumers(self) -> list[dict[str, Any]]:
@@ -91,8 +96,17 @@ class CertStatus:
 
     @property
     def out_of_sync(self) -> bool:
-        return any(c.get("installed") and (c.get("in_sync") is False or c.get("took_current") is False)
-                   for c in self.consumers)
+        """A reader that «📦 Разложить заново» would change: another pair, a pair it did not
+        take, or the right pair with the wrong owner / mode (deploy repairs it in place)."""
+        return any(
+            c.get("installed")
+            and (
+                c.get("in_sync") is False
+                or c.get("took_current") is False
+                or any(isinstance(f, dict) and f.get("exists") and f.get("perms_ok") is False for f in c.get("files") or [])
+            )
+            for c in self.consumers
+        )
 
     @property
     def names(self) -> list[str]:

@@ -24,7 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sha256-pinned), `renew --force` (acme.sh switched to the bot's token first) and `adopt` (several
   domains naming the helper: the one picked stays the bot's, the others are released). What status
   shows of the host's own configuration (a hand-made reloadcmd) is redacted; a run planned on one pair
-  refuses another (`--expect-pair`); a token replaced mid-renewal is the one acme.sh's conf ends with.
+  refuses another (`--expect-pair`); a token replaced mid-renewal is the one acme.sh's conf ends with;
+  a timed-out command (and the wizard's timed-out `vpn-bot-cert`) is killed with its whole process group.
 - **«🔐 Сертификат и DNS» in the setup wizard.** The screen shows the certificate, the reloadcmd, every
   reader, the token and the bot's DNS records; «🔁 Принять текущий сертификат», «🆕 Выпустить /
   перевыпустить», «🔄 Проверить продление», «📦 Разложить заново» are runs of the new wizard mode `cert`

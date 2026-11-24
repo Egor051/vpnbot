@@ -798,3 +798,56 @@ def test_a_token_that_keeps_changing_is_not_written_half_way(
     with pytest.raises(mod.Cannot, match="kept changing"):
         mod.sync_token(ctx, domain, ZONE, [])
     assert "CF_Token" not in host.conf()
+
+
+# --------------------------------------------------------------------------- #
+# Fifth review round
+# --------------------------------------------------------------------------- #
+def test_a_host_without_the_vpn_bot_group_gets_the_root_fallback(host: CertHost) -> None:
+    """The legacy host the group fallback is for: the TLS files are laid out root:root —
+    the staged group checked is the effective one."""
+    host.acme_domain(conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "", "Le_ReloadCmd": b64(RELOAD)})
+    proc = host.cert("deploy", VPN_BOT_CERT_SELFTEST_USERS="root,hysteria")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert host.owner(TLS_KEY) == ("root", "root") and host.mode(TLS_KEY) == 0o640
+    assert host.owner(HY_KEY) == ("hysteria", "hysteria")
+
+
+def test_of_an_rsa_and_an_ecc_directory_the_candidate_one_is_adopted(host: CertHost, tmp_path: Path) -> None:
+    """The hand-made setup serves the readers from the RSA directory; an ECC one of the same
+    name is a leftover with a pair that does not match. The pick by name adopts the RSA one."""
+    chain, key = host.acme_domain(ecc=False, conf={"Le_ReloadCmd": b64("systemctl restart hysteria-server")})
+    host.lay_out(chain, key)
+    host.acme_domain(conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "", "Le_ReloadCmd": ""}, days=61)
+    _, other_key = make_pair(tmp_path / "stale", [DOMAIN])
+    host.file(f"/root/.acme.sh/{DOMAIN}_ecc/{DOMAIN}.key").write_bytes(other_key.read_bytes())
+    _, st = host.json("status")
+    assert st["candidate"] == DOMAIN and st["target_dir"] == f"/root/.acme.sh/{DOMAIN}"
+    _, plan = host.json("adopt", "--domain", DOMAIN, "--dry-run")
+    assert plan["conf"] == f"/root/.acme.sh/{DOMAIN}/{DOMAIN}.conf"
+    assert host.cert("adopt", "--domain", DOMAIN).returncode == 0
+    assert host.conf(ecc=False)["Le_ReloadCmd"] == b64(RELOAD) and host.conf()["Le_ReloadCmd"] == ""
+
+
+def test_a_timed_out_command_takes_its_children_with_it(mod: ModuleType, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """acme.sh runs curl / openssl: a timeout kills the whole process group, so nothing of
+    it keeps writing after the helper gave up."""
+    import os
+    import time
+
+    stubs = tmp_path / "no-stubs"
+    pidfile = tmp_path / "child.pid"
+    stub = stubs / "slowtool"
+    stub.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nwait\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stubs}:{os.environ['PATH']}")
+    ctx = mod.Ctx(root=str(tmp_path / "root"))
+    started = time.monotonic()
+    rc, out = mod.run(ctx, ["slowtool"], timeout=1)
+    assert rc == 124 and "timed out" in out and time.monotonic() - started < 20
+    child = int(pidfile.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and os.path.exists(f"/proc/{child}"):
+        time.sleep(0.05)
+    assert not os.path.exists(f"/proc/{child}"), "the grandchild survived the timeout"

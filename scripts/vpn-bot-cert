@@ -110,6 +110,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess  # noqa: S404 — fixed argv lists of system tools, never a shell
 import sys
@@ -405,14 +406,28 @@ def run(
     if env:
         run_env.update(env)
     try:
-        proc = subprocess.run(  # noqa: S603 — argv list, never a shell
-            args, capture_output=True, text=True, errors="replace", timeout=timeout, check=False, env=run_env, cwd=cwd,
+        # Its own process group: on a timeout every process it started goes with it (acme.sh
+        # runs curl and openssl) — nothing of a timed-out command keeps writing afterwards.
+        proc = subprocess.Popen(  # noqa: S603 — argv list, never a shell
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True,
+            errors="replace", env=run_env, cwd=cwd, start_new_session=True,
         )
     except FileNotFoundError:
         return 127, f"{argv[0]}: not found"
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        kill_group(proc)
         return 124, f"{argv[0]}: timed out after {timeout}s"
-    return proc.returncode, redact(ctx, (proc.stdout or "") + (proc.stderr or ""))
+    return proc.returncode, redact(ctx, (stdout or "") + (stderr or ""))
+
+
+def kill_group(proc: subprocess.Popen[str]) -> None:
+    """SIGKILL the process group *proc* leads, then reap it."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.communicate(timeout=10)
 
 
 def fence(ctx: Ctx, path: Path) -> None:
@@ -845,19 +860,26 @@ def adopted(domains: Sequence[AcmeDomain]) -> list[AcmeDomain]:
     return [d for d in domains if d.reload_kind == "ours"]
 
 
-def candidates(ctx: Ctx, domains: Sequence[AcmeDomain]) -> list[AcmeDomain]:
-    """A domain set up by hand for these readers: it copies to a registry path, its
-    reloadcmd names the tracked hook or a reader, or it is HYSTERIA2_SNI's."""
-    paths = registry_paths()
+def candidate_kind(ctx: Ctx, d: AcmeDomain) -> str | None:
+    """Why *d* could be the bot's: "setup" — set up by hand for these readers (it copies to
+    a registry path, its reloadcmd names the tracked hook or a reader); "sni" — only that
+    it covers HYSTERIA2_SNI; None — neither."""
+    real = set(d.real_paths().values()) - {""}
+    cmd = d.reloadcmd
+    if real & registry_paths() or d.reload_kind == "legacy" or any(w in cmd for w in ("hysteria", "nginx", "vpn-bot-subscription")):
+        return "setup"
     sni = ctx.env("HYSTERIA2_SNI").strip().lower()
-    out = []
-    for d in domains:
-        real = set(d.real_paths().values()) - {""}
-        cmd = d.reloadcmd
-        if (real & paths or d.reload_kind == "legacy" or any(w in cmd for w in ("hysteria", "nginx", "vpn-bot-subscription"))
-                or (sni and sni in d.names)):
-            out.append(d)
-    return out
+    return "sni" if sni and sni in d.names else None
+
+
+def candidates(ctx: Ctx, domains: Sequence[AcmeDomain]) -> list[AcmeDomain]:
+    """The domains that could be the bot's — one per name: of an rsa and an ecc directory
+    sharing it, the one _one_variant picks (the plan names that directory)."""
+    found = [d for d in domains if candidate_kind(ctx, d)]
+    by_name: dict[str, list[AcmeDomain]] = {}
+    for d in found:
+        by_name.setdefault(d.name.lower(), []).append(d)
+    return [_one_variant(ctx, group) if len(group) > 1 else group[0] for group in by_name.values()]
 
 
 def bot_domain(ctx: Ctx, domains: Sequence[AcmeDomain], explicit: str | None = None) -> AcmeDomain:
@@ -865,12 +887,12 @@ def bot_domain(ctx: Ctx, domains: Sequence[AcmeDomain], explicit: str | None = N
         named = [d for d in domains if d.name.lower() == explicit.lower()]
         if not named:
             raise Refused(f"acme.sh has no domain {explicit}")
-        return _one_variant(named)
+        return _one_variant(ctx, named)
     le = os.environ.get("Le_Domain", "").strip().lower()
     if le:
         named = [d for d in domains if d.name.lower() == le]
         if named:
-            return _one_variant(named)
+            return _one_variant(ctx, named)
     ours = adopted(domains)
     if len(ours) > 1:
         raise Refused("more than one acme.sh domain names vpn-bot-cert deploy: " + ", ".join(d.dir.name for d in ours))
@@ -879,7 +901,19 @@ def bot_domain(ctx: Ctx, domains: Sequence[AcmeDomain], explicit: str | None = N
     return ours[0]
 
 
-def _one_variant(named: Sequence[AcmeDomain]) -> AcmeDomain:
+def _usable(ctx: Ctx, d: AcmeDomain) -> bool:
+    try:
+        load_source(ctx, d)
+    except (Refused, Cannot):
+        return False
+    return True
+
+
+def _one_variant(ctx: Ctx, named: Sequence[AcmeDomain]) -> AcmeDomain:
+    """An rsa and an ecc directory of the same name: the one acme.sh runs us from, else the
+    one that is the bot's, else the one the hand-made setup serves the readers from (the
+    candidate status offered), else the one whose pair is usable — ecc only when all of
+    that leaves both. (The plan names the directory it acts on.)"""
     if len(named) == 1:
         return named[0]
     with contextlib.suppress(OSError):
@@ -887,11 +921,17 @@ def _one_variant(named: Sequence[AcmeDomain]) -> AcmeDomain:
         for d in named:
             if d.dir.resolve() == cwd:
                 return d
-    ours = [d for d in named if d.reload_kind == "ours"]
-    if len(ours) == 1:
-        return ours[0]
-    ecc = [d for d in named if d.ecc]
-    return ecc[0] if ecc else named[0]
+    narrowed = list(named)
+    for keep in (lambda ds: [d for d in ds if d.reload_kind == "ours"],
+                 lambda ds: [d for d in ds if candidate_kind(ctx, d) == "setup"],
+                 lambda ds: [d for d in ds if _usable(ctx, d)]):
+        left = keep(narrowed)
+        if len(left) == 1:
+            return left[0]
+        if left:
+            narrowed = left
+    ecc = [d for d in narrowed if d.ecc]
+    return ecc[0] if ecc else narrowed[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -1137,6 +1177,8 @@ def status(ctx: Ctx) -> dict[str, Any]:
         "adopted": len(ours) == 1,
         "candidate": cands[0].name if not ours and len(cands) == 1 else None,  # one candidate: adopt needs no pick
         "candidates": sorted({d.name for d in cands}),
+        # The directory meant by "domain" / "candidate" (an rsa and an ecc one share the name).
+        "target_dir": ctx.unroot(target.dir) if target is not None else None,
         "ambiguous": [d.dir.name for d in (ours if len(ours) > 1 else cands if len(cands) > 1 else [])],
         "consumers": consumers,
         "token": token_status(ctx),

@@ -276,3 +276,17 @@ def test_the_screen_never_shows_a_credential_of_the_hosts_reloadcmd() -> None:
     data["problems"] = [{"level": "red", "key": "reloadcmd", "text": f"reloadcmd is 'curl ... Bearer {secret}'"}]
     text = screen_text(CertStatus(raw=data), [], token_fp="abcd1234")
     assert secret not in text and "Bearer ***" in text
+
+
+def test_a_reader_with_only_wrong_permissions_gets_the_redeploy_button() -> None:
+    """The right pair with the wrong owner / mode: deploy repairs it in place, so the screen
+    offers «📦 Разложить заново»."""
+    from bot.cert_views import screen_keyboard
+    from services.cert import CertStatus
+
+    data = report(adopted=True)
+    assert "cert:go:deploy" not in _callbacks(screen_keyboard(CertStatus(raw=data)))
+    data["consumers"][0]["files"] = [{"path": "/etc/hysteria/key.pem", "exists": True, "same": True,
+                                      "perms_ok": False, "owner": "root:root", "mode": "0644"}]
+    assert CertStatus(raw=data).out_of_sync is True
+    assert "cert:go:deploy" in _callbacks(screen_keyboard(CertStatus(raw=data)))

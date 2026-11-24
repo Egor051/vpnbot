@@ -159,7 +159,7 @@ Buttons:
 | «🔁 Принять текущий сертификат» — only before adoption; «🔁 Принять <domain>», one per domain, when several acme.sh domains could be the bot's — also when several already name `vpn-bot-cert deploy` (the plan lists the ones released) | `action=adopt` (`names` = the domain picked) |
 | «🆕 Выпустить / перевыпустить» → «▶️ Составить план» («✏️ Другие имена» to type them) | `action=issue`, `names`, `zone` |
 | «🔄 Проверить продление» — once adopted | `action=renew` (`zone` with the bot's token) |
-| «📦 Разложить заново» — when a reader's copy differs or did not take it | `action=deploy` |
+| «📦 Разложить заново» — when a reader's copy differs, did not take it, or has the wrong owner / mode | `action=deploy` |
 | «🔑 Токен Cloudflare» | — (set / delete, TOTP) |
 
 Each run is the wizard's contract ([wizard.md](wizard.md)): the plan with the diff (the acme.sh conf
@@ -168,11 +168,19 @@ lines before → after, the certificate before → after, each reader and what h
 the helper gets it as `--expect-pair` too; a backup of the acme.sh domain directory — and of every
 domain the run releases —, every reader's files and the state, then the helper) → verify (`vpn-bot-cert status`: the domain is the bot's, reloadcmd ours,
 no file targets, the pair valid for 7+ days and covering the names, every installed reader holds the
-pair, took it and is configured to read the registry's files — not a pair of its own; for issue /
-renew a NEW pair) → rollback on a failure (the backup restored — a
+pair, took it and is configured to read the registry's files — not a pair of its own; hysteria
+whose config cannot be read is unverified too; for issue / renew a NEW pair) → rollback on a failure (the backup restored — a
 domain the run created is moved aside so acme.sh does not renew it —, then `vpn-bot-cert act`). One
 global lock (the wizard's), the audit log (`wizard_*`, `dns_*`). No step changes the host's network:
-no dead-man.
+no dead-man. The mode runs `vpn-bot-cert` in a process group of its own with a budget of 2400 s
+(the wait for a running acme.sh, acme.sh's own 900 s, installing acme.sh, every reader's action)
+under the mode's apply timeout of 2700 s; on a timeout the whole group — `vpn-bot-cert` and the
+acme.sh it runs — is killed before the rollback starts (the helper does the same to every command
+of its own), so a rollback never restores files under a renewal still in flight.
+
+An rsa and an ecc directory of the same name: the one acme.sh runs the helper from, else the one
+that is the bot's, else the one set up by hand for the readers, else the one whose pair is usable
+(ecc only when that leaves both). The plan names the directory it acts on.
 
 ## Migrating production: adoption
 

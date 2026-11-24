@@ -40,9 +40,12 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import contextlib
 import json
 import os
 import shutil
+import signal
+import subprocess  # noqa: S404 — the fixed argv of vpn-bot-cert, never a shell
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -69,7 +72,11 @@ CERT_HELPER = "/usr/local/sbin/vpn-bot-cert"
 ACME_HOME = "/root/.acme.sh"
 STATE_FILE = "/var/lib/vpn-bot-cert/state.json"
 PLAN_ARTIFACT = "cert-plan.json"
-HELPER_TIMEOUT = 1100
+# vpn-bot-cert's own budget for one apply: the wait for a running acme.sh (300 s), acme.sh
+# itself (900 s), installing acme.sh when missing (≤ 360 s), the token sync and every
+# reader's check, action and settle — under the mode's apply timeout (2700 s, the lib's
+# MODES), so it is this helper that stops vpn-bot-cert, never the launcher.
+HELPER_TIMEOUT = 2400
 VERIFY_MIN_DAYS = 7
 
 
@@ -77,9 +84,37 @@ def helper_argv(*args: str) -> list[str]:
     return ["vpn-bot-cert" if lib.SELFTEST else CERT_HELPER, *args]
 
 
+def run_group(ctx: Any, argv: list[str], timeout: int) -> tuple[int, str]:
+    """*argv* in its own process group; on a timeout the WHOLE group is killed and reaped
+    before this returns — vpn-bot-cert and the acme.sh it runs — so the rollback that
+    follows never restores files under a renewal still in flight."""
+    exe = lib.tool_allowed(argv[0])
+    if exe is None:
+        return 127, f"{argv[0]}: refused (VPN_BOT_WIZARD_SELFTEST: not a stub)"
+    env = {k: v for k, v in os.environ.items() if k not in ("LANGUAGE", "LC_MESSAGES")}
+    env["LC_ALL"] = "C"
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — argv list, never a shell
+            [exe, *argv[1:]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            text=True, errors="replace", env=env, start_new_session=True,
+        )
+    except FileNotFoundError:
+        return 127, f"{argv[0]}: not found"
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        partial, _ = proc.communicate()
+        out, rc = f"{partial or ''}\n{argv[0]}: timed out after {timeout}s (its process group killed)", 124
+    ctx.log.write(f"$ {' '.join(argv)}  (exit {rc})\n{(out or '').rstrip()}")
+    return rc, out or ""
+
+
 def call(ctx: Any, *args: str, timeout: int = 120) -> tuple[int, dict[str, Any], str]:
     """vpn-bot-cert <args> --json: (exit code, its JSON object, the rest of its output)."""
-    rc, out = ctx.run(helper_argv(*args, "--json"), timeout=timeout)
+    rc, out = run_group(ctx, helper_argv(*args, "--json"), timeout)
     obj: dict[str, Any] = {}
     rest = []
     for line in out.splitlines():
@@ -100,13 +135,16 @@ def failure(obj: dict[str, Any], rest: str, rc: int) -> str:
     return str(obj.get("refused") or obj.get("error") or (rest.splitlines()[-1] if rest else f"exit {rc}"))
 
 
-def bot_domain(st: dict[str, Any]) -> dict[str, Any] | None:
-    name = st.get("domain") or st.get("candidate")
-    return next((d for d in st.get("domains", []) if d.get("name") == name), None) if name else None
-
-
 def domain_named(st: dict[str, Any], name: object) -> dict[str, Any] | None:
-    return next((d for d in st.get("domains", []) if d.get("name") == name), None) if name else None
+    """The domain *name* — of an rsa and an ecc directory sharing it, the one status means."""
+    if not name:
+        return None
+    named = [d for d in st.get("domains", []) if d.get("name") == name]
+    return next((d for d in named if d.get("dir") == st.get("target_dir")), named[0] if named else None)
+
+
+def bot_domain(st: dict[str, Any]) -> dict[str, Any] | None:
+    return domain_named(st, st.get("domain") or st.get("candidate"))
 
 
 def readers(st: dict[str, Any]) -> list[dict[str, Any]]:
@@ -394,6 +432,9 @@ def step_verify(ctx: Any) -> int:
         if c.get("reads_registry") is False:
             # Restarted on the registry's files, but configured to serve another pair.
             bad.append(f"{c['name']}: it does not read the registry's files ({c.get('reads')})")
+        elif c.get("reads_registry") is None and c.get("name") == "hysteria":
+            # Its config is the only way to know what it serves: unreadable = unverified.
+            bad.append(f"{c['name']}: cannot tell what it reads ({c.get('reads') or 'unknown'})")
         if c.get("in_sync") is not True:
             bad.append(f"{c['name']}: its files are not acme.sh's current pair")
         elif c.get("took_current") is False:
