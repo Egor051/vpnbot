@@ -301,3 +301,26 @@ async def test_a_token_without_zone_read_is_refused_and_told_what_it_lacks(world
         await world.dns_service.set_token(ADMIN, OTHER, ZONE)
     assert caught.value.key == "dns_err_token_no_zone" and not world.token_file.exists()
     assert "Zone · Zone · Read" in t(caught.value.key, **caught.value.params)
+
+
+async def test_a_zone_looked_up_with_the_old_token_is_not_cached_after_a_rotation(world: Fallback) -> None:
+    """A lookup in flight while the token changes (the cache is cleared) must not fill the
+    cache again with what the OLD token saw — for the DNS service and the fallback switch."""
+    real = world.cf.__call__
+
+    async def rotating(method: str, url: str, **kw: Any) -> HttpReply:
+        reply = await real(method, url, **kw)
+        if method == "GET" and url.rstrip("/").endswith("/zones"):
+            world.dns_service.forget_zones()  # what set_token / delete_token do meanwhile
+        return reply
+
+    world.dns_service.dns = CloudflareDns(world.token_file.load, transport=rotating)
+    zone = await world.dns_service.zone(ZONE)
+    assert zone.name == ZONE and ZONE not in world.dns_service.zone_cache
+    world.service.dns = CloudflareDns(world.token_file.load, transport=rotating)
+    await world.service._zone(ZONE)
+    assert ZONE not in world.service._zones
+    # Without a rotation in between the result is cached as before.
+    world.dns_service.dns = CloudflareDns(world.token_file.load, transport=real)
+    await world.dns_service.zone(ZONE)
+    assert ZONE in world.dns_service.zone_cache

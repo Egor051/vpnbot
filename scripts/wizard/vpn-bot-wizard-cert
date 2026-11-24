@@ -165,6 +165,23 @@ def to_release(st: dict[str, Any], keep: dict[str, Any] | None) -> list[str]:
                        or set((d.get("real_paths") or {}).values()) & set(REGISTRY_FILES)))
 
 
+def covers(san: list[str], name: str) -> bool:
+    """vpn-bot-cert's covers(): *name* is one of *san*, or under a one-label wildcard of it."""
+    name = name.lower().rstrip(".")
+    for entry in (e.lower() for e in san):
+        if entry == name:
+            return True
+        if entry.startswith("*.") and name.count(".") == entry.count(".") and name.split(".", 1)[1] == entry[2:]:
+            return True
+    return False
+
+
+def hysteria_sni(st: dict[str, Any]) -> str | None:
+    """HYSTERIA2_SNI when hysteria is a reader here: its clients check that name."""
+    sni = st.get("hysteria2_sni")
+    return str(sni) if sni and any(c.get("name") == "hysteria" for c in readers(st)) else None
+
+
 def readers(st: dict[str, Any]) -> list[dict[str, Any]]:
     return [c for c in st.get("consumers", []) if c.get("installed")]
 
@@ -224,6 +241,10 @@ def plan_issue(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]
     if current is not None and current["name"] not in names:
         raise lib.WizardError(f"the certificate's name would change ({current['name']} → {names[0]}): that is a domain "
                               "change, not a reissue")
+    sni = hysteria_sni(st)
+    if sni and not covers(names, sni):
+        raise lib.WizardError(f"the names do not cover HYSTERIA2_SNI={sni}: hysteria's clients would reject the "
+                              "certificate — add it to the names")
     main = current["name"] if current is not None else names[0]
     lines = [
         f"Certificate now:  {cert_line(current)}",
@@ -467,6 +488,10 @@ def step_verify(ctx: Any) -> int:
                 bad.append("the SAN does not cover " + ", ".join(missing))
         if plan["action"] in ("issue", "renew") and plan.get("pair_sha") and dom.get("pair_sha") == plan["pair_sha"]:
             bad.append("acme.sh's pair is still the old one")
+        sni = hysteria_sni(st)
+        if plan["action"] in ("adopt", "issue") and sni and not covers(list(dom.get("san") or []), sni):
+            # hysteria was just restarted on it: its clients check HYSTERIA2_SNI.
+            bad.append(f"the certificate ({', '.join(dom.get('san') or [])}) does not cover HYSTERIA2_SNI={sni}")
         if plan["action"] in ("adopt", "issue"):
             # They take the readers over: no other domain may still copy into them.
             for other in writers(st, dom):

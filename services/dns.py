@@ -102,6 +102,9 @@ class DnsService:
         # for both — a zone id another token (account) saw is never reused.
         self.zone_cache: dict[str, DnsZone] = {}
         self._zones = self.zone_cache
+        # Bumped whenever the token changes (the cache is cleared): a lookup that started
+        # with the old token and returns after the change must not fill the cache again.
+        self.zone_generation = 0
         # Held while the token file changes. The fallback mode uses THIS lock as its own
         # (services/fallback.py): a switch writes names with the token loaded per call, so
         # a new token (or none) must not land in the middle of it — whichever screen it
@@ -180,7 +183,7 @@ class DnsService:
                 self.token_file.save(value)
             except DnsTokenMissing as exc:
                 raise ServiceError(str(exc), key="dns_err_token_unwritable", params={"path": str(self.token_file.path)}) from None
-            self._zones.clear()
+            self.forget_zones()
         await self._audit(actor_user_id, audit_action, {"token_fp": check.fingerprint, "zone": check.zone.name})
         return check
 
@@ -188,7 +191,7 @@ class DnsService:
         await self.users.require_superadmin(actor_user_id)
         async with self.lock:
             removed = self.token_file.delete()
-            self._zones.clear()
+            self.forget_zones()
         if removed:
             await self._audit(actor_user_id, audit_action, {})
         return removed
@@ -199,15 +202,22 @@ class DnsService:
         cached = self._zones.get(name)
         if cached is not None:
             return cached
+        generation = self.zone_generation
         try:
             zone = await self.dns.find_zone(name)
         except DnsApiError as exc:
             raise InvalidOperation(str(exc), key="dns_err_api", params={"error": str(exc)}) from None
-        self._zones[name] = zone
+        self.remember_zone(name, zone, generation)
         return zone
+
+    def remember_zone(self, name: str, zone: DnsZone, generation: int) -> None:
+        """Cache *zone* — unless the token changed since the lookup began (*generation*)."""
+        if generation == self.zone_generation:
+            self._zones[name] = zone
 
     def forget_zones(self) -> None:
         self._zones.clear()
+        self.zone_generation += 1
 
     # ── the records ───────────────────────────────────────────────────────────
 

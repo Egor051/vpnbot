@@ -388,3 +388,23 @@ def test_a_domain_starting_to_write_after_the_plan_stops_the_apply(host: WizardC
     assert host.conf(other)["Le_RealKeyPath"] == "/etc/vpn-bot/tls/privkey.pem", "untouched"
     assert host.conf()["Le_ReloadCmd"] == b64("/usr/local/sbin/acme-reload.sh")
     assert not [c for c in host.calls_of("vpn-bot-cert") if c.startswith("vpn-bot-cert adopt --domain")]
+
+
+def test_an_issue_whose_names_miss_hysterias_sni_is_refused_at_the_plan(host: WizardCertHost) -> None:
+    """hysteria's clients check HYSTERIA2_SNI (example.net here): names without it would
+    restart hysteria on a certificate its clients reject."""
+    host.token()
+    host.wizard(22, "plan", action="issue", names=f"vpn.{DOMAIN}", zone=ZONE)
+    assert host.outcome(22) == "failed" and "HYSTERIA2_SNI" in host.plan_text(22)
+
+
+def test_an_adoption_of_a_certificate_missing_hysterias_sni_is_rolled_back(host: WizardCertHost) -> None:
+    name = f"vpn.{DOMAIN}"
+    chain, key = host.acme_domain(name, conf={"Le_ReloadCmd": b64("/usr/local/sbin/acme-reload.sh")})
+    host.lay_out(chain, key)
+    assert host.wizard(23, "plan", action="adopt").returncode == 0
+    assert host.wizard(23, "execute", action="adopt").returncode == 1
+    assert host.outcome(23) == "rolled_back"
+    result = [e for e in host.events(23) if e["event"] == "result"][-1]
+    assert "does not cover HYSTERIA2_SNI=example.net" in result["text"]
+    assert host.conf(name)["Le_ReloadCmd"] == b64("/usr/local/sbin/acme-reload.sh")

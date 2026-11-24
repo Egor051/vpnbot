@@ -993,11 +993,12 @@ class FallbackService:
         if not valid_dns_name(target):
             raise InvalidOperation("нет имени для проверки зоны", key="fb_err_bad_name", params={"value": target})
         self._token()
+        generation = self._zone_generation()
         try:
             zone = await self.dns.find_zone(target)
         except DnsApiError as exc:
             raise InvalidOperation(str(exc), key="fb_err_token_zone", params={"name": target, "error": str(exc)}) from None
-        self._zones[target] = zone
+        self._remember_zone(target, zone, generation)
         return zone.name
 
     async def hub_candidates(self, actor_user_id: int) -> list[HubCandidate]:
@@ -1594,9 +1595,21 @@ class FallbackService:
         cached = self._zones.get(name)
         if cached is not None:
             return cached
+        generation = self._zone_generation()
         zone = await self.dns.find_zone(name)
-        self._zones[name] = zone
+        self._remember_zone(name, zone, generation)
         return zone
+
+    def _zone_generation(self) -> int:
+        return self.dns_service.zone_generation if self.dns_service is not None else 0
+
+    def _remember_zone(self, name: str, zone: DnsZone, generation: int) -> None:
+        """Cache *zone* unless the token changed while it was looked up (the DNS service's
+        generation; the cache is the DNS service's own)."""
+        if self.dns_service is not None:
+            self.dns_service.remember_zone(name, zone, generation)
+        else:
+            self._zones[name] = zone
 
     async def _ensure_record(self, name: str, address: str, *, allowed: set[str] | None = None) -> bool:
         """The A record of *name* holds *address* (``proxied=false``, TTL 60).

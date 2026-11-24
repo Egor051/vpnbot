@@ -176,7 +176,9 @@ lines before → after, the certificate before → after, each reader and what h
 another domain started or stopped reaching the readers since — the helper gets both as
 `--expect-pair` / `--expect-release` too; a backup of the acme.sh domain directory — and of every
 domain the run releases —, every reader's files and the state, then the helper) → verify (`vpn-bot-cert status`: the domain is the bot's, reloadcmd ours,
-no file targets, the pair valid for 7+ days and covering the names, every installed reader holds the
+no file targets, the pair valid for 7+ days and covering the names — and, for adopt / issue with hysteria
+installed, `HYSTERIA2_SNI` (its clients check that name; an issue plan whose names miss it is refused
+at once) —, every installed reader holds the
 pair, took it and is configured to read the registry's files — not a pair of its own; hysteria
 whose config cannot be read is unverified too; for issue / renew a NEW pair) → rollback on a failure (the backup restored — a
 domain the run created is moved aside so acme.sh does not renew it —, then `vpn-bot-cert act`). One
