@@ -8,6 +8,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **A protocol is installed from the bot** (docs/protocol-install.md). After `install.sh` the bot has no
+  protocol; «⚙️ Модули протоколов» now shows one the bot can install and that is not on the server as
+  «📦 <protocol>» with **📦 Установить**: a run of the new wizard mode `protocol`
+  (`scripts/wizard/vpn-bot-wizard-protocol`) — the root helper's plan with every change first, TOTP, then
+  apply → verify → rollback, the helper's steps shown with the progress icons. This release installs
+  **Xray with the nginx self-steal**. The root helper `scripts/vpn-bot-protocol-install`
+  (`OUT_OF_REPO_HELPERS` required on main, `INSTALL_HELPERS`; never granted to the bot) has
+  `manifest | status | plan | apply --expect-plan | verify | rollback | commit` and a MANIFEST
+  symmetric to `vpn-bot-protocol-uninstall`'s: what it owns is exactly what the uninstall removes (a test
+  compares both helpers' manifests and runs install → the real uninstall → install on one fake host),
+  what it shares (nginx, the decoy site, the certificate's registry, `nobody`) the uninstall never
+  removes; the uninstall marker goes as the LAST step. Xray: the official release of a pinned version
+  (`v25.10.15`; the zip's sha256 pinned per architecture AND equal to the release's `.dgst`), the upstream
+  units with the single-config drop-ins (`deploy/xray/`), `config.json` (`nobody:vpn-bot 0640`, `nogroup`
+  without the bot's group) generated from the skeleton — a fresh x25519 pair (both output formats of
+  `xray x25519`), one shortId, REALITY target 127.0.0.1:8443, `serverNames` = the certificate's domain,
+  the XHTTP fallback on 127.0.0.1:8001, the api inbound — serialized as the bot writes it, `xray run
+  -test` before it is put in place; the bot's reconcile, the deploy's drift check and `validate_xray_ready`
+  leave it byte for byte (tested). nginx: the package held by `policy-rc.d` (no `:80`), its default site
+  off, `deploy/nginx/selfsteal.conf` (127.0.0.1:8443, TLS 1.3, h2) and a neutral decoy site
+  (`deploy/site/default`), the pair laid out by `vpn-bot-cert deploy` (nginx is a reader of the registry).
+  `XRAY_*` of `.env` written atomically by the helper (one line per key, owner and mode kept), `.env` in
+  the backup first. Every step journals before it acts; a failure at any step — or a failed verify —
+  rolls the host back (packages the run installed purged again). Verify: `xray run -test`, the units,
+  the four listeners, `openssl s_client` with SNI = the domain (its certificate, TLS 1.3, ALPN h2), HTTP
+  200 over h2. A green verify commits the install and restarts the bot (it reads `XRAY_*` at start); the
+  report's process converges the firewall (`vpn-bot-ufw-apply apply`) and says so.
+- **The wizard's status file may carry a mode helper's own steps** (`{"event": "steps", ...}`), rendered
+  with `bot/progress.py`; a mode can register an after-success step the bot runs before the report.
+
 - **The TLS certificate is part of the bot** (docs/certificate.md). acme.sh keeps ONE install-cert per
   domain, and a move of the host once left its reloadcmd naming only a part of the readers. The readers
   are now a REGISTRY in code — `scripts/vpn-bot-cert` (root, `OUT_OF_REPO_HELPERS` required on main,

@@ -9,6 +9,7 @@ def modules_panel_keyboard(
     modules: list[ProtocolModule],
     uninstalled: frozenset[str] = frozenset(),
     env_off: frozenset[str] = frozenset(),
+    not_installed: frozenset[str] = frozenset(),
 ) -> InlineKeyboardMarkup:
     """One row per protocol: its state and the action it allows.
 
@@ -18,7 +19,9 @@ def modules_panel_keyboard(
     reinstall · ⛔ switched off in ``.env`` (``env_off``) → an info button «.env», which says
     which flag, instead of «Enable» (disabling and removal stay offered). A protocol is offered only when ``.env`` AND the toggle allow it
     (services/protocol_availability.py); the panel used to show «✅ Выключить» for
-    a protocol ``.env`` had switched off, i.e. claim it was on.
+    a protocol ``.env`` had switched off, i.e. claim it was on. 📦 not on the host
+    (``not_installed``: services/protocol_install.py, no uninstall marker) → «📦 Установить»,
+    a run of the wizard's «protocol» mode — the toggle has nothing to switch yet.
     """
     rows: list[list[InlineKeyboardButton]] = []
     by_name = {m.name: m for m in modules}
@@ -26,6 +29,12 @@ def modules_panel_keyboard(
         module = by_name.get(name)
         enabled = module.enabled if module else True
         label = PROTOCOL_DISPLAY.get(name, name)
+        if name in not_installed and name not in uninstalled:
+            rows.append([
+                InlineKeyboardButton(text=f"📦 {label}", callback_data="noop"),
+                InlineKeyboardButton(text=t("btn_module_install"), callback_data=f"admin:module:install:{name}"),
+            ])
+            continue
         if name in env_off and name not in uninstalled:
             # Off in .env: the toggle cannot turn it on, so «Enable» gives way to
             # the .env note. Switching the module off and removing the protocol

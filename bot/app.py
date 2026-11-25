@@ -82,6 +82,7 @@ from services.maintenance import MaintenanceService
 from services.offsite_backup import OffsiteBackupService
 from services.notes import NotesService
 from services.online_clients import OnlineClientsService
+from services.protocol_install import ProtocolInstallService
 from services.protocol_modules import ProtocolModulesService
 from services.protocol_uninstall import ProtocolUninstallService, UninstallRegistry
 from services.proxy import ProxyService
@@ -995,6 +996,16 @@ async def _build_app(
         settings=settings,
     )
 
+    # «📦 Установить» (services/protocol_install.py): reads the host's paths, installs only
+    # through the wizard's «protocol» runs; the firewall follows once a run succeeded.
+    protocol_install_service = ProtocolInstallService(
+        wizard=wizard_service,
+        users=user_service,
+        registry=uninstall_registry,
+        firewall=ufw_applier,
+        root=Path("/"),
+    )
+
     services = Services(
         settings=settings,
         db=db,
@@ -1043,6 +1054,7 @@ async def _build_app(
         fallback=fallback_service,
         dns=dns_service,
         cert=cert_service,
+        protocol_install=protocol_install_service,
     )
 
     await _startup_reconcile_keys(services)

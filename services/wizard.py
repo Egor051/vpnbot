@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -147,6 +148,12 @@ class StatusSnapshot:
     # The last ``deploy`` event of the phase BEFORE this one (the plan's CHECK, when
     # this is the execute phase): the steps it already got through.
     earlier_deploy_progress: dict[str, Any] | None = None
+    # A mode helper's own steps and their state (``steps`` events: «📦 Установить
+    # протокол»), shown with bot/progress.py's icons; the last event of the run counts.
+    helper_steps: dict[str, str] = field(default_factory=dict)
+    # Lines the bot adds to the final report (an after-success hook: the firewall after
+    # an install). Never read from the status file.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def finished(self) -> bool:
@@ -178,6 +185,8 @@ def parse_status(text: str) -> StatusSnapshot:
     for rec in records[:start]:
         if rec["event"] == "deploy" and isinstance(rec.get("progress"), dict):
             snap.earlier_deploy_progress = rec["progress"]
+        elif rec["event"] == "steps":
+            snap.helper_steps = _helper_steps(rec.get("steps"))
     for rec in records[start:]:
         kind = rec["event"]
         if kind == "launched":
@@ -195,6 +204,8 @@ def parse_status(text: str) -> StatusSnapshot:
             progress = rec.get("progress")
             if isinstance(progress, dict):
                 snap.deploy_progress = progress
+        elif kind == "steps":
+            snap.helper_steps = _helper_steps(rec.get("steps"))
         elif kind == "plan":
             snap.plan_text = str(rec.get("text") or "")
             snap.plan_noop = bool(rec.get("noop"))
@@ -223,6 +234,20 @@ def parse_status(text: str) -> StatusSnapshot:
     return snap
 
 
+_STEP_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_STEP_STATES = frozenset({"wait", "run", "ok", "fail", "skip"})
+
+
+def _helper_steps(value: object) -> dict[str, str]:
+    """A ``steps`` event's {step: state}, in its order; anything else is dropped."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(k): str(v) for k, v in list(value.items())[:32]
+        if isinstance(k, str) and _STEP_KEY_RE.match(k) and v in _STEP_STATES
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Who renders: the bot layer implements this (bot/wizard_notifier.py)
 # --------------------------------------------------------------------------- #
@@ -234,6 +259,9 @@ class WizardNotifier(Protocol):
     async def finished(self, run: WizardRun, snap: StatusSnapshot) -> bool: ...
 
     async def scheduled_alert(self, run: WizardRun, snap: StatusSnapshot) -> bool: ...
+
+
+AfterSuccess = Callable[[WizardRun], Awaitable[str | None]]
 
 
 class MetaStore(Protocol):
@@ -276,6 +304,10 @@ class WizardService:
         self.log_dir = log_dir
         self.notifier = notifier
         self._seen: dict[int, tuple[int, str]] = {}
+        # mode -> what the bot does once a run of it succeeded, before the report (the
+        # firewall after «📦 Установить протокол»); its line goes into the report. Runs in
+        # whichever process reports the run (also after a restart), so it is idempotent.
+        self._after_success: dict[str, AfterSuccess] = {}
         # Plans whose confirmation screen reached the chat in THIS process. Empty after
         # a restart on purpose: the screen is shown again (an edit to the same text is a
         # no-op), so neither a failed delivery nor a restart leaves a stale screen.
@@ -590,8 +622,21 @@ class WizardService:
         if shown:
             self._plan_shown.add(run.id)
 
+    def register_after_success(self, mode_key: str, hook: AfterSuccess) -> None:
+        get_mode(mode_key)
+        self._after_success[mode_key] = hook
+
     async def _report(self, run: WizardRun) -> None:
         snap = await self.snapshot(run.id)
+        hook = self._after_success.get(run.mode)
+        if hook is not None and run.state == "succeeded":
+            try:
+                note = await hook(run)
+            except Exception as exc:
+                logger.warning("wizard run %d: after-success step failed (%s: %s)", run.id, type(exc).__name__, exc)
+                note = None
+            if note:
+                snap.notes.append(note)
         delivered = True
         if self.notifier is not None:
             try:

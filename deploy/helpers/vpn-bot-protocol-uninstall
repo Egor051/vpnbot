@@ -317,7 +317,7 @@ manifest_xray() {
 	man_path /usr/local/etc/xray
 	man_path /var/log/xray
 	man_shared "user nobody" "owns the Xray config and logs, but is a shared system account"
-	man_shared "nginx, /etc/nginx, /var/www/anycastedge" "the REALITY self-steal / decoy site is shared with the host"
+	man_shared "nginx, /etc/nginx, /var/www/anycastedge, /var/www/selfsteal" "the REALITY self-steal / decoy site is shared with the host (vpn-bot-protocol-install puts it in place, never removes it)"
 	man_shared "/etc/vpn-bot/tls, /root/.acme.sh" "certificates and acme.sh also serve the subscription endpoint and Hysteria2"
 	man_shared "/etc/logrotate.d/xray" "installed by deploy.sh (MANAGED_HOST_FILES); missingok, inert without /var/log/xray"
 }

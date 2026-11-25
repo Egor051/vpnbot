@@ -1,0 +1,1891 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-protocol-install — install ONE protocol on this host, strictly by the manifest
+compiled into this file (docs/protocol-install.md).
+
+The mirror of deploy/helpers/vpn-bot-protocol-uninstall: what this helper installs for a
+protocol (OWNED: its units, unit files, paths, packages, users, the <PROTO>_ENABLED flag)
+is exactly what the uninstall removes, and the uninstall marker it takes away last is the
+one the uninstall writes last (tests/test_protocol_install_helper.py pins the symmetry
+against the uninstall's own `manifest <proto>`). What a protocol needs but does not own —
+nginx and the decoy site, the certificate's registry, the user `nobody` — is SHARED: put in
+place when it is missing, never removed by an uninstall (its deny-list says the same).
+
+  vpn-bot-protocol-install manifest <proto> [--json]      the resolved manifest (review)
+  vpn-bot-protocol-install status [--json]                which protocols are on this host
+  vpn-bot-protocol-install plan <proto> [--domain D] [--json]
+                                                          read-only: every change, a sha256
+  vpn-bot-protocol-install apply <proto> --expect-plan SHA [--domain D] [--json]
+                                                          backup, the steps, a journal; any
+                                                          failure rolls the steps back
+  vpn-bot-protocol-install verify <proto> [--domain D] [--json]
+                                                          read-only: the protocol works
+  vpn-bot-protocol-install rollback <proto> [--json]      undo the last apply (its journal)
+  vpn-bot-protocol-install commit <proto> [--json]        the last apply is final (verified)
+
+  <proto>: xray
+
+XRAY (with the nginx self-steal). The layout of the production host: the binary of an
+official GitHub release of a PINNED version (/usr/local/bin/xray, the geo files in
+/usr/local/share/xray) — the zip's sha256 is pinned here AND must be the SHA2-256 line of
+the release's own .dgst; the upstream units xray.service / xray@.service with the
+single-config drop-ins (deploy/xray/); /usr/local/etc/xray/config.json nobody:vpn-bot 0640
+(nobody:nogroup without the vpn-bot group: the root model), generated from
+deploy/xray/config.skeleton.json — a fresh x25519 pair (`xray x25519`), one shortId,
+REALITY target 127.0.0.1:8443, serverNames = the domain, the XHTTP fallback inbound on
+127.0.0.1:8001, the api inbound on 127.0.0.1:10085 — serialized exactly as the bot writes
+it, so the bot's reconcile, the deploy's drift check (deploy/backend-config-sync.py) and
+the bot's own rewrite leave it byte for byte as it is; /var/log/xray. Then the XRAY_* of
+.env (one line per key changed or appended, owner and mode kept, .env in the backup first).
+nginx: the package (policy-rc.d holds it from starting with its default site on :80; the
+default site of a package installed HERE is disabled), the decoy site from
+deploy/site/default and deploy/nginx/selfsteal.conf (127.0.0.1:8443, TLS 1.3, h2, the
+certificate of the registry, /etc/vpn-bot/tls) — nginx becomes a reader of
+`vpn-bot-cert` (docs/certificate.md) by existing, and `vpn-bot-cert deploy` lays the pair
+out to it. A host that already runs its own self-steal on 127.0.0.1:8443 keeps it.
+
+APPLY, in this order — each step writes its journal entry BEFORE it acts, so a failure (or
+a kill) half way is undone too; a failure rolls every step back in reverse:
+  preflight   the plan recomputed: its sha256 must be the one confirmed (else exit 3)
+  backup      every existing path a step may change, .env included, in
+              /var/backups/vpn-bot/install/<proto>-<UTC ts>.tar.gz (root 0600), verified
+  nginx_pkg   apt-get install nginx (when not installed), its default site off
+  nginx_start nginx enabled and active (with no vhost of ours yet: it reads no certificate)
+  cert        vpn-bot-cert deploy — the registry's pair laid out to nginx
+  nginx_site  the decoy site and selfsteal.conf, nginx -t, reload
+  xray_bin    download, sha256 against the pin and the .dgst, the binary and geo files
+  xray_units  the unit files and drop-ins, daemon-reload
+  xray_logs   /var/log/xray and its two files (`xray run -test` opens them)
+  xray_config config.json, checked with `xray run -test` BEFORE it is put in place
+  env         the XRAY_* of .env
+  xray_start  enable --now xray, active
+  marker      /etc/vpn-bot/uninstalled/<proto> removed (a reinstall) — the LAST step
+
+What exists is never replaced (an installed xray, config.json with its clients, an
+operator's nginx): the plan says `keep`, the step leaves it. A repeated apply on an
+installed protocol is "nothing to do".
+
+EXIT CODES: 0 ok · 2 usage · 3 refused (a blocking finding, a plan that changed, another
+install or uninstall runs, committed) · 4 verify failed · 5 cannot (a tool, a file, a
+download) · 6 a step failed and the rollback succeeded · 7 a step failed and the rollback
+did not fully succeed.
+
+Stdlib only, every command an argv list (never a shell). Run as root from another mount
+namespace (the non-root bot's ProtectSystem=strict, kept by sudo) it re-executes itself in
+PID 1's first (nsenter). TEST SEAM (never in production; sudo and systemd-run give a clean
+environment): VPN_BOT_PROTOCOL_INSTALL_SELFTEST=1 needs VPN_BOT_PROTOCOL_INSTALL_ROOT
+(every host path under it) and VPN_BOT_PROTOCOL_INSTALL_REPO (the checkout), resolves every
+command inside VPN_BOT_PROTOCOL_INSTALL_SELFTEST_BIN, reads release assets from
+VPN_BOT_PROTOCOL_INSTALL_SELFTEST_RELEASES instead of the network, keeps owners in a
+sidecar file instead of chown, and _SELFTEST_FAIL=<step> fails right after that step did
+its work — deploy.sh runs the test suite as root on the production host.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import grp
+import hashlib
+import io
+import json
+import os
+import pwd
+import re
+import secrets
+import shutil
+import subprocess  # noqa: S404 — fixed argv lists of system tools, never a shell
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+import zipfile
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+SELFTEST = os.environ.get("VPN_BOT_PROTOCOL_INSTALL_SELFTEST") == "1"
+HELPER_VERSION = 1
+PROTOCOLS = ("xray",)
+
+EXIT_OK, EXIT_USAGE, EXIT_REFUSED, EXIT_VERIFY, EXIT_CANNOT, EXIT_ROLLED_BACK, EXIT_ROLLBACK_FAILED = 0, 2, 3, 4, 5, 6, 7
+
+APP_DIR = "/opt/vpn-service"
+ENV_FILE = f"{APP_DIR}/.env"
+UNIT_DIR = "/etc/systemd/system"
+MARKER_DIR = "/etc/vpn-bot/uninstalled"
+STATE_DIR = "/var/lib/vpn-bot-protocol-install"
+BACKUP_DIR = "/var/backups/vpn-bot/install"
+LOG_FILE = "/var/log/vpn-bot-protocol-install.log"
+LOCK_FILE = "/run/vpn-bot-protocol-install.lock"
+# The uninstall's lock: an install and an uninstall never run at once.
+UNINSTALL_LOCK_FILE = "/run/vpn-bot-uninstall.lock"
+CERT_HELPER = "/usr/local/sbin/vpn-bot-cert"
+POLICY_RC_D = "/usr/sbin/policy-rc.d"
+POLICY_RC_D_BODY = "#!/bin/sh\n# vpn-bot-protocol-install: no service starts while a package is installed\nexit 101\n"
+BACKUP_META = "vpn-bot-install-meta"
+COMMAND_TIMEOUT = 60
+APT_TIMEOUT = 900
+MAX_DOWNLOAD = 64 << 20
+HOSTNS_ENV = "VPN_BOT_PROTOCOL_INSTALL_HOSTNS"
+CERT_MIN_DAYS = 7
+
+# --------------------------------------------------------------------------- #
+# Xray: the pinned release. The zip's sha256 per asset (from the release's own .dgst,
+# checked when the pin was set); the .dgst is downloaded again on every install and
+# must agree — a release re-published under the same tag is refused.
+# --------------------------------------------------------------------------- #
+XRAY_VERSION = "v25.10.15"
+XRAY_RELEASE_BASE = f"https://github.com/XTLS/Xray-core/releases/download/{XRAY_VERSION}"
+XRAY_ASSETS: Mapping[str, tuple[str, str]] = {
+    "x86_64": ("Xray-linux-64.zip", "df22ad60c1251c9fb63d7f85b3677872edf61c6715eba64b06adbfec658f4938"),
+    "aarch64": ("Xray-linux-arm64-v8a.zip", "67ea391812f90fa17e29a60c8faa834bcf30ead0f84eb6b2bbd2d398d56b759e"),
+}
+XRAY_BIN = "/usr/local/bin/xray"
+XRAY_SHARE = "/usr/local/share/xray"
+XRAY_ETC = "/usr/local/etc/xray"
+XRAY_CONFIG = f"{XRAY_ETC}/config.json"
+XRAY_LOG_DIR = "/var/log/xray"
+XRAY_LOGS = (f"{XRAY_LOG_DIR}/access.log", f"{XRAY_LOG_DIR}/error.log")
+XRAY_GEO = ("geoip.dat", "geosite.dat")
+XRAY_UNIT = "xray.service"
+XRAY_TEMPLATE = "xray@.service"
+XRAY_DROPIN = "10-donot_touch_single_conf.conf"
+XRAY_USER = "nobody"
+BOT_GROUP = "vpn-bot"
+FALLBACK_GROUP = "nogroup"
+# The skeleton's fixed names and ports (deploy/xray/config.skeleton.json); .env must agree.
+XRAY_PUBLIC_PORT = "443"
+XRAY_INBOUND_TAG = "vless-in"
+XRAY_XHTTP_TAG = "vless-xhttp-reality"
+XRAY_XHTTP_LOOPBACK_PORT = 8001
+XRAY_API = "127.0.0.1:10085"
+XRAY_DEFAULT_XHTTP_PATH = "/v1/messages/stream"
+REALITY_TARGET = "127.0.0.1:8443"
+
+# nginx: the REALITY target. Shared with the host (an uninstall of Xray never removes it).
+NGINX_PACKAGE = "nginx"
+NGINX_UNIT = "nginx.service"
+NGINX_CONF_DIRS = ("/etc/nginx/conf.d", "/etc/nginx/sites-enabled")
+NGINX_SITE_CONF = "/etc/nginx/conf.d/selfsteal.conf"
+NGINX_DEFAULT_SITE = "/etc/nginx/sites-enabled/default"
+SITE_ROOT = "/var/www/selfsteal"
+SELFSTEAL_LISTEN = "127.0.0.1:8443"
+SELFSTEAL_HEADER = "# managed by vpn-bot-protocol-install (deploy/nginx/selfsteal.conf)"
+TLS_FULLCHAIN = "/etc/vpn-bot/tls/fullchain.pem"
+TLS_PRIVKEY = "/etc/vpn-bot/tls/privkey.pem"
+
+# Repo sources (under the checkout, root-owned: read only when not group/other-writable).
+REPO_SKELETON = "deploy/xray/config.skeleton.json"
+REPO_XRAY_UNITS = "deploy/xray"
+REPO_SELFSTEAL = "deploy/nginx/selfsteal.conf"
+REPO_SITE = "deploy/site/default"
+
+_DNS_NAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+_ADDRESS_RE = re.compile(r"^[ \t]*Address[ \t]*=[ \t]*(.+?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+# vpn-bot-wizard-lib's redaction (utils/redact.py): every line of the log goes through it.
+_REDACT = (
+    (re.compile(r"(?i)(secret=)[^&\s]+"), r"\1***"),
+    (re.compile(r"\b(bot_token|token|password|passwd|secret|mtproto_secret|private_key|preshared_key|privatekey)\s*([:=])\s*[^,\s;]+", re.I), r"\1\2***"),
+    (re.compile(r"\b(?:dd)?[0-9a-fA-F]{32,}\b"), "***"),
+    (re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{35}\b"), "***"),
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_.~+/=-]{16,}\b"), "Bearer ***"),
+    (re.compile(r"(?i)([a-z][a-z0-9+\-.]*://)([^:@/\s]+:[^@/\s]+@)"), r"\1***@"),
+    (re.compile(r"\b[A-Za-z0-9+/]{43}={1,2}(?=[^A-Za-z0-9+/=]|$)"), "***"),
+    (re.compile(r'("privateKey"\s*:\s*")[^"]*'), r"\1***"),
+    (re.compile(r"(?i)\b(PrivateKey|Private key)\s*:\s*\S+"), r"\1: ***"),
+)
+
+
+def redact(text: str) -> str:
+    for pattern, repl in _REDACT:
+        text = pattern.sub(repl, text)
+    return text
+
+
+class Refused(Exception):
+    """A finding that stops the run before anything changes (exit 3)."""
+
+
+class Cannot(Exception):
+    """A tool, a file or a download that is not there (exit 5)."""
+
+
+class StepFailed(Exception):
+    def __init__(self, step: str, message: str) -> None:
+        super().__init__(message)
+        self.step = step
+
+
+# --------------------------------------------------------------------------- #
+# The manifest. OWNED = what an uninstall removes (and nothing else); SHARED = what the
+# protocol needs but does not own. tests/test_protocol_install_helper.py compares OWNED
+# with `vpn-bot-protocol-uninstall manifest <proto>` and checks every SHARED path is on the
+# uninstall's deny-list.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Shared:
+    what: str                      # the words the uninstall's skipped_shared uses for it
+    why: str
+    paths: tuple[str, ...] = ()
+    packages: tuple[str, ...] = ()
+    units: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Manifest:
+    protocol: str
+    units: tuple[str, ...]          # enabled and started
+    templates: tuple[str, ...]      # template units: their files only
+    unit_files: tuple[str, ...]
+    paths: tuple[str, ...]
+    packages: tuple[str, ...] = ()
+    users: tuple[str, ...] = ()
+    env_flag: str = ""              # <PROTO>_ENABLED=true here, =false by the uninstall
+    env_settings: tuple[str, ...] = ()   # written here, inert after an uninstall (kept)
+    shared: tuple[Shared, ...] = ()
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "protocol": self.protocol,
+            "units": list(self.units) + list(self.templates),
+            "templates": list(self.templates),
+            "unit_files": list(self.unit_files),
+            "paths": list(self.paths),
+            "packages": list(self.packages),
+            "users": list(self.users),
+            "env_key": self.env_flag,
+            "env_settings": list(self.env_settings),
+            "marker": f"{MARKER_DIR}/{self.protocol}",
+            "shared": [
+                {"what": s.what, "why": s.why, "paths": list(s.paths), "packages": list(s.packages), "units": list(s.units)}
+                for s in self.shared
+            ],
+        }
+
+
+XRAY_ENV_SETTINGS = (
+    "XRAY_PUBLIC_HOST", "XRAY_SNI", "XRAY_REALITY_PUBLIC_KEY", "XRAY_SHORT_ID", "XRAY_INBOUND_TAG",
+    "XRAY_STATS_SERVER", "XRAY_XHTTP_ENABLED", "XRAY_XHTTP_INBOUND_TAG",
+)
+
+MANIFESTS: Mapping[str, Manifest] = {
+    "xray": Manifest(
+        protocol="xray",
+        units=(XRAY_UNIT,),
+        templates=(XRAY_TEMPLATE,),
+        unit_files=(
+            f"{UNIT_DIR}/{XRAY_UNIT}", f"{UNIT_DIR}/{XRAY_TEMPLATE}",
+            f"{UNIT_DIR}/{XRAY_UNIT}.d", f"{UNIT_DIR}/{XRAY_TEMPLATE}.d",
+        ),
+        paths=(XRAY_BIN, XRAY_SHARE, XRAY_ETC, XRAY_LOG_DIR),
+        env_settings=XRAY_ENV_SETTINGS,
+        shared=(
+            Shared("user nobody", "runs Xray and owns its config and logs; a shared system account"),
+            Shared(
+                "nginx", "the REALITY self-steal target on 127.0.0.1:8443 and the decoy site, shared with the host",
+                paths=(NGINX_SITE_CONF, SITE_ROOT), packages=(NGINX_PACKAGE,), units=(NGINX_UNIT,),
+            ),
+            Shared("/etc/vpn-bot/tls", "the certificate's registry (vpn-bot-cert): nginx reads the pair there",
+                   paths=(TLS_FULLCHAIN, TLS_PRIVKEY)),
+            Shared("/etc/logrotate.d/xray", "installed by deploy.sh (MANAGED_HOST_FILES)"),
+        ),
+    ),
+}
+
+
+# --------------------------------------------------------------------------- #
+# Context: host paths, commands, owners, the log
+# --------------------------------------------------------------------------- #
+@dataclass
+class Ctx:
+    root: str
+    repo: Path
+    bin_dir: str
+    releases: str
+    fail_at: str
+    log_lines: list[str] = field(default_factory=list)
+    env_cache: dict[str, str] | None = None
+
+    def host(self, path: str) -> Path:
+        return Path(self.root.rstrip("/") + path) if self.root else Path(path)
+
+    def unroot(self, path: Path | str) -> str:
+        text = str(path)
+        if self.root and text.startswith(self.root.rstrip("/") + "/"):
+            return text[len(self.root.rstrip("/")):]
+        return text
+
+    def log(self, text: str) -> None:
+        line = redact(text)
+        self.log_lines.append(line)
+        with contextlib.suppress(OSError):
+            lf = self.host(LOG_FILE)
+            lf.parent.mkdir(parents=True, exist_ok=True)
+            with open(lf, "a", encoding="utf-8") as fh:
+                for part in line.splitlines() or [""]:
+                    fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {part}\n")
+
+    def env(self) -> dict[str, str]:
+        if self.env_cache is None:
+            self.env_cache = read_env(self.host(ENV_FILE))
+        return self.env_cache
+
+
+def make_ctx(repo_arg: str | None) -> Ctx:
+    if SELFTEST:
+        root = os.environ.get("VPN_BOT_PROTOCOL_INSTALL_ROOT", "")
+        bin_dir = os.environ.get("VPN_BOT_PROTOCOL_INSTALL_SELFTEST_BIN", "")
+        repo = os.environ.get("VPN_BOT_PROTOCOL_INSTALL_REPO", "") or (repo_arg or "")
+        if not root or os.path.realpath(root) == "/" or not os.path.isdir(root):
+            raise Refused("selftest: VPN_BOT_PROTOCOL_INSTALL_ROOT must be an existing directory other than /")
+        if not bin_dir or not os.path.isdir(bin_dir):
+            raise Refused("selftest: VPN_BOT_PROTOCOL_INSTALL_SELFTEST_BIN must be a directory of stubs")
+        if not repo or not os.path.isdir(repo):
+            raise Refused("selftest: VPN_BOT_PROTOCOL_INSTALL_REPO must be the checkout")
+        return Ctx(root=os.path.realpath(root), repo=Path(repo), bin_dir=os.path.realpath(bin_dir),
+                   releases=os.environ.get("VPN_BOT_PROTOCOL_INSTALL_SELFTEST_RELEASES", ""),
+                   fail_at=os.environ.get("VPN_BOT_PROTOCOL_INSTALL_SELFTEST_FAIL", ""))
+    return Ctx(root="", repo=Path(repo_arg or APP_DIR), bin_dir="", releases="", fail_at="")
+
+
+def fence(ctx: Ctx, path: Path) -> None:
+    if ctx.root and not str(path).startswith(ctx.root.rstrip("/") + "/"):
+        raise Cannot(f"selftest: refusing to touch {path} outside the fake root")
+
+
+def tool(ctx: Ctx, name: str) -> str | None:
+    """The executable to run: under the seam only a stub of the stub directory."""
+    if not SELFTEST:
+        return name
+    path = os.path.join(ctx.bin_dir, os.path.basename(name))
+    return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+
+
+def run(ctx: Ctx, argv: Sequence[str], *, timeout: int = COMMAND_TIMEOUT, env: Mapping[str, str] | None = None,
+        stdin: str | None = None) -> tuple[int, str]:
+    """(exit code, stdout+stderr). 127 = not found / refused, 124 = timed out."""
+    exe = tool(ctx, argv[0])
+    if exe is None:
+        ctx.log(f"$ {' '.join(argv)}\n  refused under the selftest: no stub {argv[0]}")
+        return 127, f"{argv[0]}: refused (selftest: not a stub)"
+    run_env = {k: v for k, v in os.environ.items() if k not in ("LANGUAGE", "LC_MESSAGES")}
+    run_env["LC_ALL"] = "C"
+    if not SELFTEST:
+        run_env["PATH"] = "/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+    if env:
+        run_env.update(env)
+    try:
+        proc = subprocess.run(  # noqa: S603 — argv list, never a shell
+            [exe, *argv[1:]], input=stdin, capture_output=True, text=True, errors="replace",
+            timeout=timeout, check=False, env=run_env, stdin=None if stdin is not None else subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        ctx.log(f"$ {' '.join(argv)}\n  not found")
+        return 127, f"{argv[0]}: not found"
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout if isinstance(exc.stdout, str) else ""
+        ctx.log(f"$ {' '.join(argv)}\n  timed out after {timeout}s")
+        return 124, f"{out}\n{argv[0]}: timed out after {timeout}s"
+    out = (proc.stdout or "") + (proc.stderr or "")
+    ctx.log(f"$ {' '.join(argv)}  (exit {proc.returncode})\n{out.rstrip()[-2000:]}")
+    return proc.returncode, out
+
+
+def _owners_file(ctx: Ctx) -> Path:
+    return Path(ctx.root) / ".owners.json"
+
+
+def set_owner(ctx: Ctx, path: Path, user: str, group: str) -> None:
+    """chown by name; under the seam the owner goes to a sidecar file (no root needed)."""
+    if SELFTEST:
+        f = _owners_file(ctx)
+        data = json.loads(f.read_text()) if f.is_file() else {}
+        data[ctx.unroot(path)] = f"{user}:{group}"
+        f.write_text(json.dumps(data, sort_keys=True))
+        return
+    os.chown(path, pwd.getpwnam(user).pw_uid, grp.getgrnam(group).gr_gid, follow_symlinks=False)
+
+
+def owner_of(ctx: Ctx, path: Path) -> str:
+    if SELFTEST:
+        f = _owners_file(ctx)
+        data = json.loads(f.read_text()) if f.is_file() else {}
+        return str(data.get(ctx.unroot(path), "root:root"))
+    st = os.stat(path, follow_symlinks=False)
+    try:
+        user = pwd.getpwuid(st.st_uid).pw_name
+    except KeyError:
+        user = str(st.st_uid)
+    try:
+        group = grp.getgrgid(st.st_gid).gr_name
+    except KeyError:
+        group = str(st.st_gid)
+    return f"{user}:{group}"
+
+
+def forget_owner(ctx: Ctx, path: Path) -> None:
+    if SELFTEST:
+        f = _owners_file(ctx)
+        if f.is_file():
+            data = json.loads(f.read_text())
+            prefix = ctx.unroot(path)
+            data = {k: v for k, v in data.items() if k != prefix and not k.startswith(prefix + "/")}
+            f.write_text(json.dumps(data, sort_keys=True))
+
+
+def group_exists(ctx: Ctx, name: str) -> bool:
+    if SELFTEST:
+        with contextlib.suppress(OSError):
+            return any(line.split(":", 1)[0] == name for line in ctx.host("/etc/group").read_text().splitlines())
+        return False
+    try:
+        grp.getgrnam(name)
+    except KeyError:
+        return False
+    return True
+
+
+def user_exists(ctx: Ctx, name: str) -> bool:
+    if SELFTEST:
+        with contextlib.suppress(OSError):
+            return any(line.split(":", 1)[0] == name for line in ctx.host("/etc/passwd").read_text().splitlines())
+        return False
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        return False
+    return True
+
+
+def config_group(ctx: Ctx) -> str:
+    """config.json's group: the bot's (it reads the file in the helper model), else nogroup."""
+    return BOT_GROUP if group_exists(ctx, BOT_GROUP) else FALLBACK_GROUP
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def write_file(ctx: Ctx, path: Path, data: bytes, mode: int, owner: tuple[str, str] = ("root", "root")) -> None:
+    """Atomic: a temporary file next to the target, owner and mode set before the data
+    is renamed into place."""
+    fence(ctx, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.vpn-bot-install-")
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        set_owner(ctx, Path(tmp), *owner)
+        os.replace(tmp, path)
+        if SELFTEST:
+            # The sidecar follows the rename.
+            f = _owners_file(ctx)
+            data_o = json.loads(f.read_text()) if f.is_file() else {}
+            value = data_o.pop(ctx.unroot(tmp), None)
+            if value is not None:
+                data_o[ctx.unroot(path)] = value
+            f.write_text(json.dumps(data_o, sort_keys=True))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def make_dir(ctx: Ctx, path: Path, mode: int, owner: tuple[str, str] = ("root", "root")) -> None:
+    fence(ctx, path)
+    path.mkdir(mode=mode, parents=False, exist_ok=False)
+    os.chmod(path, mode)
+    set_owner(ctx, path, *owner)
+
+
+def remove_path(ctx: Ctx, path: Path) -> None:
+    fence(ctx, path)
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    forget_owner(ctx, path)
+
+
+# --------------------------------------------------------------------------- #
+# .env — the tolerant reader of every helper (`export`, spaces around `=`, one pair of
+# quotes, an inline comment; the LAST assignment wins). Never sourced.
+# --------------------------------------------------------------------------- #
+def env_value(raw: str) -> str:
+    value = raw.strip()
+    if value[:1] in ("'", '"'):
+        quote = value[0]
+        end = value.find(quote, 1)
+        return value[1:end] if end > 0 else value[1:]
+    return re.sub(r"\s+#.*$", "", value).strip()
+
+
+def read_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return values
+    for line in text.splitlines():
+        m = _ENV_LINE_RE.match(line)
+        if m:
+            values[m.group(1)] = env_value(m.group(2))
+    return values
+
+
+def env_bool(value: str) -> bool:
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def edit_env_text(text: str, updates: Mapping[str, str]) -> str:
+    """*text* with each key's LAST assignment replaced (`KEY=value`), or the line appended.
+    Every other line stays byte for byte."""
+    lines = text.splitlines(keepends=True)
+    last: dict[str, int] = {}
+    for i, line in enumerate(lines):
+        m = _ENV_LINE_RE.match(line)
+        if m and m.group(1) in updates:
+            last[m.group(1)] = i
+    out = list(lines)
+    appended: list[str] = []
+    for key, value in updates.items():
+        if key in last:
+            i = last[key]
+            out[i] = f"{key}={value}" + ("\n" if lines[i].endswith("\n") else "")
+        else:
+            appended.append(f"{key}={value}\n")
+    if appended:
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        out.extend(appended)
+    return "".join(out)
+
+
+def warp_tunnel_address(path: Path) -> str | None:
+    """warp/proxy_egress.read_tunnel_address, the same rule (a test keeps them in step)."""
+    import ipaddress
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _ADDRESS_RE.search(content)
+    if match is None:
+        return None
+    for token in match.group(1).split(","):
+        candidate = token.split("/")[0].strip()
+        if not candidate:
+            continue
+        try:
+            return str(ipaddress.IPv4Address(candidate))
+        except ValueError:
+            continue
+    return None
+
+
+def warp_send_through(ctx: Ctx) -> str | None:
+    """bot/app.py's make_send_through_provider: WARP proxy egress on → the tunnel address."""
+    env = ctx.env()
+    flag = env.get("WARP_PROXY_EGRESS_ENABLED", env.get("WARP_PROXY_EGRESS", "false"))
+    if not env_bool(flag):
+        return None
+    return warp_tunnel_address(ctx.host(env.get("WARP_CONFIG_PATH") or "/etc/amnezia/out-warp.conf"))
+
+
+# --------------------------------------------------------------------------- #
+# Repo sources
+# --------------------------------------------------------------------------- #
+def repo_file(ctx: Ctx, rel: str) -> Path:
+    path = ctx.repo / rel
+    if not path.is_file() or path.is_symlink():
+        raise Cannot(f"{rel}: not a regular file in the checkout {ctx.repo}")
+    if not SELFTEST and os.geteuid() == 0:
+        st = path.stat()
+        if st.st_uid != 0 or st.st_mode & 0o022:
+            raise Refused(f"{path} must be root-owned and not group/other-writable")
+    return path
+
+
+def site_files(ctx: Ctx) -> list[tuple[str, bytes]]:
+    base = ctx.repo / REPO_SITE
+    if not base.is_dir():
+        raise Cannot(f"{REPO_SITE}: missing in the checkout")
+    out = []
+    for p in sorted(base.rglob("*")):
+        if p.is_symlink():
+            raise Refused(f"{p}: a symlink in the decoy site")
+        if p.is_file():
+            rel = p.relative_to(base).as_posix()
+            out.append((rel, repo_file(ctx, f"{REPO_SITE}/{rel}").read_bytes()))
+    if not out:
+        raise Cannot(f"{REPO_SITE}: empty")
+    return out
+
+
+def selfsteal_conf(ctx: Ctx, domain: str) -> bytes:
+    text = repo_file(ctx, REPO_SELFSTEAL).read_text(encoding="utf-8")
+    if not text.startswith(SELFSTEAL_HEADER):
+        raise Cannot(f"{REPO_SELFSTEAL}: does not start with its managed header")
+    return text.replace("@DOMAIN@", domain).replace("@SITE_ROOT@", SITE_ROOT).encode()
+
+
+def xray_unit_sources(ctx: Ctx) -> dict[str, bytes]:
+    """host path -> content of every unit file and drop-in."""
+    return {
+        f"{UNIT_DIR}/{XRAY_UNIT}": repo_file(ctx, f"{REPO_XRAY_UNITS}/{XRAY_UNIT}").read_bytes(),
+        f"{UNIT_DIR}/{XRAY_TEMPLATE}": repo_file(ctx, f"{REPO_XRAY_UNITS}/{XRAY_TEMPLATE}").read_bytes(),
+        f"{UNIT_DIR}/{XRAY_UNIT}.d/{XRAY_DROPIN}": repo_file(ctx, f"{REPO_XRAY_UNITS}/{XRAY_UNIT}.d/{XRAY_DROPIN}").read_bytes(),
+        f"{UNIT_DIR}/{XRAY_TEMPLATE}.d/{XRAY_DROPIN}": repo_file(
+            ctx, f"{REPO_XRAY_UNITS}/{XRAY_TEMPLATE}.d/{XRAY_DROPIN}").read_bytes(),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The Xray config: the skeleton with every placeholder filled — serialized exactly as
+# adapters/xray_config.py writes it (json.dumps(indent=2, ensure_ascii=False) + "\n").
+# --------------------------------------------------------------------------- #
+def render_xray_config(skeleton: dict[str, Any], *, domain: str, private_key: str, short_id: str,
+                       xhttp_path: str, send_through: str | None) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "<REALITY_SERVER_NAME>": domain,
+        "<REALITY_PRIVATE_KEY>": private_key,
+        "<XHTTP_LOOPBACK_PORT>": XRAY_XHTTP_LOOPBACK_PORT,
+        "<XHTTP_PATH>": xhttp_path,
+    }
+    missing: list[str] = []
+
+    def fill(node: Any) -> Any:
+        if isinstance(node, str) and re.fullmatch(r"<[A-Za-z0-9_-]+>", node):
+            if node not in values:
+                missing.append(node)
+                return node
+            return values[node]
+        if isinstance(node, dict):
+            return {k: fill(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [fill(v) for v in node]
+        return node
+
+    config = fill(json.loads(json.dumps(skeleton)))
+    if missing:
+        raise Cannot(f"{REPO_SKELETON}: placeholder(s) this installer does not know: {', '.join(sorted(set(missing)))}")
+    for inbound in config.get("inbounds", []):
+        reality = (inbound.get("streamSettings") or {}).get("realitySettings")
+        if inbound.get("tag") == XRAY_INBOUND_TAG and isinstance(reality, dict):
+            reality["shortIds"] = [short_id]
+    if send_through:
+        for outbound in config.get("outbounds", []):
+            if isinstance(outbound, dict) and outbound.get("protocol") == "freedom":
+                outbound["sendThrough"] = send_through
+    return config
+
+
+def serialize_config(config: dict[str, Any]) -> bytes:
+    return (json.dumps(config, ensure_ascii=False, indent=2) + "\n").encode()
+
+
+def check_skeleton(skeleton: dict[str, Any]) -> list[str]:
+    """What the installer relies on in the skeleton; a skeleton that moved is refused."""
+    bad = []
+    tags = {i.get("tag"): i for i in skeleton.get("inbounds", []) if isinstance(i, dict)}
+    vless = tags.get(XRAY_INBOUND_TAG)
+    if vless is None or str(vless.get("port")) != XRAY_PUBLIC_PORT:
+        bad.append(f"inbound {XRAY_INBOUND_TAG} on :{XRAY_PUBLIC_PORT}")
+    else:
+        reality = (vless.get("streamSettings") or {}).get("realitySettings") or {}
+        if reality.get("target") != REALITY_TARGET:
+            bad.append(f"REALITY target {REALITY_TARGET}")
+    api = tags.get("api")
+    if api is None or f"{api.get('listen')}:{api.get('port')}" != XRAY_API:
+        bad.append(f"api inbound on {XRAY_API}")
+    if XRAY_XHTTP_TAG not in tags:
+        bad.append(f"inbound {XRAY_XHTTP_TAG}")
+    return bad
+
+
+def parse_x25519(out: str) -> tuple[str, str]:
+    """(private, public) from `xray x25519`: v25.10+ prints PrivateKey / Password (the
+    public key), older releases Private key / Public key."""
+    priv = pub = ""
+    for line in out.splitlines():
+        name, sep, value = line.partition(":")
+        if not sep:
+            continue
+        name, value = name.strip().lower(), value.strip()
+        if name in ("privatekey", "private key"):
+            priv = value
+        elif name in ("password", "publickey", "public key"):
+            pub = value
+    if not _KEY_RE.match(priv) or not _KEY_RE.match(pub):
+        raise Cannot("xray x25519 printed no key pair this installer can read")
+    return priv, pub
+
+
+# --------------------------------------------------------------------------- #
+# X25519 (RFC 7748): the public half of the REALITY key, computed here — never by
+# `xray x25519 -i <private>`, which would put the private key on an argv every local
+# user can read in /proc. Checked against Xray v25.10.15 (tests pin known pairs).
+# --------------------------------------------------------------------------- #
+_P25519 = 2**255 - 19
+
+
+def x25519_public(private_key: str) -> str:
+    """The base64url (unpadded) public key of a base64url X25519 private key."""
+    import base64
+
+    raw = base64.urlsafe_b64decode(private_key + "=" * (-len(private_key) % 4))
+    if len(raw) != 32:
+        raise ValueError("an X25519 private key is 32 bytes")
+    k = bytearray(raw)
+    k[0] &= 248
+    k[31] &= 127
+    k[31] |= 64
+    scalar = int.from_bytes(k, "little")
+    x1, x2, z2, x3, z3, swap = 9, 1, 0, 9, 1, 0
+    for t in reversed(range(255)):
+        bit = (scalar >> t) & 1
+        swap ^= bit
+        if swap:
+            x2, x3, z2, z3 = x3, x2, z3, z2
+        swap = bit
+        a = (x2 + z2) % _P25519
+        aa = a * a % _P25519
+        b = (x2 - z2) % _P25519
+        bb = b * b % _P25519
+        e = (aa - bb) % _P25519
+        c = (x3 + z3) % _P25519
+        d = (x3 - z3) % _P25519
+        da = d * a % _P25519
+        cb = c * b % _P25519
+        x3 = (da + cb) ** 2 % _P25519
+        z3 = x1 * (da - cb) ** 2 % _P25519
+        x2 = aa * bb % _P25519
+        z2 = e * (aa + 121665 * e) % _P25519
+    if swap:
+        x2, z2 = x3, z3
+    public = x2 * pow(z2, _P25519 - 2, _P25519) % _P25519
+    return base64.urlsafe_b64encode(public.to_bytes(32, "little")).rstrip(b"=").decode()
+
+
+# --------------------------------------------------------------------------- #
+# The certificate (vpn-bot-cert status): the bot's adopted domain, a valid pair
+# --------------------------------------------------------------------------- #
+def cert_argv(ctx: Ctx, *args: str) -> list[str]:
+    return ["vpn-bot-cert" if SELFTEST else CERT_HELPER, *args]
+
+
+def cert_status(ctx: Ctx) -> dict[str, Any]:
+    rc, out = run(ctx, cert_argv(ctx, "status", "--json"), timeout=120)
+    for line in out.splitlines():
+        if line.startswith("{"):
+            with contextlib.suppress(ValueError):
+                data = json.loads(line)
+                if isinstance(data, dict):
+                    return data
+    raise Cannot(f"vpn-bot-cert status gave no report (exit {rc}): {out.strip()[-200:]}")
+
+
+def covers(san: Sequence[str], name: str) -> bool:
+    for entry in (str(e).lower() for e in san):
+        if entry == name:
+            return True
+        if entry.startswith("*.") and name.count(".") == entry.count(".") and name.split(".", 1)[1] == entry[2:]:
+            return True
+    return False
+
+
+def cert_domain(ctx: Ctx, wanted: str | None) -> tuple[str | None, list[str]]:
+    """(the domain the protocol serves, blocking findings)."""
+    try:
+        st = cert_status(ctx)
+    except Cannot as exc:
+        return None, [f"the certificate's status cannot be read: {exc}"]
+    if not st.get("adopted") or not st.get("domain"):
+        return None, ["the bot has no certificate yet: issue or adopt one in «🔐 Сертификат и DNS» first"]
+    name = str(st["domain"])
+    dom = next((d for d in st.get("domains", []) if d.get("name") == name and d.get("dir") == st.get("target_dir")),
+               next((d for d in st.get("domains", []) if d.get("name") == name), None))
+    if not isinstance(dom, dict) or dom.get("key_ok") is not True:
+        return None, [f"the certificate of {name} is not usable: {(dom or {}).get('error') or 'no key pair'}"]
+    san = [str(s) for s in dom.get("san") or []]
+    days = dom.get("days_left")
+    blocking = []
+    if not isinstance(days, (int, float)) or days < CERT_MIN_DAYS:
+        blocking.append(f"the certificate of {name} expires in {days} day(s): renew it first")
+    domain = wanted or next((s for s in san if not s.startswith("*.")), name)
+    if not _DNS_NAME_RE.match(domain):
+        blocking.append(f"{domain!r} is not a DNS name the protocol can serve")
+    elif not covers(san, domain):
+        blocking.append(f"the certificate ({', '.join(san)}) does not cover {domain}")
+    return domain, blocking
+
+
+# --------------------------------------------------------------------------- #
+# Host facts
+# --------------------------------------------------------------------------- #
+def dpkg_status(ctx: Ctx, pkg: str) -> str:
+    rc, out = run(ctx, ["dpkg-query", "-W", "-f=${db:Status-Abbrev}", pkg])
+    return out.strip().split("\n")[-1].strip() if rc == 0 else ""
+
+
+def installed_packages(ctx: Ctx) -> set[str]:
+    rc, out = run(ctx, ["dpkg-query", "-W", "-f=${db:Status-Abbrev} ${Package}\n"])
+    if rc != 0:
+        raise Cannot(f"dpkg-query failed (exit {rc})")
+    pkgs = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == "ii":
+            pkgs.add(parts[1].split(":", 1)[0])
+    return pkgs
+
+
+def unit_prop(ctx: Ctx, unit: str, prop: str) -> str:
+    rc, out = run(ctx, ["systemctl", "show", "-p", prop, "--value", "--", unit])
+    return out.strip().splitlines()[0].strip() if rc == 0 and out.strip() else ""
+
+
+def unit_active(ctx: Ctx, unit: str) -> bool:
+    return unit_prop(ctx, unit, "ActiveState") == "active"
+
+
+def unit_loaded(ctx: Ctx, unit: str) -> bool:
+    return unit_prop(ctx, unit, "LoadState") == "loaded"
+
+
+def nginx_conf_files(ctx: Ctx) -> list[Path]:
+    files: list[Path] = []
+    for d in NGINX_CONF_DIRS:
+        base = ctx.host(d)
+        if base.is_dir():
+            files += sorted(p for p in base.iterdir() if p.is_file())
+    return files
+
+
+def foreign_selfsteal(ctx: Ctx) -> str | None:
+    """A config of nginx (not ours) that already listens on 127.0.0.1:8443."""
+    pattern = re.compile(r"^\s*listen\s+(127\.0\.0\.1:)?8443\b", re.MULTILINE)
+    ours = ctx.host(NGINX_SITE_CONF)
+    for f in nginx_conf_files(ctx):
+        if f == ours:
+            continue
+        with contextlib.suppress(OSError):
+            if pattern.search(f.read_text(encoding="utf-8", errors="replace")):
+                return ctx.unroot(f)
+    return None
+
+
+def machine() -> str:
+    arch = os.environ.get("VPN_BOT_PROTOCOL_INSTALL_SELFTEST_ARCH", "") if SELFTEST else ""
+    return arch or os.uname().machine
+
+
+# --------------------------------------------------------------------------- #
+# PLAN — every change, decided against the host; the sha256 covers the decisions
+# --------------------------------------------------------------------------- #
+@dataclass
+class Change:
+    step: str
+    kind: str      # package | file | dir | unit | env | marker | service | cert | download
+    target: str
+    action: str    # create | keep | replace | install | enable | start | reload | set | remove | deploy | skip
+    detail: str = ""
+
+    def as_json(self) -> dict[str, str]:
+        return {"step": self.step, "kind": self.kind, "target": self.target, "action": self.action, "detail": self.detail}
+
+
+@dataclass
+class Plan:
+    protocol: str
+    domain: str | None
+    state: str = "absent"            # absent | partial | installed
+    changes: list[Change] = field(default_factory=list)
+    blocking: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    env_updates: dict[str, str] = field(default_factory=dict)   # key -> value ("<generated>" for the keys)
+    env_current: dict[str, str] = field(default_factory=dict)
+    facts: dict[str, Any] = field(default_factory=dict)
+
+    def add(self, step: str, kind: str, target: str, action: str, detail: str = "") -> None:
+        self.changes.append(Change(step, kind, target, action, detail))
+
+    def acts(self, step: str) -> list[Change]:
+        return [c for c in self.changes if c.step == step and c.action not in ("keep", "skip")]
+
+    @property
+    def nothing_to_do(self) -> bool:
+        return not any(c.action not in ("keep", "skip") for c in self.changes)
+
+    @property
+    def sha256(self) -> str:
+        decisions = {
+            "protocol": self.protocol, "version": HELPER_VERSION, "domain": self.domain,
+            "changes": [[c.step, c.kind, c.target, c.action] for c in self.changes],
+            "env": sorted(self.env_updates.items()), "blocking": self.blocking,
+        }
+        return sha256_bytes(json.dumps(decisions, sort_keys=True).encode())
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "ok": not self.blocking, "version": HELPER_VERSION, "protocol": self.protocol, "domain": self.domain,
+            "sha256": self.sha256, "state": self.state, "nothing_to_do": self.nothing_to_do,
+            "blocking": self.blocking, "warnings": self.warnings,
+            "changes": [c.as_json() for c in self.changes],
+            "env": [{"key": k, "old": self.env_current.get(k, ""), "new": v} for k, v in sorted(self.env_updates.items())],
+            "backup_dir": BACKUP_DIR, "release": self.facts.get("release"),
+        }
+
+
+def plan_nginx(ctx: Ctx, plan: Plan, domain: str) -> None:
+    status = dpkg_status(ctx, NGINX_PACKAGE)
+    installed = status == "ii"
+    plan.facts["nginx_installed"] = installed
+    if installed:
+        plan.add("nginx_pkg", "package", NGINX_PACKAGE, "keep", "installed")
+    else:
+        plan.add("nginx_pkg", "package", NGINX_PACKAGE, "install",
+                 "apt-get install nginx; policy-rc.d keeps it stopped, its default site (:80) is disabled")
+        if status not in ("", "un", "pn"):
+            plan.warnings.append(f"nginx's dpkg status is '{status}', not installed: apt-get will repair it")
+    foreign = foreign_selfsteal(ctx)
+    plan.facts["foreign_selfsteal"] = foreign
+    if installed and unit_active(ctx, NGINX_UNIT):
+        plan.add("nginx_start", "service", NGINX_UNIT, "keep", "active")
+    else:
+        plan.add("nginx_start", "service", NGINX_UNIT, "start", "enable --now (no vhost of ours yet)")
+    if foreign:
+        plan.add("nginx_site", "file", NGINX_SITE_CONF, "skip", f"{foreign} already serves {SELFSTEAL_LISTEN}: kept")
+        plan.warnings.append(f"nginx already serves {SELFSTEAL_LISTEN} from {foreign}: that vhost stays the REALITY target")
+        plan_cert(plan)
+        return
+    site_root = ctx.host(SITE_ROOT)
+    if site_root.is_symlink() or (site_root.exists() and not site_root.is_dir()):
+        plan.blocking.append(f"{SITE_ROOT} exists and is not a directory")
+    elif site_root.is_dir():
+        plan.add("nginx_site", "dir", SITE_ROOT, "keep", "the decoy site is there")
+    else:
+        plan.add("nginx_site", "dir", SITE_ROOT, "create", f"the decoy site from {REPO_SITE}")
+    conf = ctx.host(NGINX_SITE_CONF)
+    want = selfsteal_conf(ctx, domain)
+    if conf.is_symlink():
+        plan.blocking.append(f"{NGINX_SITE_CONF} is a symlink")
+    elif conf.is_file():
+        have = conf.read_bytes()
+        if have == want:
+            plan.add("nginx_site", "file", NGINX_SITE_CONF, "keep", "as in the repo")
+        elif have.startswith(SELFSTEAL_HEADER.encode()):
+            plan.add("nginx_site", "file", NGINX_SITE_CONF, "replace", "ours, another domain or an older template")
+        else:
+            plan.blocking.append(f"{NGINX_SITE_CONF} exists and is not this installer's")
+    else:
+        plan.add("nginx_site", "file", NGINX_SITE_CONF, "create",
+                 f"listen {SELFSTEAL_LISTEN} ssl http2, TLSv1.3, server_name {domain}, root {SITE_ROOT}")
+    plan_cert(plan)
+
+
+def plan_cert(plan: Plan) -> None:
+    """vpn-bot-cert deploy once nginx (a reader of the registry) is new, started or gets a
+    new vhost; an nginx that was there and serving already holds the pair."""
+    if any(plan.acts(s) for s in ("nginx_pkg", "nginx_start", "nginx_site")):
+        plan.add("cert", "cert", "vpn-bot-cert deploy", "deploy",
+                 f"the registry's pair to the nginx reader ({TLS_FULLCHAIN}, {TLS_PRIVKEY})")
+
+
+def plan_xray(ctx: Ctx, plan: Plan, domain: str) -> None:
+    env = ctx.env()
+    for key, want in (("XRAY_CONFIG_PATH", XRAY_CONFIG), ("XRAY_SERVICE_NAME", "xray"),
+                      ("XRAY_PUBLIC_PORT", XRAY_PUBLIC_PORT), ("XRAY_SERVER_PORT", XRAY_PUBLIC_PORT)):
+        have = env.get(key, "")
+        if have and have.removesuffix(".service") != want:
+            plan.blocking.append(f".env {key}={have}: this installer lays out {want} (the skeleton's layout)")
+    for key, want in (("XRAY_INBOUND_TAG", XRAY_INBOUND_TAG), ("XRAY_XHTTP_INBOUND_TAG", XRAY_XHTTP_TAG),
+                      ("XRAY_STATS_SERVER", XRAY_API)):
+        have = env.get(key, "")
+        if have and have != want:
+            plan.blocking.append(f".env {key}={have}: the generated config uses {want}")
+    xhttp_path = env.get("XRAY_XHTTP_PATH") or XRAY_DEFAULT_XHTTP_PATH
+    if not re.fullmatch(r"/[A-Za-z0-9._~/-]{0,200}", xhttp_path):
+        plan.blocking.append(f".env XRAY_XHTTP_PATH={xhttp_path!r} is not a URL path")
+    plan.facts["xhttp_path"] = xhttp_path
+
+    arch = machine()
+    asset = pinned_assets().get(arch)
+    present = {p: ctx.host(p).exists() or ctx.host(p).is_symlink() for p in (XRAY_BIN, XRAY_CONFIG, f"{UNIT_DIR}/{XRAY_UNIT}")}
+    if all(present.values()):
+        plan.state = "installed"
+    elif any(present.values()):
+        plan.state = "partial"
+    # xray_bin
+    if ctx.host(XRAY_BIN).is_symlink():
+        plan.blocking.append(f"{XRAY_BIN} is a symlink")
+    elif present[XRAY_BIN]:
+        plan.add("xray_bin", "file", XRAY_BIN, "keep", "installed (an upgrade is not this installer's job)")
+    elif asset is None:
+        plan.blocking.append(f"no pinned Xray release for the architecture {arch}")
+    else:
+        plan.facts["release"] = {"version": XRAY_VERSION, "asset": asset[0], "sha256": asset[1]}
+        plan.add("xray_bin", "download", f"{XRAY_RELEASE_BASE}/{asset[0]}", "install",
+                 f"Xray {XRAY_VERSION}, sha256 {asset[1][:16]}… (pinned) = the release's .dgst")
+        plan.add("xray_bin", "file", XRAY_BIN, "create", "root:root 0755")
+    share = ctx.host(XRAY_SHARE)
+    if share.is_dir():
+        plan.add("xray_bin", "dir", XRAY_SHARE, "keep")
+    elif asset is not None:
+        plan.add("xray_bin", "dir", XRAY_SHARE, "create", ", ".join(XRAY_GEO))
+    # xray_units
+    for path, data in xray_unit_sources(ctx).items():
+        h = ctx.host(path)
+        if h.is_symlink():
+            plan.blocking.append(f"{path} is a symlink")
+        elif h.is_file():
+            plan.add("xray_units", "file", path, "keep", "as in the repo" if h.read_bytes() == data else "differs: kept")
+        else:
+            plan.add("xray_units", "file", path, "create", "root:root 0644")
+    # xray_config
+    etc = ctx.host(XRAY_ETC)
+    if etc.is_symlink() or (etc.exists() and not etc.is_dir()):
+        plan.blocking.append(f"{XRAY_ETC} is not a directory")
+    if ctx.host(XRAY_CONFIG).is_symlink():
+        plan.blocking.append(f"{XRAY_CONFIG} is a symlink")
+    elif ctx.host(XRAY_CONFIG).exists():
+        plan.add("xray_config", "file", XRAY_CONFIG, "keep", "the live config (its clients and REALITY key) stays")
+    else:
+        skeleton_bad = check_skeleton(json.loads(repo_file(ctx, REPO_SKELETON).read_text(encoding="utf-8")))
+        if skeleton_bad:
+            plan.blocking.append(f"{REPO_SKELETON} no longer has: {', '.join(skeleton_bad)}")
+        send = warp_send_through(ctx)
+        plan.facts["send_through"] = send
+        plan.add("xray_config", "file", XRAY_CONFIG, "create",
+                 f"from {REPO_SKELETON}: a new x25519 pair, one shortId, serverNames [{domain}], target {REALITY_TARGET}, "
+                 f"XHTTP on 127.0.0.1:{XRAY_XHTTP_LOOPBACK_PORT} {xhttp_path}, api {XRAY_API}"
+                 + (f", sendThrough {send} (WARP)" if send else "") + f"; {XRAY_USER}:{config_group(ctx)} 0640")
+    # xray_logs
+    if ctx.host(XRAY_LOG_DIR).is_dir():
+        plan.add("xray_logs", "dir", XRAY_LOG_DIR, "keep")
+    else:
+        plan.add("xray_logs", "dir", XRAY_LOG_DIR, "create", f"{XRAY_USER}:{FALLBACK_GROUP} 0700, access.log, error.log")
+    # env: only for a config generated here (the live config's keys are not known here)
+    config_new = any(c.step == "xray_config" and c.action == "create" for c in plan.changes)
+    wanted = {
+        "XRAY_PUBLIC_HOST": domain, "XRAY_SNI": domain, "XRAY_INBOUND_TAG": XRAY_INBOUND_TAG,
+        "XRAY_STATS_SERVER": XRAY_API, "XRAY_XHTTP_ENABLED": "true", "XRAY_XHTTP_INBOUND_TAG": XRAY_XHTTP_TAG,
+    }
+    if config_new:
+        wanted["XRAY_REALITY_PUBLIC_KEY"] = "<generated>"
+        wanted["XRAY_SHORT_ID"] = "<generated>"
+        for key, value in wanted.items():
+            if env.get(key, "") != value or value == "<generated>":
+                plan.env_updates[key] = value
+                plan.env_current[key] = env.get(key, "")
+        for key in sorted(plan.env_updates):
+            plan.add("env", "env", key, "set", f"{plan.env_current[key] or '(unset)'} → {plan.env_updates[key]}")
+        if env.get("XRAY_MANAGE_SHORT_IDS") and env_bool(env["XRAY_MANAGE_SHORT_IDS"]):
+            plan.warnings.append("XRAY_MANAGE_SHORT_IDS=true: the bot adds a shortId per key; the generated one stays")
+    else:
+        missing = [k for k in ("XRAY_PUBLIC_HOST", "XRAY_SNI", "XRAY_REALITY_PUBLIC_KEY") if not env.get(k)]
+        if missing and present[XRAY_CONFIG]:
+            plan.warnings.append(f"config.json is kept, but .env has no {', '.join(missing)}: set them by hand")
+    # xray_start
+    if present[f"{UNIT_DIR}/{XRAY_UNIT}"] and unit_active(ctx, XRAY_UNIT):
+        plan.add("xray_start", "service", XRAY_UNIT, "keep", "active")
+    else:
+        plan.add("xray_start", "service", XRAY_UNIT, "start", "enable --now")
+    # marker
+    if ctx.host(f"{MARKER_DIR}/xray").is_file():
+        plan.add("marker", "marker", f"{MARKER_DIR}/xray", "remove", "a reinstall: the protocol is back on the host")
+
+
+def compute_plan(ctx: Ctx, proto: str, wanted_domain: str | None) -> Plan:
+    if wanted_domain is not None and wanted_domain and not _DNS_NAME_RE.match(wanted_domain):
+        raise Refused(f"--domain {wanted_domain!r} is not a lowercase DNS name")
+    domain, blocking = cert_domain(ctx, wanted_domain or None)
+    plan = Plan(protocol=proto, domain=domain)
+    plan.blocking += blocking
+    if domain is None:
+        return plan
+    if proto == "xray":
+        plan_nginx(ctx, plan, domain)
+        plan_xray(ctx, plan, domain)
+    if not ctx.host(ENV_FILE).is_file():
+        plan.blocking.append(f"{ENV_FILE} does not exist")
+    return plan
+
+
+# --------------------------------------------------------------------------- #
+# The journal: what apply did, step by step (written BEFORE each action)
+# --------------------------------------------------------------------------- #
+class Journal:
+    def __init__(self, ctx: Ctx, proto: str) -> None:
+        self.ctx = ctx
+        self.path = ctx.host(f"{STATE_DIR}/{proto}.journal.json")
+        self.data: dict[str, Any] = {}
+
+    def load(self) -> dict[str, Any]:
+        try:
+            self.data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self.data = {}
+        return self.data
+
+    def start(self, proto: str, plan: Plan, archive: str) -> None:
+        self.data = {"protocol": proto, "state": "applying", "plan": plan.sha256, "domain": plan.domain,
+                     "archive": archive, "started": iso_now(), "actions": []}
+        self.save()
+
+    def add(self, step: str, kind: str, **fields: Any) -> dict[str, Any]:
+        entry = {"step": step, "kind": kind, **fields}
+        self.data.setdefault("actions", []).append(entry)
+        self.save()
+        return entry
+
+    def set_state(self, state: str) -> None:
+        self.data["state"] = state
+        self.data[f"{state}_at"] = iso_now()
+        self.save()
+
+    def save(self) -> None:
+        d = self.path.parent
+        fence(self.ctx, d)
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
+        write_file(self.ctx, self.path, (json.dumps(self.data, indent=1, sort_keys=True) + "\n").encode(), 0o600)
+
+
+def iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# --------------------------------------------------------------------------- #
+# APPLY
+# --------------------------------------------------------------------------- #
+def backup(ctx: Ctx, proto: str, plan: Plan) -> str:
+    """tar.gz of every existing path a step may change (and .env); verified with a read."""
+    bdir = ctx.host(BACKUP_DIR)
+    fence(ctx, bdir)
+    bdir.mkdir(parents=True, exist_ok=True)
+    os.chmod(bdir, 0o700)
+    archive = f"{BACKUP_DIR}/{proto}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.tar.gz"
+    targets = sorted({ENV_FILE, NGINX_SITE_CONF, NGINX_DEFAULT_SITE, POLICY_RC_D, f"{MARKER_DIR}/{proto}",
+                      *MANIFESTS[proto].unit_files, *MANIFESTS[proto].paths})
+    members: list[str] = []
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        meta = json.dumps({"protocol": proto, "plan": plan.as_json(), "created": iso_now()}, indent=1).encode()
+        info = tarfile.TarInfo(f"{BACKUP_META}/plan.json")
+        info.size, info.mtime = len(meta), int(time.time())
+        tar.addfile(info, io.BytesIO(meta))
+        for target in targets:
+            h = ctx.host(target)
+            if h.exists() or h.is_symlink():
+                tar.add(str(h), arcname=target.lstrip("/"), recursive=True)
+                members.append(target.lstrip("/"))
+    data = buf.getvalue()
+    write_file(ctx, ctx.host(archive), data, 0o600)
+    with tarfile.open(ctx.host(archive), mode="r:gz") as tar:
+        names = set(tar.getnames())
+    missing = [m for m in members if m not in names]
+    if missing:
+        raise Cannot(f"backup check: {', '.join(missing)} missing from {archive}")
+    ctx.log(f"backup {archive}: {len(members)} path(s), sha256 {sha256_bytes(data)[:16]}")
+    return archive
+
+
+def fault(ctx: Ctx, step: str) -> None:
+    if SELFTEST and ctx.fail_at == step:
+        raise StepFailed(step, f"selftest fault injected after step {step}")
+
+
+def systemctl(ctx: Ctx, step: str, *args: str) -> None:
+    rc, out = run(ctx, ["systemctl", *args])
+    if rc != 0:
+        raise StepFailed(step, f"systemctl {' '.join(args)} failed (exit {rc}): {out.strip()[-300:]}")
+
+
+def step_nginx_pkg(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    if not plan.acts("nginx_pkg"):
+        return
+    before = installed_packages(ctx)
+    policy = ctx.host(POLICY_RC_D)
+    created_policy = False
+    if not policy.exists() and not policy.is_symlink():
+        journal.add("nginx_pkg", "created", path=POLICY_RC_D)
+        write_file(ctx, policy, POLICY_RC_D_BODY.encode(), 0o755)
+        created_policy = True
+    journal.add("nginx_pkg", "packages", before=sorted(before))
+    try:
+        argv = ["apt-get", "install", "-y", "-q", "--no-install-recommends", NGINX_PACKAGE]
+        env = {"DEBIAN_FRONTEND": "noninteractive"}
+        rc, out = run(ctx, argv, timeout=APT_TIMEOUT, env=env)
+        if rc != 0 and "Unable to locate package" in out:
+            run(ctx, ["apt-get", "update", "-q"], timeout=APT_TIMEOUT, env=env)
+            rc, out = run(ctx, argv, timeout=APT_TIMEOUT, env=env)
+        if rc != 0:
+            raise StepFailed("nginx_pkg", f"apt-get install nginx failed (exit {rc}): {out.strip()[-300:]}")
+    finally:
+        if created_policy:
+            with contextlib.suppress(OSError):
+                remove_path(ctx, policy)
+    after = installed_packages(ctx)
+    journal.add("nginx_pkg", "installed", packages=sorted(after - before))
+    if NGINX_PACKAGE not in after:
+        raise StepFailed("nginx_pkg", "nginx is not installed after apt-get install")
+    default = ctx.host(NGINX_DEFAULT_SITE)
+    if default.is_symlink() or default.exists():
+        target = os.readlink(default) if default.is_symlink() else None
+        journal.add("nginx_pkg", "removed_link", path=NGINX_DEFAULT_SITE, target=target)
+        remove_path(ctx, default)
+    fault(ctx, "nginx_pkg")
+
+
+def step_nginx_start(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    if not plan.acts("nginx_start"):
+        return
+    enabled = unit_prop(ctx, NGINX_UNIT, "UnitFileState")
+    journal.add("nginx_start", "service", unit=NGINX_UNIT, was_enabled=enabled, was_active=unit_active(ctx, NGINX_UNIT))
+    systemctl(ctx, "nginx_start", "enable", "--now", "--", NGINX_UNIT)
+    if not unit_active(ctx, NGINX_UNIT):
+        raise StepFailed("nginx_start", f"{NGINX_UNIT} is not active after enable --now")
+    fault(ctx, "nginx_start")
+
+
+def step_cert(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    if not plan.acts("cert"):
+        return
+    journal.add("cert", "deploy", note="the registry's pair: shared, not undone by a rollback")
+    rc, out = run(ctx, cert_argv(ctx, "deploy", "--json"), timeout=600)
+    if rc != 0:
+        raise StepFailed("cert", f"vpn-bot-cert deploy failed (exit {rc}): {out.strip()[-300:]}")
+    for path in (TLS_FULLCHAIN, TLS_PRIVKEY):
+        if not ctx.host(path).is_file():
+            raise StepFailed("cert", f"{path} is not there after vpn-bot-cert deploy")
+    fault(ctx, "cert")
+
+
+def step_nginx_site(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    acts = plan.acts("nginx_site")
+    if not acts:
+        return
+    assert plan.domain is not None
+    for change in acts:
+        if change.kind == "dir" and change.target == SITE_ROOT:
+            parent = ctx.host(SITE_ROOT).parent
+            if not parent.is_dir():
+                fence(ctx, parent)
+                parent.mkdir(mode=0o755, parents=True)
+            journal.add("nginx_site", "created", path=SITE_ROOT)
+            make_dir(ctx, ctx.host(SITE_ROOT), 0o755)
+            for rel, data in site_files(ctx):
+                target = ctx.host(f"{SITE_ROOT}/{rel}")
+                if target.parent != ctx.host(SITE_ROOT) and not target.parent.exists():
+                    target.parent.mkdir(parents=True, mode=0o755)
+                write_file(ctx, target, data, 0o644)
+        elif change.kind == "file" and change.target == NGINX_SITE_CONF:
+            conf = ctx.host(NGINX_SITE_CONF)
+            if change.action == "create":
+                journal.add("nginx_site", "created", path=NGINX_SITE_CONF)
+            else:
+                journal.add("nginx_site", "replaced", path=NGINX_SITE_CONF)
+            write_file(ctx, conf, selfsteal_conf(ctx, plan.domain), 0o644)
+    rc, out = run(ctx, ["nginx", "-t", "-q"])
+    if rc != 0:
+        raise StepFailed("nginx_site", f"nginx -t refused the self-steal vhost (exit {rc}): {out.strip()[-300:]}")
+    systemctl(ctx, "nginx_site", "reload", "--", NGINX_UNIT)
+    journal.add("nginx_site", "reloaded", unit=NGINX_UNIT)
+    fault(ctx, "nginx_site")
+
+
+def fetch(ctx: Ctx, url: str) -> bytes:
+    if SELFTEST:
+        path = Path(ctx.releases) / url.rsplit("/", 1)[-1]
+        if not ctx.releases or not path.is_file():
+            raise Cannot(f"selftest: no {path.name} in VPN_BOT_PROTOCOL_INSTALL_SELFTEST_RELEASES")
+        return path.read_bytes()
+    request = urllib.request.Request(url, headers={"User-Agent": "vpn-bot-protocol-install"})  # noqa: S310 — a fixed https URL
+    with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310
+        data: bytes = response.read(MAX_DOWNLOAD + 1)
+    if len(data) > MAX_DOWNLOAD:
+        raise Cannot(f"{url}: larger than {MAX_DOWNLOAD} bytes")
+    return data
+
+
+def pinned_assets() -> Mapping[str, tuple[str, str]]:
+    raw = os.environ.get("VPN_BOT_PROTOCOL_INSTALL_SELFTEST_PINS", "") if SELFTEST else ""
+    if not raw:
+        return XRAY_ASSETS
+    pins = json.loads(raw)
+    return {arch: (name, str(pins.get(name, want))) for arch, (name, want) in XRAY_ASSETS.items()}
+
+
+def dgst_sha256(text: str) -> str | None:
+    for line in text.splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name.strip().upper() in ("SHA2-256", "SHA256"):
+            value = value.strip().lower()
+            return value if _SHA_RE.match(value) else None
+    return None
+
+
+def step_xray_bin(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    if not plan.acts("xray_bin"):
+        return
+    asset, want = pinned_assets()[machine()]
+    url = f"{XRAY_RELEASE_BASE}/{asset}"
+    try:
+        data = fetch(ctx, url)
+        dgst = fetch(ctx, f"{url}.dgst").decode("utf-8", errors="replace")
+    except (OSError, ValueError) as exc:
+        raise StepFailed("xray_bin", f"cannot download {url}: {exc}") from None
+    got = sha256_bytes(data)
+    published = dgst_sha256(dgst)
+    if got != want:
+        raise StepFailed("xray_bin", f"{asset}: sha256 {got} is not the pinned {want} — refusing to install it")
+    if published != got:
+        raise StepFailed("xray_bin", f"{asset}: the release's .dgst says {published}, the download is {got}")
+    ctx.log(f"{asset}: sha256 {got} = the pin = the .dgst")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            members = {i.filename: i for i in zf.infolist()}
+            if "xray" not in members or any(n not in members for n in XRAY_GEO):
+                raise StepFailed("xray_bin", f"{asset} does not hold xray and {', '.join(XRAY_GEO)}")
+            payload = {name: zf.read(members[name]) for name in ("xray", *XRAY_GEO)}
+    except zipfile.BadZipFile as exc:
+        raise StepFailed("xray_bin", f"{asset}: {exc}") from None
+    if not ctx.host(XRAY_BIN).exists():
+        journal.add("xray_bin", "created", path=XRAY_BIN)
+        write_file(ctx, ctx.host(XRAY_BIN), payload["xray"], 0o755)
+    share = ctx.host(XRAY_SHARE)
+    if not share.is_dir():
+        journal.add("xray_bin", "created", path=XRAY_SHARE)
+        make_dir(ctx, share, 0o755)
+        for name in XRAY_GEO:
+            write_file(ctx, share / name, payload[name], 0o644)
+    rc, out = run(ctx, [xray_exe(ctx), "version"])
+    if rc != 0:
+        raise StepFailed("xray_bin", f"{XRAY_BIN} version failed (exit {rc}): {out.strip()[-200:]}")
+    fault(ctx, "xray_bin")
+
+
+def xray_exe(ctx: Ctx) -> str:
+    return "xray" if SELFTEST else XRAY_BIN
+
+
+def step_xray_units(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    acts = plan.acts("xray_units")
+    if not acts:
+        return
+    sources = xray_unit_sources(ctx)
+    for change in acts:
+        h = ctx.host(change.target)
+        parent = h.parent
+        if change.target.endswith(".conf") and not parent.exists():
+            journal.add("xray_units", "created", path=ctx.unroot(parent))
+            make_dir(ctx, parent, 0o755)
+        journal.add("xray_units", "created", path=change.target)
+        write_file(ctx, h, sources[change.target], 0o644)
+    systemctl(ctx, "xray_units", "daemon-reload")
+    fault(ctx, "xray_units")
+
+
+def step_xray_config(ctx: Ctx, plan: Plan, journal: Journal, generated: dict[str, str]) -> None:
+    if not plan.acts("xray_config"):
+        return
+    assert plan.domain is not None
+    rc, out = run(ctx, [xray_exe(ctx), "x25519"])
+    if rc != 0:
+        raise StepFailed("xray_config", f"xray x25519 failed (exit {rc})")
+    try:
+        private, public = parse_x25519(out)
+        derived = x25519_public(private)
+    except (Cannot, ValueError) as exc:
+        raise StepFailed("xray_config", str(exc)) from None
+    if derived != public:
+        raise StepFailed("xray_config", "xray x25519 printed a public key that is not the private key's")
+    short_id = secrets.token_hex(8)
+    skeleton = json.loads(repo_file(ctx, REPO_SKELETON).read_text(encoding="utf-8"))
+    config = render_xray_config(skeleton, domain=plan.domain, private_key=private, short_id=short_id,
+                                xhttp_path=str(plan.facts["xhttp_path"]), send_through=plan.facts.get("send_through"))
+    etc = ctx.host(XRAY_ETC)
+    if not etc.is_dir():
+        journal.add("xray_config", "created", path=XRAY_ETC)
+        make_dir(ctx, etc, 0o755)
+    journal.add("xray_config", "created", path=XRAY_CONFIG)
+    owner = (XRAY_USER, config_group(ctx))
+    tmp = etc / ".config.json.vpn-bot-install-test.json"
+    write_file(ctx, tmp, serialize_config(config), 0o640, owner)
+    try:
+        rc, out = run(ctx, [xray_exe(ctx), "run", "-test", "-config", str(tmp)])
+        if rc != 0:
+            raise StepFailed("xray_config", f"xray run -test refused the generated config (exit {rc}): {out.strip()[-300:]}")
+        os.replace(tmp, ctx.host(XRAY_CONFIG))
+        if SELFTEST:
+            set_owner(ctx, ctx.host(XRAY_CONFIG), *owner)
+            forget_owner(ctx, tmp)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+    generated["XRAY_REALITY_PUBLIC_KEY"] = public
+    generated["XRAY_SHORT_ID"] = short_id
+    fault(ctx, "xray_config")
+
+
+def step_xray_logs(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    if not plan.acts("xray_logs"):
+        return
+    journal.add("xray_logs", "created", path=XRAY_LOG_DIR)
+    make_dir(ctx, ctx.host(XRAY_LOG_DIR), 0o700, (XRAY_USER, FALLBACK_GROUP))
+    for log in XRAY_LOGS:
+        write_file(ctx, ctx.host(log), b"", 0o600, (XRAY_USER, FALLBACK_GROUP))
+    fault(ctx, "xray_logs")
+
+
+def step_env(ctx: Ctx, plan: Plan, journal: Journal, generated: Mapping[str, str]) -> None:
+    if not plan.env_updates:
+        return
+    updates = {k: (generated.get(k, "") if v == "<generated>" else v) for k, v in plan.env_updates.items()}
+    empty = [k for k, v in updates.items() if not v]
+    if empty:
+        raise StepFailed("env", f"no generated value for {', '.join(empty)}")
+    f = ctx.host(ENV_FILE)
+    st = os.stat(f)
+    old = f.read_text(encoding="utf-8")
+    new = edit_env_text(old, updates)
+    # Only the planned keys may change: every other line byte for byte.
+    if read_env_text(new) != {**read_env_text(old), **updates}:
+        raise StepFailed("env", "the edit of .env would change more than the planned keys")
+    journal.add("env", "edited", path=ENV_FILE, keys=sorted(updates))
+    owner = owner_of(ctx, f)
+    write_file(ctx, f, new.encode("utf-8"), st.st_mode & 0o7777, tuple(owner.split(":", 1)))  # type: ignore[arg-type]
+    ctx.env_cache = None
+    fault(ctx, "env")
+
+
+def read_env_text(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        m = _ENV_LINE_RE.match(line)
+        if m:
+            values[m.group(1)] = env_value(m.group(2))
+    return values
+
+
+def step_xray_start(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    if not plan.acts("xray_start"):
+        return
+    journal.add("xray_start", "service", unit=XRAY_UNIT, was_enabled=unit_prop(ctx, XRAY_UNIT, "UnitFileState"),
+                was_active=unit_active(ctx, XRAY_UNIT))
+    systemctl(ctx, "xray_start", "enable", "--", XRAY_UNIT)
+    systemctl(ctx, "xray_start", "restart", "--", XRAY_UNIT)
+    time.sleep(0 if SELFTEST else 1)
+    if not unit_active(ctx, XRAY_UNIT):
+        raise StepFailed("xray_start", f"{XRAY_UNIT} is not active after the start")
+    fault(ctx, "xray_start")
+
+
+def step_marker(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    if not plan.acts("marker"):
+        return
+    path = ctx.host(f"{MARKER_DIR}/{plan.protocol}")
+    content = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+    journal.add("marker", "removed", path=f"{MARKER_DIR}/{plan.protocol}", content=content)
+    remove_path(ctx, path)
+    fault(ctx, "marker")
+
+
+# xray_logs before xray_config: `xray run -test` opens the log files the config names and
+# fails while /var/log/xray does not exist (measured with v25.10.15).
+STEPS: tuple[str, ...] = ("nginx_pkg", "nginx_start", "cert", "nginx_site", "xray_bin", "xray_units", "xray_logs",
+                          "xray_config", "env", "xray_start", "marker")
+
+
+@contextlib.contextmanager
+def locks(ctx: Ctx) -> Iterator[None]:
+    fds = []
+    try:
+        for name in (LOCK_FILE, UNINSTALL_LOCK_FILE):
+            path = ctx.host(name)
+            fence(ctx, path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            fds.append(fd)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise Refused("another protocol install or uninstall is running") from None
+        yield
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def cmd_apply(ctx: Ctx, proto: str, expect: str, domain: str | None, progress: Callable[[str, str], None]) -> dict[str, Any]:
+    if not _SHA_RE.match(expect):
+        raise Refused("--expect-plan must be the 64 hex of the plan's sha256")
+    with locks(ctx):
+        plan = compute_plan(ctx, proto, domain)
+        if plan.sha256 != expect:
+            return {"ok": False, "error": "plan_changed", "detail": "the host no longer matches the confirmed plan",
+                    "plan": plan.as_json()}
+        if plan.blocking:
+            return {"ok": False, "error": "blocked", "blocking": plan.blocking}
+        if plan.nothing_to_do:
+            return {"ok": True, "nothing_to_do": True, "protocol": proto, "plan": plan.sha256}
+        archive = backup(ctx, proto, plan)
+        journal = Journal(ctx, proto)
+        journal.start(proto, plan, archive)
+        generated: dict[str, str] = {}
+        current = "backup"
+        handlers: dict[str, Callable[[], None]] = {
+            "nginx_pkg": lambda: step_nginx_pkg(ctx, plan, journal),
+            "nginx_start": lambda: step_nginx_start(ctx, plan, journal),
+            "cert": lambda: step_cert(ctx, plan, journal),
+            "nginx_site": lambda: step_nginx_site(ctx, plan, journal),
+            "xray_bin": lambda: step_xray_bin(ctx, plan, journal),
+            "xray_units": lambda: step_xray_units(ctx, plan, journal),
+            "xray_config": lambda: step_xray_config(ctx, plan, journal, generated),
+            "xray_logs": lambda: step_xray_logs(ctx, plan, journal),
+            "env": lambda: step_env(ctx, plan, journal, generated),
+            "xray_start": lambda: step_xray_start(ctx, plan, journal),
+            "marker": lambda: step_marker(ctx, plan, journal),
+        }
+        try:
+            for current in STEPS:
+                if not plan.acts(current):
+                    progress(current, "skip")
+                    continue
+                progress(current, "run")
+                handlers[current]()
+                progress(current, "ok")
+        except (StepFailed, Cannot, Refused, OSError, ValueError) as exc:
+            step = exc.step if isinstance(exc, StepFailed) else current
+            progress(step, "fail")
+            ctx.log(f"FAILED at step {step}: {exc}")
+            errors = rollback_journal(ctx, journal)
+            return {"ok": False, "error": "step_failed", "failed_step": step, "detail": str(exc), "rolled_back": True,
+                    "rollback_errors": errors, "backup": archive}
+        journal.set_state("applied")
+        return {"ok": True, "protocol": proto, "plan": plan.sha256, "backup": archive, "domain": plan.domain,
+                "env": sorted(plan.env_updates)}
+
+
+# --------------------------------------------------------------------------- #
+# ROLLBACK — the journal backwards
+# --------------------------------------------------------------------------- #
+def restore_from_archive(ctx: Ctx, archive: str, rel: str) -> None:
+    """Put one path (a file, or a directory tree) back from the backup."""
+    with tarfile.open(ctx.host(archive), mode="r:gz") as tar:
+        members = [m for m in tar.getmembers() if m.name == rel or m.name.startswith(rel + "/")]
+        if not members:
+            raise Cannot(f"{rel} is not in {archive}")
+        for m in members:
+            if ".." in Path(m.name).parts or m.name.startswith("/"):
+                raise Cannot(f"refusing a backup member {m.name!r}")
+            dst = ctx.host("/" + m.name)
+            fence(ctx, dst)
+            if m.isdir():
+                dst.mkdir(parents=True, exist_ok=True)
+                os.chmod(dst, m.mode & 0o7777)
+            elif m.issym():
+                if dst.is_symlink() or dst.exists():
+                    dst.unlink()
+                os.symlink(m.linkname, dst)
+            elif m.isfile():
+                src = tar.extractfile(m)
+                assert src is not None
+                write_file(ctx, dst, src.read(), m.mode & 0o7777, (m.uname or "root", m.gname or "root"))
+                if not SELFTEST and os.geteuid() == 0:
+                    os.chown(dst, m.uid, m.gid)
+
+
+def rollback_journal(ctx: Ctx, journal: Journal) -> list[str]:
+    data = journal.data or journal.load()
+    errors: list[str] = []
+    if not data or data.get("state") in ("rolled_back", "committed"):
+        return errors
+    archive = str(data.get("archive") or "")
+    ctx.log(f"ROLLBACK of the {data.get('protocol')} install (plan {str(data.get('plan'))[:12]})")
+    reload_needed = False
+    for entry in reversed(data.get("actions", [])):
+        kind = entry.get("kind")
+        try:
+            if kind == "created":
+                h = ctx.host(entry["path"])
+                if h.exists() or h.is_symlink():
+                    remove_path(ctx, h)
+                    if entry["path"].startswith(UNIT_DIR):
+                        reload_needed = True
+                    if entry["path"] in (NGINX_SITE_CONF,):
+                        reload_needed = True
+            elif kind == "replaced" or kind == "edited":
+                restore_from_archive(ctx, archive, entry["path"].lstrip("/"))
+                if entry["path"] == NGINX_SITE_CONF:
+                    reload_needed = True
+            elif kind == "removed_link":
+                h = ctx.host(entry["path"])
+                if not h.exists() and not h.is_symlink() and entry.get("target"):
+                    os.symlink(entry["target"], h)
+            elif kind == "removed":
+                h = ctx.host(entry["path"])
+                h.parent.mkdir(parents=True, exist_ok=True)
+                write_file(ctx, h, str(entry.get("content", "")).encode(), 0o644)
+            elif kind == "service":
+                unit = entry["unit"]
+                if not entry.get("was_active"):
+                    run(ctx, ["systemctl", "stop", "--", unit])
+                if entry.get("was_enabled") not in ("enabled", "enabled-runtime"):
+                    run(ctx, ["systemctl", "disable", "--", unit])
+            elif kind == "installed":
+                pkgs = [p for p in entry.get("packages", []) if re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", p)]
+                if pkgs:
+                    rc, _ = run(ctx, ["apt-get", "purge", "-y", "-q", *pkgs], timeout=APT_TIMEOUT,
+                                  env={"DEBIAN_FRONTEND": "noninteractive"})
+                    if rc != 0:
+                        errors.append(f"apt-get purge {' '.join(pkgs)}: exit {rc}")
+        except (OSError, KeyError, Cannot, tarfile.TarError) as exc:
+            errors.append(f"{entry.get('step')}/{kind} {entry.get('path') or entry.get('unit') or ''}: {exc}")
+    if reload_needed:
+        run(ctx, ["systemctl", "daemon-reload"])
+        if unit_active(ctx, NGINX_UNIT):
+            rc, _ = run(ctx, ["systemctl", "reload", "--", NGINX_UNIT])
+            if rc != 0:
+                errors.append("systemctl reload nginx failed after the rollback")
+    journal.data["rollback_errors"] = errors
+    journal.set_state("rolled_back")
+    ctx.log("rollback complete" if not errors else f"ROLLBACK INCOMPLETE: {'; '.join(errors)}")
+    return errors
+
+
+# --------------------------------------------------------------------------- #
+# VERIFY — read-only
+# --------------------------------------------------------------------------- #
+def listeners(ctx: Ctx) -> set[str]:
+    rc, out = run(ctx, ["ss", "-Hltn"])
+    found = set()
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 4:
+                found.add(parts[3])
+    return found
+
+
+def listening(found: set[str], addr: str) -> bool:
+    host, _, port = addr.rpartition(":")
+    if addr in found:
+        return True
+    if host == "0.0.0.0":  # noqa: S104 — a listener address read from ss, nothing binds here
+        return any(f in found for f in (f"*:{port}", f"[::]:{port}", f"0.0.0.0:{port}"))
+    return False
+
+
+def verify(ctx: Ctx, proto: str, wanted_domain: str | None) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+
+    def check(key: str, ok: bool, text: str) -> None:
+        checks.append({"key": key, "ok": ok, "text": text})
+
+    env = ctx.env()
+    domain = wanted_domain or env.get("XRAY_SNI") or ""
+    rc, out = run(ctx, [xray_exe(ctx), "run", "-test", "-config", str(ctx.host(XRAY_CONFIG))])
+    check("xray_config", rc == 0, "xray run -test: ok" if rc == 0 else f"xray run -test: exit {rc} {out.strip()[-200:]}")
+    for unit in (XRAY_UNIT, NGINX_UNIT):
+        active = unit_active(ctx, unit)
+        check(f"unit:{unit}", active, f"{unit} {'active' if active else 'NOT active'}")
+    found = listeners(ctx)
+    for addr, who in ((f"0.0.0.0:{XRAY_PUBLIC_PORT}", "xray vless-in"), (XRAY_API, "xray api"),
+                      (f"127.0.0.1:{XRAY_XHTTP_LOOPBACK_PORT}", "xray xhttp"), (SELFSTEAL_LISTEN, "nginx self-steal")):
+        ok = listening(found, addr)
+        check(f"listen:{addr}", ok, f"{who} listens on {addr}" if ok else f"nothing listens on {addr} ({who})")
+    try:
+        config = json.loads(ctx.host(XRAY_CONFIG).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        config = {}
+        check("config_read", False, f"{XRAY_CONFIG}: {exc}")
+    vless = next((i for i in config.get("inbounds", []) if isinstance(i, dict) and i.get("tag") == XRAY_INBOUND_TAG), {})
+    reality = (vless.get("streamSettings") or {}).get("realitySettings") or {}
+    names = reality.get("serverNames") or []
+    check("server_names", domain in names, f"serverNames {names} {'include' if domain in names else 'do NOT include'} {domain}")
+    sid = env.get("XRAY_SHORT_ID", "")
+    ok_sid = bool(sid) and sid in (reality.get("shortIds") or [])
+    check("short_id", ok_sid, "XRAY_SHORT_ID is a shortId of vless-in" if ok_sid else "XRAY_SHORT_ID is not in shortIds")
+    priv = str(reality.get("privateKey") or "")
+    pub = env.get("XRAY_REALITY_PUBLIC_KEY", "")
+    if priv:
+        try:
+            derived = x25519_public(priv)
+        except ValueError:
+            derived = ""
+        check("public_key", bool(pub) and derived == pub,
+              "XRAY_REALITY_PUBLIC_KEY is the public half of the REALITY key" if derived == pub and pub
+              else "XRAY_REALITY_PUBLIC_KEY does NOT match the REALITY private key")
+    rc, out = run(ctx, ["openssl", "s_client", "-connect", SELFSTEAL_LISTEN, "-servername", domain, "-alpn", "h2",
+                        "-verify_hostname", domain, "-verify_return_error", "-brief"], timeout=30, stdin="")
+    tls13 = "TLSv1.3" in out
+    alpn = bool(re.search(r"ALPN protocol:\s*h2\b", out))
+    verified = rc == 0 and ("Verification: OK" in out or "Verify return code: 0" in out)
+    check("tls", tls13 and alpn and verified,
+          f"127.0.0.1:8443 SNI {domain}: " + ", ".join([
+              "certificate of the domain" if verified else "certificate NOT verified for the domain",
+              "TLSv1.3" if tls13 else "not TLSv1.3", "ALPN h2" if alpn else "no ALPN h2"]))
+    rc, out = run(ctx, ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--http2", "--max-time", "15",
+                        "--resolve", f"{domain}:8443:127.0.0.1", f"https://{domain}:8443/"], timeout=30)
+    code = out.strip().splitlines()[-1] if out.strip() else ""
+    check("http", rc == 0 and code == "200", f"GET https://{domain}:8443/ → {code or 'no answer'}")
+    ok = all(c["ok"] for c in checks)
+    return {"ok": ok, "protocol": proto, "domain": domain, "checks": checks}
+
+
+# --------------------------------------------------------------------------- #
+# STATUS — which protocols are on the host (the bot and «Первичная настройка» read it)
+# --------------------------------------------------------------------------- #
+def status(ctx: Ctx) -> dict[str, Any]:
+    out: dict[str, Any] = {"version": HELPER_VERSION, "protocols": {}}
+    for proto, man in MANIFESTS.items():
+        probes = installed_probes(proto)
+        have = [p for p in probes if ctx.host(p).exists()]
+        marker = ctx.host(f"{MARKER_DIR}/{proto}").is_file()
+        journal = Journal(ctx, proto).load()
+        state = "uninstalled" if marker else "installed" if len(have) == len(probes) else "partial" if have else "absent"
+        out["protocols"][proto] = {"state": state, "present": have, "missing": [p for p in probes if p not in have],
+                                   "journal": journal.get("state"), "units": list(man.units)}
+    return out
+
+
+def installed_probes(proto: str) -> tuple[str, ...]:
+    """The paths whose presence means "installed" (services/protocol_install.py: the same)."""
+    if proto == "xray":
+        return (XRAY_BIN, f"{UNIT_DIR}/{XRAY_UNIT}", XRAY_CONFIG)
+    return ()
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def host_mount_namespace_argv(argv: Sequence[str]) -> list[str] | None:
+    if SELFTEST or os.geteuid() != 0 or os.environ.get(HOSTNS_ENV) == "1":
+        return None
+    try:
+        if os.readlink("/proc/self/ns/mnt") == os.readlink("/proc/1/ns/mnt"):
+            return None
+    except OSError:
+        return None
+    return ["nsenter", "--mount=/proc/1/ns/mnt", "--", sys.executable, "-I", str(Path(__file__).resolve()), *argv]
+
+
+def emit(obj: dict[str, Any], as_json: bool, text: str) -> None:
+    if as_json:
+        print(json.dumps(obj, ensure_ascii=False, sort_keys=True))
+    else:
+        print(text)
+
+
+def plan_lines(plan: Plan) -> str:
+    lines = [f"{plan.protocol}: {plan.state}, domain {plan.domain or '?'}, plan {plan.sha256[:12]}"]
+    for c in plan.changes:
+        lines.append(f"  [{c.step}] {c.action:8} {c.kind} {c.target}" + (f" — {c.detail}" if c.detail else ""))
+    lines += [f"  BLOCKING: {b}" for b in plan.blocking] + [f"  warning: {w}" for w in plan.warnings]
+    return "\n".join(lines)
+
+
+def main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(prog="vpn-bot-protocol-install")
+    parser.add_argument("verb", choices=("manifest", "status", "plan", "apply", "verify", "rollback", "commit"))
+    parser.add_argument("protocol", nargs="?")
+    parser.add_argument("--domain", default=None)
+    parser.add_argument("--expect-plan", default=None)
+    parser.add_argument("--repo", default=None)
+    parser.add_argument("--json", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return EXIT_USAGE
+    if args.verb != "status" and args.protocol not in PROTOCOLS:
+        print(f"vpn-bot-protocol-install: <proto> must be one of {', '.join(PROTOCOLS)}", file=sys.stderr)
+        return EXIT_USAGE
+    if args.verb == "manifest":
+        man = MANIFESTS[args.protocol]
+        emit(man.as_json(), args.json, json.dumps(man.as_json(), indent=1))
+        return EXIT_OK
+    if not SELFTEST and os.geteuid() != 0:
+        print("vpn-bot-protocol-install: run as root", file=sys.stderr)
+        return EXIT_REFUSED
+    reexec = host_mount_namespace_argv(argv)
+    if reexec is not None:
+        os.environ[HOSTNS_ENV] = "1"
+        try:
+            os.execvpe(reexec[0], reexec, os.environ)  # noqa: S606 — fixed argv: nsenter, this interpreter, this script
+        except OSError as exc:
+            print(f"vpn-bot-protocol-install: cannot enter the host mount namespace ({exc}) — going on in this one",
+                  file=sys.stderr)
+    try:
+        ctx = make_ctx(args.repo)
+        if args.verb == "status":
+            st = status(ctx)
+            emit(st, args.json, "\n".join(f"{p}: {v['state']}" for p, v in st["protocols"].items()))
+            return EXIT_OK
+        proto = args.protocol
+        if args.verb == "plan":
+            plan = compute_plan(ctx, proto, args.domain)
+            emit(plan.as_json(), args.json, plan_lines(plan))
+            return EXIT_REFUSED if plan.blocking else EXIT_OK
+        if args.verb == "apply":
+
+            def progress(step: str, state: str) -> None:
+                if args.json:
+                    print(json.dumps({"event": "step", "step": step, "state": state}), flush=True)
+
+            result = cmd_apply(ctx, proto, args.expect_plan or "", args.domain, progress)
+            emit(result, args.json, json.dumps(result, indent=1))
+            if result.get("ok"):
+                return EXIT_OK
+            if result.get("error") == "step_failed":
+                return EXIT_ROLLBACK_FAILED if result.get("rollback_errors") else EXIT_ROLLED_BACK
+            return EXIT_REFUSED
+        if args.verb == "verify":
+            result = verify(ctx, proto, args.domain)
+            emit(result, args.json, "\n".join(f"{'ok ' if c['ok'] else 'BAD'} {c['text']}" for c in result["checks"]))
+            return EXIT_OK if result["ok"] else EXIT_VERIFY
+        if args.verb == "rollback":
+            with locks(ctx):
+                journal = Journal(ctx, proto)
+                data = journal.load()
+                if data.get("state") == "committed":
+                    emit({"ok": False, "error": "committed"}, args.json,
+                         "the last install is committed (verified): remove the protocol with vpn-bot-protocol-uninstall")
+                    return EXIT_REFUSED
+                if not data or data.get("state") == "rolled_back":
+                    emit({"ok": True, "nothing_to_do": True}, args.json, "nothing to roll back")
+                    return EXIT_OK
+                errors = rollback_journal(ctx, journal)
+            emit({"ok": not errors, "rollback_errors": errors}, args.json, "\n".join(errors) or "rolled back")
+            return EXIT_OK if not errors else EXIT_ROLLBACK_FAILED
+        if args.verb == "commit":
+            with locks(ctx):
+                journal = Journal(ctx, proto)
+                data = journal.load()
+                if data.get("state") != "applied":
+                    emit({"ok": False, "error": "not_applied", "state": data.get("state")}, args.json,
+                         f"nothing to commit (journal state {data.get('state')})")
+                    return EXIT_REFUSED
+                journal.set_state("committed")
+            emit({"ok": True}, args.json, "committed")
+            return EXIT_OK
+    except Refused as exc:
+        emit({"ok": False, "error": "refused", "detail": str(exc)}, args.json, f"refused: {exc}")
+        return EXIT_REFUSED
+    except Cannot as exc:
+        emit({"ok": False, "error": "cannot", "detail": str(exc)}, args.json, f"cannot: {exc}")
+        return EXIT_CANNOT
+    return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

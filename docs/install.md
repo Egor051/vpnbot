@@ -156,6 +156,10 @@ install backends or host hardening. For the full production host (protocol backe
 the host check, the SSH port) follow [deployment.md](deployment.md); later updates go
 through `scripts/redeploy.sh`, which deploys `origin/main`.
 
+The protocols come from the bot: once the certificate is in place («🔐 Сертификат и DNS»),
+«⚙️ Модули протоколов» → **📦 Установить** installs one ([protocol-install.md](protocol-install.md);
+this release: Xray with the nginx self-steal).
+
 ## How it is tested
 
 - `tests/test_install_script.py` drives every function through `INSTALL_SELFTEST` against

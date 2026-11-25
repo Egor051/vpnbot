@@ -169,6 +169,18 @@ MODES: dict[str, Mode] = {
         },
         timeouts={"plan": 180, "apply": 2700, "verify": 180, "rollback": 300},
     ),
+    # «📦 Установить протокол» (docs/protocol-install.md): vpn-bot-protocol-install plan |
+    # apply | verify | rollback of one protocol. apply runs apt-get, a release download and
+    # the certificate's deploy; rollback may purge a package it installed.
+    "protocol": Mode(
+        helper="vpn-bot-wizard-protocol",
+        read_only=False,
+        params={
+            "proto": Param("enum", "xray", choices=("xray",)),
+            "domain": Param("names", ""),
+        },
+        timeouts={"plan": 300, "apply": 1800, "verify": 300, "rollback": 1200},
+    ),
 }
 
 

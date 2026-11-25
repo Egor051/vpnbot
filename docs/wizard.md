@@ -25,6 +25,7 @@ the rest of a failed install):
 | `vpn-bot-wizard-dump` | Mode «Диагностический дамп» |
 | `vpn-bot-wizard-update` | Mode «Обновить бота» |
 | `vpn-bot-wizard-cert` | Mode «Сертификат» (issue / renew / adopt / deploy through `vpn-bot-cert`, [certificate.md](certificate.md)) |
+| `vpn-bot-wizard-protocol` | Mode «📦 Установка протокола» (plan / apply / verify / rollback of `vpn-bot-protocol-install`, [protocol-install.md](protocol-install.md)) |
 | `vpn-bot-totp-reset` | The emergency TOTP reset (root CLI, never called by the bot) |
 
 In the helper-nonroot model the bot reaches the launcher through one sudoers line
@@ -274,6 +275,22 @@ The zone travels as its name, not its id: 32 hex characters look like a secret t
 (`utils/redact.py`, the run's stored parameters, the log) — vpn-bot-cert asks Cloudflare for the id
 with the token itself.
 
+### 📦 Установка протокола
+
+The mode `protocol` (helper `vpn-bot-wizard-protocol`, parameters `proto` — the protocol, `domain` — one
+DNS name the bot's certificate covers, empty = the certificate's own). No button of its own in the menu:
+«⚙️ Модули протоколов» offers **📦 Установить** for a protocol that is not on the server and starts the
+run from there. The plan is the root helper's (`vpn-bot-protocol-install plan`): every package, file, unit
+and `.env` line, what is kept and why, what blocks; the steps of apply are shown with
+`bot/progress.py`'s icons from the helper's `steps` events. Dangerous: TOTP before the plan and before
+apply. Verify green → the install is committed and the bot restarted (it reads `XRAY_*` at start; the new
+process reports the run); after the run's success the bot converges the firewall (`vpn-bot-ufw-apply
+apply`) and says so in the report. No step changes the host's network, so no dead-man. Everything about
+it: [protocol-install.md](protocol-install.md).
+
+A status file may carry `{"event": "steps", "steps": {"<step>": "wait|run|ok|fail|skip", ...}}` — a mode
+helper's own steps; the bot renders the last one (`install_step_<step>` labels).
+
 ### 🛰 Relay
 
 Not a mode: the wizard's «🛰 Relay» opens the admin panel's ONE relay screen — see
@@ -387,6 +404,7 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 | Fallback mode: the hub role | «🛟 Сделать hub» (the typed origin checks the elevation again), «🛟 Снять роль hub» |
 | Fallback mode: the DNS API token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |
 | Certificate and DNS: a run of the `cert` mode — adopt, issue, renew, lay out ([certificate.md](certificate.md)) | «🔁 Принять текущий сертификат», «▶️ Составить план», «🔄 Проверить продление», «📦 Разложить заново»; «✅ Применить» of the plan |
+| Protocol modules: install a protocol on the server ([protocol-install.md](protocol-install.md)) | «📦 Установить» (the run's plan) and «✅ Применить» of the plan |
 | Certificate and DNS: the bot's Cloudflare token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |
 | Fallback mode: names, addresses, direct links' host, `fallback-url` | each button; a typed value checks the elevation again |
 | Fallback mode: broadcast of the new proxy address ([relay.md](relay.md#the-proxies-through-the-hub)) | «✅ Разослать» |

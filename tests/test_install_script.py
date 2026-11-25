@@ -682,7 +682,9 @@ WIZARD_HELPERS = [
     "vpn-bot-wizard-dump",
     "vpn-bot-wizard-update",
     "vpn-bot-wizard-cert",
+    "vpn-bot-wizard-protocol",
     "vpn-bot-cert",
+    "vpn-bot-protocol-install",
     "vpn-bot-totp-reset",
 ]
 

@@ -148,6 +148,10 @@ relay обновляет `scripts/deploy.sh` (`update` агента запуск
 SSH-порт) следуйте [deployment.ru.md](deployment.ru.md); дальнейшие обновления — через
 `scripts/redeploy.sh`, который деплоит `origin/main`.
 
+Протоколы ставятся из бота: когда есть сертификат («🔐 Сертификат и DNS»), «⚙️ Модули
+протоколов» → **📦 Установить** ставит протокол ([protocol-install.ru.md](protocol-install.ru.md);
+в этом релизе — Xray с self-steal на nginx).
+
 ## Как это проверяется
 
 - `tests/test_install_script.py` гоняет каждую функцию через `INSTALL_SELFTEST` на заглушках

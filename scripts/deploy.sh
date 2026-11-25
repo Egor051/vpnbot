@@ -505,12 +505,19 @@ OUT_OF_REPO_HELPERS=(
   "scripts/wizard/vpn-bot-wizard-dump|/usr/local/sbin/vpn-bot-wizard-dump|required"
   "scripts/wizard/vpn-bot-wizard-update|/usr/local/sbin/vpn-bot-wizard-update|required"
   "scripts/wizard/vpn-bot-wizard-cert|/usr/local/sbin/vpn-bot-wizard-cert|required"
+  "scripts/wizard/vpn-bot-wizard-protocol|/usr/local/sbin/vpn-bot-wizard-protocol|required"
   # The bot's TLS certificate (docs/certificate.md): the registry of its readers and THE
   # reloadcmd acme.sh calls after a renewal (`vpn-bot-cert deploy`, once the domain is
   # adopted), the `cert` wizard mode's worker and the bot's status (sudo, exact grant
   # `status --json`) — `required` on main: a reloadcmd naming a missing file is a renewal
   # nobody lays out. A relay holds no certificate.
   "scripts/vpn-bot-cert|/usr/local/sbin/vpn-bot-cert|required"
+  # Installing a protocol from the bot (docs/protocol-install.md): the worker of the
+  # `protocol` wizard mode, the mirror of vpn-bot-protocol-uninstall (whose manifest it
+  # keeps symmetric). Run by the mode helper as root inside the wizard's unit — never
+  # granted to the bot — and it must be on every main host the wizard may install on, so
+  # `required`. A relay installs no protocol.
+  "scripts/vpn-bot-protocol-install|/usr/local/sbin/vpn-bot-protocol-install|required"
   # The emergency TOTP reset (docs/wizard.md#emergency-reset): a root CLI for the day the
   # phone AND the backup codes are gone — it has to be on the host BEFORE that day.
   "scripts/vpn-bot-totp-reset|/usr/local/sbin/vpn-bot-totp-reset|required"

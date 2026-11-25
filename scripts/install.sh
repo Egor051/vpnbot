@@ -129,7 +129,9 @@ INSTALL_HELPERS=(
   scripts/wizard/vpn-bot-wizard-dump
   scripts/wizard/vpn-bot-wizard-update
   scripts/wizard/vpn-bot-wizard-cert
+  scripts/wizard/vpn-bot-wizard-protocol
   scripts/vpn-bot-cert
+  scripts/vpn-bot-protocol-install
   scripts/vpn-bot-totp-reset
 )
 CLAIM_DIR="/etc/vpn-bot"

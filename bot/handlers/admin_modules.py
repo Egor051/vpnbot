@@ -19,6 +19,7 @@ from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
 from bot.totp_gate import require_totp
 from bot.uninstall_texts import uninstall_plan_text, uninstall_report_text
+from bot.wizard_views import mode_title, run_view
 from i18n import t
 from repositories.protocol_modules import PROTOCOL_DISPLAY, PROTOCOL_NAMES, ProtocolModule
 from services.proxy_endpoint import PROXY_KINDS
@@ -64,8 +65,14 @@ def _env_off(services: Services) -> frozenset[str]:
     return frozenset(off)
 
 
+def _not_installed(services: Services) -> frozenset[str]:
+    """Protocols the bot can install that are not on the host (services/protocol_install.py)."""
+    install = getattr(services, "protocol_install", None)
+    return install.missing() if install is not None else frozenset()
+
+
 def _panel_markup(services: Services, modules: list[ProtocolModule]) -> InlineKeyboardMarkup:
-    return modules_panel_keyboard(modules, _uninstalled(services), _env_off(services))
+    return modules_panel_keyboard(modules, _uninstalled(services), _env_off(services), _not_installed(services))
 
 
 @router.callback_query(F.data == "admin:modules")
@@ -363,3 +370,43 @@ async def admin_module_uninstall_exec(callback: CallbackQuery, services: Service
         uninstall_report_text(report),
         reply_markup=_panel_markup(services, modules),
     )
+
+
+# ── Installing on the server («📦 Установить», docs/protocol-install.md) ─────────
+@router.callback_query(F.data.regexp(r"^admin:module:install:[a-z0-9]+$"))
+async def admin_module_install(callback: CallbackQuery, services: Services, state: FSMContext | None = None) -> None:
+    """A run of the wizard's «protocol» mode: the helper's plan with the diff first, then
+    «✅ Применить» (TOTP before both). The message becomes the run's screen."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        await safe_callback_answer(callback)
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        name = callback.data.split(":")[-1]
+        install = getattr(services, "protocol_install", None)
+        wizard = services.wizard
+        if name not in PROTOCOL_NAMES or install is None or wizard is None:
+            await safe_callback_answer(callback)
+            return
+        if not install.installable(name):
+            await safe_callback_answer(callback, t("install_not_offered"), show_alert=True)
+            return
+        active = await wizard.active()
+        if active is not None:
+            await safe_callback_answer(
+                callback, t("wizard_already_running", id=active.id, mode=mode_title(active.mode)), show_alert=True
+            )
+            return
+        if not await require_totp(callback, state, services, action="wizard_protocol"):
+            return
+        async with wizard.exclusive():
+            run = await install.start(
+                callback.from_user.id, name, chat_id=callback.message.chat.id, message_id=callback.message.message_id
+            )
+            await safe_callback_answer(callback, t("wizard_started", id=run.id))
+            text, markup = run_view(run, await wizard.snapshot(run.id))
+            await safe_edit_message_text(callback.message, text, reply_markup=markup)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)

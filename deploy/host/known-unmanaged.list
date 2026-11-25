@@ -15,7 +15,7 @@
 #   deployment-local  unique to this deployment by design, cannot live in the repo
 # tests/test_deploy_host_state.py checks every line (class, reason length, absolute glob).
 
-# --- Xray (XTLS/Xray-install) -------------------------------------------------
+# --- Xray (XTLS/Xray-install, or scripts/vpn-bot-protocol-install with the same layout) ---
 /etc/systemd/system/xray*.service  # installer — Xray-install ставит xray.service и xray@.service и переписывает их при обновлении
 /etc/systemd/system/xray*.service.d/*  # installer — drop-in'ы Xray-install (10-donot_touch_single_conf.conf), обновляются им же
 /usr/local/bin/xray  # installer — бинарник Xray-install, обновляется тем же установщиком (docs/operations.md: переустанавливается)
