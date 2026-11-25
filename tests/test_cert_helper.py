@@ -980,3 +980,23 @@ def test_a_release_set_other_than_the_planned_one_is_refused(host: CertHost) -> 
     assert proc.returncode == 3 and "changed since the plan" in proc.stderr
     assert host.acme_log() == before, "acme.sh never ran"
     assert host.cert("adopt", "--expect-release", "../etc").returncode == 2
+
+
+# --------------------------------------------------------------------------- #
+# Tenth review round
+# --------------------------------------------------------------------------- #
+def test_an_issue_planned_on_another_key_type_is_refused(host: CertHost) -> None:
+    """--expect-keylength: the plan showed one key type; acme.sh's conf names another by
+    the time the run starts (a hand edit) — refused before acme.sh runs."""
+    adopted_host(host)
+    host.token()
+    host.next_pair([DOMAIN])
+    before = host.acme_log()
+    proc = host.cert("issue", "--names", DOMAIN, "--zone", ZONE, "--expect-keylength", "2048")
+    assert proc.returncode == 3 and "key type changed since the plan (2048 → ec-256)" in proc.stderr, proc.stderr
+    assert host.acme_log() == before, "acme.sh never ran"
+    assert host.cert("issue", "--names", DOMAIN, "--zone", ZONE, "--expect-keylength", "ec-999").returncode == 2
+    proc = host.cert("issue", "--names", DOMAIN, "--zone", ZONE, "--expect-keylength", "ec-256")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    issued = next(e for e in host.acme_log() if "--issue" in e.get("argv", []))
+    assert issued["argv"][issued["argv"].index("--keylength") + 1] == "ec-256"

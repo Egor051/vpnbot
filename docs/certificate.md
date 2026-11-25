@@ -60,7 +60,9 @@ between the plan and the confirmation) the run is refused, nothing changed — t
 describes it. `deploy` compares the very pair it lays out; the others check after the wait for a
 running acme.sh, under the lock, before acme.sh or the conf is touched. `issue` and `adopt` also take
 `--expect-release DIR[,DIR…]` (`""` = none): the domain directories the plan releases — refused the
-same way when that set differs (the wizard backed up exactly those).
+same way when that set differs (the wizard backed up exactly those). `issue` also takes
+`--expect-keylength KL`: the key type the plan showed (`ec-256` for a new domain) — refused when
+acme.sh's conf names another one by then (a hand edit of `Le_Keylength`).
 
 Exit codes: 0 ok; 1 a reader failed and its group was rolled back; 2 usage; 3 refused (nothing to
 adopt, no token, a bad pair, another domain, a pair other than the planned one); 5 cannot (a tool or
@@ -173,8 +175,8 @@ Buttons:
 Each run is the wizard's contract ([wizard.md](wizard.md)): the plan with the diff (the acme.sh conf
 lines before → after, the certificate before → after, each reader and what happens to it), TOTP,
 «✅ Применить», then apply (refused when acme.sh's pair is no longer the one the plan was made on, or
-another domain started or stopped reaching the readers since — the helper gets both as
-`--expect-pair` / `--expect-release` too; a backup of the acme.sh domain directory — and of every
+another domain started or stopped reaching the readers since, or — for issue — the key type
+changed — the helper gets them as `--expect-pair` / `--expect-release` / `--expect-keylength` too; a backup of the acme.sh domain directory — and of every
 domain the run releases —, every reader's files and the state, then the helper) → verify (`vpn-bot-cert status`: the domain is the bot's, reloadcmd ours,
 no file targets, the pair valid for 7+ days and covering the names — and, for adopt / issue with hysteria
 installed, `HYSTERIA2_SNI` (its clients check that name; an issue plan whose names miss it is refused

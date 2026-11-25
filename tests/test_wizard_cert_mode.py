@@ -408,3 +408,30 @@ def test_an_adoption_of_a_certificate_missing_hysterias_sni_is_rolled_back(host:
     result = [e for e in host.events(23) if e["event"] == "result"][-1]
     assert "does not cover HYSTERIA2_SNI=example.net" in result["text"]
     assert host.conf(name)["Le_ReloadCmd"] == b64("/usr/local/sbin/acme-reload.sh")
+
+
+def test_an_issue_whose_key_type_changed_after_the_plan_is_not_applied(host: WizardCertHost) -> None:
+    """The plan showed ec-256; Le_Keylength edited to 2048 before the confirmation: apply
+    refuses (and the helper gets --expect-keylength for its own check under the lock)."""
+    chain, key = host.acme_domain(conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "", "Le_ReloadCmd": b64(RELOAD)})
+    host.lay_out(chain, key)
+    host.token()
+    assert host.wizard(24, "plan", action="issue", names=DOMAIN, zone=ZONE).returncode == 0
+    assert "key ec-256" in host.plan_text(24)
+    conf = host.file(f"/root/.acme.sh/{DOMAIN}_ecc/{DOMAIN}.conf")
+    conf.write_text(conf.read_text(encoding="utf-8").replace("Le_Keylength='ec-256'", "Le_Keylength='2048'"),
+                    encoding="utf-8")
+    host.reset_calls()
+    assert host.wizard(24, "execute", action="issue", names=DOMAIN, zone=ZONE).returncode == 1
+    assert host.outcome(24) != "succeeded"
+    assert not [c for c in host.calls_of("vpn-bot-cert") if c.startswith("vpn-bot-cert issue")]
+    assert not [e for e in host.acme_log() if "--issue" in e.get("argv", [])]
+
+
+def test_the_new_domain_key_type_is_the_helpers() -> None:
+    import re
+
+    helper = (ROOT / "scripts" / "vpn-bot-cert").read_text(encoding="utf-8")
+    mode = (WIZ / "vpn-bot-wizard-cert").read_text(encoding="utf-8")
+    pattern = re.compile(r'^NEW_KEYLENGTH = "([^"]+)"', re.MULTILINE)
+    assert pattern.findall(helper) == pattern.findall(mode) == ["ec-256"]

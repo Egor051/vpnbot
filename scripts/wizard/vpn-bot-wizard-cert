@@ -78,6 +78,7 @@ PLAN_ARTIFACT = "cert-plan.json"
 # MODES), so it is this helper that stops vpn-bot-cert, never the launcher.
 HELPER_TIMEOUT = 2400
 VERIFY_MIN_DAYS = 7
+NEW_KEYLENGTH = "ec-256"  # vpn-bot-cert's key type for a new domain
 
 
 def helper_argv(*args: str) -> list[str]:
@@ -246,10 +247,11 @@ def plan_issue(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]
         raise lib.WizardError(f"the names do not cover HYSTERIA2_SNI={sni}: hysteria's clients would reject the "
                               "certificate — add it to the names")
     main = current["name"] if current is not None else names[0]
+    keylength = str(current["keylength"]) if current is not None else NEW_KEYLENGTH
     lines = [
         f"Certificate now:  {cert_line(current)}",
         f"Certificate after: {main}" + (f" + {', '.join(n for n in names if n != main)}" if len(names) > 1 else "")
-        + f" — Let's Encrypt, DNS-01 via Cloudflare (zone {zone}), key {current['keylength'] if current else 'ec-256'}",
+        + f" — Let's Encrypt, DNS-01 via Cloudflare (zone {zone}), key {keylength}",
         f"Cloudflare token: the bot's ({tok['fp']}); acme.sh keeps it for its renewals",
     ]
     if not st.get("acme", {}).get("installed"):
@@ -268,7 +270,7 @@ def plan_issue(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]
     lines += readers_text(st, "issue")
     lines.append("Note: Let's Encrypt allows 5 certificates for the same names per week.")
     return lines, {"domain": main, "new_domain": current is None, "names": names,
-                   "release_dirs": to_release(st, current)}
+                   "release_dirs": to_release(st, current), "keylength": keylength}
 
 
 def plan_renew(ctx: Any, st: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
@@ -410,6 +412,12 @@ def step_apply(ctx: Any) -> int:
         print(f"acme.sh's certificate changed since the plan ({expected} → {now.get('pair_sha') or 'unreadable'}) — "
               "start again", file=sys.stderr)
         return 1
+    if action == "issue" and plan.get("keylength") and not plan.get("new_domain") and now is not None \
+            and now.get("keylength") != plan["keylength"]:
+        # acme.sh's conf names another key type than the plan showed.
+        print(f"the key type changed since the plan ({plan['keylength']} → {now.get('keylength')}) — start again",
+              file=sys.stderr)
+        return 1
     planned_release = sorted(str(d) for d in plan.get("release_dirs") or [])
     if action in ("adopt", "issue"):
         # The domains apply would release are the ones the plan showed — and the backup holds.
@@ -437,6 +445,8 @@ def step_apply(ctx: Any) -> int:
         args += ["--expect-pair", str(expected)]
     if action in ("adopt", "issue"):
         args += ["--expect-release", ",".join(planned_release)]
+    if action == "issue" and plan.get("keylength"):
+        args += ["--expect-keylength", str(plan["keylength"])]
     rc, report, rest = call(ctx, *args, timeout=HELPER_TIMEOUT)
     summary = summarize(action, report) if "groups" in report else failure(report, rest, rc)
     ctx.event("result", text=summary, verdict="ok" if rc == 0 else "failed")

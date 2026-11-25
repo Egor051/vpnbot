@@ -83,6 +83,9 @@ VERBS
   issue / adopt --expect-release DIR[,DIR...]
       The domain directories the plan releases ("" = none): refused the same way when
       the set differs by the time the run starts (the wizard backed up exactly those).
+  issue --expect-keylength KL
+      The key type the plan showed (ec-256 for a new domain): refused the same way when
+      acme.sh's conf holds another one by then.
   act [--json]
       Every installed reader's check and action on the files it has now — nothing is
       written. The wizard's rollback runs it after it restored a backup, so every reader
@@ -1764,8 +1767,18 @@ def _names(raw: str) -> list[str]:
     return names
 
 
+def keylength_now(ctx: Ctx, current: AcmeDomain | None) -> str:
+    """The key type acme.sh's conf of *current* holds now (a new domain: NEW_KEYLENGTH)."""
+    if current is None:
+        return NEW_KEYLENGTH
+    fresh = next((d for d in load_domains(ctx) if d.dir == current.dir), None)
+    if fresh is None:
+        raise Refused(f"{current.dir.name} is gone — plan again")
+    return fresh.keylength
+
+
 def issue(ctx: Ctx, raw_names: str, zone: str, *, expect: str | None = None,
-          expect_released: Sequence[str] | None = None) -> dict[str, Any]:
+          expect_released: Sequence[str] | None = None, expect_keylength: str | None = None) -> dict[str, Any]:
     names = _names(raw_names)
     zone = zone.strip().lower().rstrip(".")
     if not _ZONE_RE.match(zone):
@@ -1809,6 +1822,15 @@ def issue(ctx: Ctx, raw_names: str, zone: str, *, expect: str | None = None,
             wait_for_acme(ctx, log)
             expect_pair(ctx, current, expect)
             expect_release(ctx, to_release(load_domains(ctx), current), expect_released)
+            # The key type: the one the plan showed, and still the one in acme.sh's conf now
+            # (after the wait) — the one handed to acme.sh below.
+            now_keylength = keylength_now(ctx, current)
+            if expect_keylength and now_keylength != expect_keylength:
+                raise Refused(f"{main}: the key type changed since the plan ({expect_keylength} → {now_keylength}) — "
+                              "plan again")
+            if now_keylength != keylength:
+                raise Refused(f"{main}: the key type changed while the run waited ({keylength} → {now_keylength}) — "
+                              "run it again")
             rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT,
                           env={"CF_Token": token, "CF_Zone_ID": zid, NESTED_ENV: lock.token()})
             log.append(f"acme.sh --issue -d {' -d '.join([main, *alts])} --keylength {keylength}: exit {rc}")
@@ -2103,6 +2125,12 @@ def _dirs_arg(value: str) -> list[str]:
     return dirs
 
 
+def _keylength_arg(value: str) -> str:
+    if not re.fullmatch(r"ec-(256|384|521)|2048|3072|4096|8192", value):
+        raise argparse.ArgumentTypeError("an acme.sh key length: ec-256 / ec-384 / ec-521 / 2048 / 3072 / 4096 / 8192")
+    return value
+
+
 def _pair_arg(value: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{16}", value):
         raise argparse.ArgumentTypeError("16 lowercase hex characters (status' pair_sha)")
@@ -2129,6 +2157,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--zone", required=True)
     p.add_argument("--expect-pair", type=_pair_arg)
     p.add_argument("--expect-release", type=_dirs_arg)
+    p.add_argument("--expect-keylength", type=_keylength_arg)
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("renew", allow_abbrev=False)
     p.add_argument("--force", action="store_true", required=True)
@@ -2206,7 +2235,8 @@ def main(argv: list[str]) -> int:
                 finally:
                     lock.release()
         elif args.verb == "issue":
-            report = issue(ctx, args.names, args.zone, expect=args.expect_pair, expect_released=args.expect_release)
+            report = issue(ctx, args.names, args.zone, expect=args.expect_pair, expect_released=args.expect_release,
+                           expect_keylength=args.expect_keylength)
         elif args.verb == "renew":
             report = renew(ctx, args.zone, expect=args.expect_pair)
         elif args.verb == "act":
