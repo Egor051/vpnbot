@@ -13,14 +13,19 @@ What it speaks
   installer's getMe check is exercised for a wrong token.
 * ``getUpdates`` — long poll over the queue filled by ``/_control/inject``,
   honouring ``offset`` and ``timeout`` (capped so a stopping bot never waits long).
-* ``sendMessage`` — recorded, answered with a Message.
-* everything else (deleteWebhook, setMyCommands, …) — ``{"ok": true, "result": true}``.
+* ``sendMessage`` — recorded (with its inline keyboard), answered with a Message.
+* ``editMessageText`` — the message's text and keyboard replaced, answered with it.
+* ``deleteMessage`` — recorded.
+* everything else (deleteWebhook, setMyCommands, answerCallbackQuery, …) — ``{"ok": true, "result": true}``.
 
 Control
 -------
 * ``POST /_control/inject`` ``{"user_id": 1, "text": "/start …", "chat_type": "private"}``
   queues one message update; answers ``{"update_id": N}``.
-* ``GET /_control/sent`` — every sendMessage so far: ``[{"chat_id", "text"}, …]``.
+* ``POST /_control/inject`` ``{"user_id": 1, "callback_data": "x", "message_id": 5}`` queues a
+  button press on that message (the first setup's end-to-end job, tests/e2e/run_setup_e2e.sh).
+* ``GET /_control/sent`` — every sendMessage so far: ``[{"chat_id", "text", "message_id", "buttons"}, …]``.
+* ``GET /_control/messages`` — every message as it stands now (edits applied), by message_id.
 * ``GET /_control/delivered`` — the highest update_id the bot has confirmed
   (the offset it polled with, minus one): an injected update is HANDLED once
   this reaches it.
@@ -34,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import time
@@ -57,6 +63,8 @@ class MockTelegram:
         self.next_message_id = 1
         self.confirmed = 0
         self.new_update = asyncio.Event()
+        self.messages: dict[int, dict[str, Any]] = {}
+        self.deleted: list[int] = []
 
     async def _params(self, request: web.Request) -> dict[str, Any]:
         params: dict[str, Any] = dict(request.query)
@@ -120,12 +128,47 @@ class MockTelegram:
             except TimeoutError:
                 return []
 
+    @staticmethod
+    def _buttons(params: dict[str, Any]) -> list[dict[str, str]]:
+        markup = params.get("reply_markup")
+        if isinstance(markup, str):
+            try:
+                markup = json.loads(markup)
+            except ValueError:
+                markup = None
+        rows = markup.get("inline_keyboard") if isinstance(markup, dict) else None
+        return [{"text": str(b.get("text")), "data": str(b.get("callback_data") or "")}
+                for row in rows or [] for b in row if isinstance(b, dict)]
+
+    def _message(self, message_id: int, chat_id: int, text: str) -> dict[str, Any]:
+        return {
+            "message_id": message_id,
+            "date": int(time.time()),
+            "chat": {"id": chat_id, "type": "private"},
+            "from": {"id": BOT_ID, "is_bot": True, "first_name": "VPN bot CI", "username": BOT_USERNAME},
+            "text": text,
+        }
+
+    async def m_editmessagetext(self, params: dict[str, Any]) -> dict[str, Any] | bool:
+        message_id = int(params.get("message_id") or 0)
+        current = self.messages.get(message_id)
+        if current is None:
+            return True
+        current.update(text=str(params.get("text", "")), buttons=self._buttons(params))
+        return self._message(message_id, int(current["chat_id"]), str(current["text"]))
+
+    async def m_deletemessage(self, params: dict[str, Any]) -> bool:
+        self.deleted.append(int(params.get("message_id") or 0))
+        return True
+
     async def m_sendmessage(self, params: dict[str, Any]) -> dict[str, Any]:
         chat_id = int(params["chat_id"])
         text = str(params.get("text", ""))
-        self.sent.append({"chat_id": chat_id, "text": text})
         message_id = self.next_message_id
         self.next_message_id += 1
+        buttons = self._buttons(params)
+        self.sent.append({"chat_id": chat_id, "text": text, "message_id": message_id, "buttons": buttons})
+        self.messages[message_id] = {"chat_id": chat_id, "text": text, "buttons": buttons}
         logger.info("sendMessage to chat %d (%d chars)", chat_id, len(text))
         return {
             "message_id": message_id,
@@ -138,6 +181,8 @@ class MockTelegram:
     async def control_inject(self, request: web.Request) -> web.Response:
         body = await request.json()
         user_id = int(body["user_id"])
+        if "callback_data" in body:
+            return self._inject_callback(user_id, str(body["callback_data"]), int(body.get("message_id") or 0))
         text = str(body["text"])
         chat_type = str(body.get("chat_type", "private"))
         chat_id = user_id if chat_type == "private" else -1_000_000_000_000 - user_id
@@ -174,8 +219,29 @@ class MockTelegram:
         self.new_update.set()
         return web.json_response({"update_id": update_id})
 
+    def _inject_callback(self, user_id: int, data: str, message_id: int) -> web.Response:
+        update_id = self.next_update_id
+        self.next_update_id += 1
+        message = self.messages.get(message_id, {"chat_id": user_id, "text": ""})
+        self.updates.append({
+            "update_id": update_id,
+            "callback_query": {
+                "id": str(900_000 + update_id),
+                "chat_instance": "ci",
+                "data": data,
+                "from": {"id": user_id, "is_bot": False, "first_name": "Operator", "username": f"op{user_id}",
+                         "language_code": "en"},
+                "message": self._message(message_id, int(message["chat_id"]), str(message["text"])),
+            },
+        })
+        self.new_update.set()
+        return web.json_response({"update_id": update_id})
+
     async def control_sent(self, _request: web.Request) -> web.Response:
         return web.json_response(self.sent)
+
+    async def control_messages(self, _request: web.Request) -> web.Response:
+        return web.json_response({str(k): v for k, v in self.messages.items()} | {"deleted": self.deleted})
 
     async def control_delivered(self, _request: web.Request) -> web.Response:
         return web.json_response({"confirmed": self.confirmed, "queued": self.next_update_id - 1})
@@ -189,6 +255,7 @@ def build_app(token: str) -> web.Application:
     app = web.Application()
     app.router.add_post("/_control/inject", mock.control_inject)
     app.router.add_get("/_control/sent", mock.control_sent)
+    app.router.add_get("/_control/messages", mock.control_messages)
     app.router.add_get("/_control/delivered", mock.control_delivered)
     app.router.add_get("/_control/health", mock.control_health)
     app.router.add_route("*", "/bot{token}/{method}", mock.api)

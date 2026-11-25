@@ -96,8 +96,15 @@ async def _claim_superadmin(
         return
     await publish_admin_commands(bot, services.settings, profile.telegram_user_id)
     await message.answer(t("superadmin_claim_success"))
+    # A host with no protocol yet: «🧭 Первичная настройка» walks from here to a working
+    # protocol (services/first_setup.py) — its TOTP step replaces the offer below.
+    setup = getattr(services, "first_setup", None)
+    if setup is not None and await setup.needed():
+        from bot.setup_views import offer_keyboard
+
+        await message.answer(t("setup_offer"), reply_markup=offer_keyboard())
     # Optional first-setup step: the second factor for the dangerous actions.
-    if getattr(services, "totp", None) is not None:
+    elif getattr(services, "totp", None) is not None:
         from bot.handlers.security import claim_offer_keyboard
 
         await message.answer(t("totp_claim_offer"), reply_markup=claim_offer_keyboard())

@@ -1596,7 +1596,31 @@ def step_nginx_site(ctx: Ctx, plan: Plan, journal: Journal) -> None:
     fault(ctx, "nginx_site")
 
 
+# A host without access to GitHub (or the first setup's CI job) puts the release files
+# here beforehand (root 0700): a file of the asset's name is used instead of a download.
+# The pins decide either way — a cached file other than the pinned one is refused.
+RELEASE_CACHE = "/var/cache/vpn-bot-protocol-install"
+
+
+def cached(ctx: Ctx, url: str) -> bytes | None:
+    name = url.rsplit("/", 1)[-1]
+    base = ctx.host(RELEASE_CACHE)
+    path = base / name
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", name) or base.is_symlink() or path.is_symlink() or not path.is_file():
+        return None
+    if not SELFTEST and (base.stat().st_uid != 0 or base.stat().st_mode & 0o022 or path.stat().st_uid != 0):
+        ctx.log(f"{RELEASE_CACHE}: not root-owned or group/other-writable — not used")
+        return None
+    if path.stat().st_size > MAX_DOWNLOAD:
+        return None
+    ctx.log(f"{name}: from the release cache {RELEASE_CACHE}")
+    return path.read_bytes()
+
+
 def fetch(ctx: Ctx, url: str) -> bytes:
+    data = cached(ctx, url)
+    if data is not None:
+        return data
     if SELFTEST:
         path = Path(ctx.releases) / url.rsplit("/", 1)[-1]
         if not ctx.releases or not path.is_file():
@@ -1826,8 +1850,10 @@ def step_users(ctx: Ctx, plan: Plan, journal: Journal) -> None:
                 raise StepFailed("users", f"useradd {BOT_USER} failed (exit {rc}): {out.strip()[-200:]}")
             # vpnbot-hy2-auth (User=vpn-bot) opens vpn.db read-only: the helper of
             # vpn-bot.service's ExecStartPre hands the database to the bot's user.
-            db = ctx.host(db_path(ctx))
-            journal.add("users", "db_owner", path=db_path(ctx), owner=owner_of(ctx, db) if db.exists() else "")
+            # vpn-bot-db-perms hands the data directory AND the database to the bot's user.
+            for path in (str(Path(db_path(ctx)).parent), db_path(ctx)):
+                h = ctx.host(path)
+                journal.add("users", "db_owner", path=path, owner=owner_of(ctx, h) if h.exists() else "")
             rc, out = run(ctx, ["vpn-bot-db-perms" if SELFTEST else DB_PERMS_HELPER])
             if rc != 0:
                 raise StepFailed("users", f"vpn-bot-db-perms failed (exit {rc}): {out.strip()[-200:]}")
@@ -2203,7 +2229,7 @@ def rollback_journal(ctx: Ctx, journal: Journal) -> list[str]:
                 owner = str(entry.get("owner") or "")
                 if owner and path.exists():
                     user, _, group = owner.partition(":")
-                    for f in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+                    for f in (path,) if path.is_dir() else (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
                         if f.exists():
                             if SELFTEST:
                                 set_owner(ctx, f, user, group)

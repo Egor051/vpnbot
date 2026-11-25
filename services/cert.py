@@ -213,9 +213,11 @@ class CertService:
         names: Sequence[str] = (),
         chat_id: int | None = None,
         message_id: int | None = None,
+        confirmed: bool = False,
     ) -> WizardRun:
         """A run of the wizard's ``cert`` mode (its plan first). The caller holds the
-        wizard's ``exclusive()`` and has checked the superadmin and the TOTP."""
+        wizard's ``exclusive()`` and has checked the superadmin and the TOTP. *confirmed*:
+        the superadmin confirmed it before the start (the first setup) — its plan goes on."""
         await self.users.require_superadmin(actor_user_id)
         if action not in ACTIONS:
             raise ValueError(action)
@@ -248,7 +250,11 @@ class CertService:
             if not valid_dns_name(domain.removeprefix("*.")):
                 raise InvalidOperation("не DNS-имя", key="cert_err_bad_name", params={"value": domain[:80]})
             params["names"] = domain
-        run = await self.wizard.start(actor_user_id, "cert", params, chat_id=chat_id, message_id=message_id)
+        if confirmed:  # the first setup: its one confirmation was given before the start
+            run = await self.wizard.start(actor_user_id, "cert", params, chat_id=chat_id, message_id=message_id,
+                                          confirmed=True)
+        else:
+            run = await self.wizard.start(actor_user_id, "cert", params, chat_id=chat_id, message_id=message_id)
         if action == "issue":
             self.forget_names(actor_user_id)
         return run

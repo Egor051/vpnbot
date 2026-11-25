@@ -33,7 +33,8 @@ _MAX_PRE = 2500
 
 
 def mode_title(key: str) -> str:
-    return t(f"wizard_mode_{key}") if key in MODES else key
+    # "setup": the first setup's own row in the history (no helper mode of its own).
+    return t(f"wizard_mode_{key}") if key in MODES or key == "setup" else key
 
 
 def state_label(state: str) -> str:
@@ -271,6 +272,8 @@ def menu_keyboard(*, active: WizardRun | None, daily: bool) -> InlineKeyboardMar
     rows = [_row(f"{mode_title(key)}", f"wiz:start:{key}") for key, mode in MODES.items() if mode.menu]
     if active is not None:
         rows.insert(0, _row(t("btn_wizard_active", id=active.id, mode=mode_title(active.mode)), f"wiz:run:{active.id}"))
+    # «🧭 Первичная настройка»: start or resume (services/first_setup.py).
+    rows.append(_row(t("btn_wizard_first_setup"), "setup:start"))
     # The certificate's own screen: its runs need the names and the zone it works out.
     rows.append(_row(t("btn_wizard_cert"), "cert:menu"))
     # «🛰 Relay» opens THE relay screen of the admin panel (no list of its own).

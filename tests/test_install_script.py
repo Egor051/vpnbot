@@ -686,6 +686,9 @@ WIZARD_HELPERS = [
     "vpn-bot-cert",
     "vpn-bot-protocol-install",
     "vpn-bot-totp-reset",
+    "vpn-bot-ufw-apply",
+    "vpn-bot-host-check",
+    "vpn-bot-ssh-port",
 ]
 
 
@@ -750,8 +753,16 @@ install_unit
 
 def test_path_is_ours_covers_the_installed_helpers_only(tmp_path: Path) -> None:
     body = """
-for p in "$SBIN_DIR/vpn-bot-wizard" "$SBIN_DIR/vpn-bot-totp-reset.vpn-bot-install.T.bak" "$SBIN_DIR/vpn-bot-ufw-apply" "$SBIN_DIR/vpn-bot-wizardx"; do
+for p in "$SBIN_DIR/vpn-bot-wizard" "$SBIN_DIR/vpn-bot-totp-reset.vpn-bot-install.T.bak" "$SBIN_DIR/vpn-relay-apply" "$SBIN_DIR/vpn-bot-wizardx"; do
   path_is_ours "$p" && echo ours || echo refused
 done
 """
     assert _ok(_run(tmp_path, body)).stdout.split() == ["ours", "ours", "refused", "refused"]
+
+
+def test_every_required_main_helper_comes_with_a_fresh_install() -> None:
+    """After install.sh the bot sets the rest up from Telegram (docs/first-setup.md): every
+    `required` main helper of deploy.sh is on the host — vpn-bot-db-perms by its own step."""
+    deploy = (ROOT / "scripts/deploy.sh").read_text(encoding="utf-8")
+    required = set(re.findall(r'"(scripts/[A-Za-z0-9/_.-]+)\|/usr/local/sbin/[A-Za-z0-9_.-]+\|required"', deploy))
+    assert required - set(_install_helpers()) == {"scripts/vpn-bot-db-perms"}

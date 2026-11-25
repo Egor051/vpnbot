@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **«🧭 Первичная настройка»** (docs/first-setup.md): after the claim, a host with no protocol is
+  offered the first setup — domain (it must resolve here) → the bot's Cloudflare token (checked
+  before it is stored, the message deleted at once) → the A record through the bot's DNS when the
+  name does not resolve here → the certificate (a confirmed `cert` run: adopt, else issue) → the
+  protocols (VLESS REALITY + Hysteria2 by default; ONE confirmation, TOTP) → one confirmed `protocol`
+  run each → `vpn-bot-ufw-apply apply` → TOTP (optional) → a self-check without red. Every step checks
+  first and acts only on what is missing; the progress is a `wizard_runs` row (mode `setup`, not
+  holding the lock; no schema change); after a restart it goes on where it stopped (WizardService's
+  new startup hooks and finish listeners); a failed step waits for «🔁 Повторить». Also in «🧙 Мастер
+  настройки». The CI job `setup-e2e` runs install.sh → claim → the first setup on ubuntu-24.04 with a
+  mock Bot API and a mock Cloudflare, the network closed for root, the real nginx / xray / hysteria.
+- `install.sh` installs every `required` main helper (also `vpn-bot-ufw-apply`, `vpn-bot-host-check`,
+  `vpn-bot-ssh-port`): the bot sets the rest up from Telegram.
+- `vpn-bot-protocol-install` uses a release file from `/var/cache/vpn-bot-protocol-install` (root
+  0700) instead of a download when one is there — an offline host; the pin decides either way.
+- `CLOUDFLARE_API_BASE` (https, or http on loopback): the Cloudflare API of the bot's DNS, for the CI mock.
+
 - **Hysteria2 and SOCKS5 are installed from the bot too; a removed protocol is reinstalled**
   (docs/protocol-install.md). `vpn-bot-protocol-install` gains `hysteria2` and `socks5`, their manifests
   owned-for-owned with the uninstall's (the symmetry test and install → the real uninstall → install run

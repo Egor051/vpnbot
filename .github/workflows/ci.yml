@@ -255,6 +255,49 @@ jobs:
           sudo tail -n 200 /opt/vpn-service/logs/bot.log || true
           for f in /var/log/vpn-bot-install.*; do echo "== $f"; sudo cat "$f"; done || true
 
+  setup-e2e:
+    # «🧭 Первичная настройка» end to end on a REAL VM (docs/first-setup.md): install.sh,
+    # the claim, then the bot's first setup driven through the mock Bot API — the domain,
+    # the Cloudflare token (tests/e2e/mock_cloudflare_api.py), the certificate (an acme.sh
+    # home of a test CA, adopted), VLESS REALITY + Hysteria2 installed by the bot with the
+    # real nginx / xray / hysteria from the helper's release cache, UFW, the self-check —
+    # green. The network is closed for root while the setup runs (tests/e2e/run_setup_e2e.sh).
+    name: First setup end-to-end (ubuntu-24.04, systemd, mock Bot API + Cloudflare)
+    runs-on: ubuntu-24.04
+    needs: [dependency-audit]
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python (for the mocks only)
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: constraints-hashed.txt
+
+      - name: Install the mocks' dependencies (hash-pinned)
+        run: python -m pip install --require-hashes -r constraints-hashed.txt
+
+      - name: Put the commit under test on a branch
+        run: git branch -f e2e-under-test HEAD
+
+      - name: Run the first setup end to end
+        run: sudo MOCK_PYTHON="$(command -v python)" bash tests/e2e/run_setup_e2e.sh
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          sudo systemctl status vpn-bot.service xray.service nginx.service hysteria-server.service vpnbot-hy2-auth.service --no-pager || true
+          sudo journalctl -u vpn-bot.service -n 300 --no-pager || true
+          sudo tail -n 300 /opt/vpn-service/logs/bot.log || true
+          for f in /var/log/vpn-bot-wizard/*.log /var/log/vpn-bot-protocol-install.log; do echo "== $f"; sudo tail -n 200 "$f"; done || true
+          sudo journalctl -u 'vpn-bot-wizard-*' -n 200 --no-pager || true
+
   relay-installer-e2e:
     # scripts/install.sh in RELAY mode end to end on a REAL ubuntu-24.04 VM (systemd,
     # nftables, sshd): a hand-made relay (/etc/vpn-relay.nft + vpn-relay.service +

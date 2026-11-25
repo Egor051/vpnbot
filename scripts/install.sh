@@ -133,6 +133,11 @@ INSTALL_HELPERS=(
   scripts/vpn-bot-cert
   scripts/vpn-bot-protocol-install
   scripts/vpn-bot-totp-reset
+  # The first setup from the bot (docs/first-setup.md) converges the firewall and the
+  # self-check reads the host checks: every `required` main helper is on a fresh host.
+  scripts/vpn-bot-ufw-apply
+  scripts/vpn-bot-host-check
+  scripts/vpn-bot-ssh-port
 )
 CLAIM_DIR="/etc/vpn-bot"
 CLAIM_FILE="${CLAIM_DIR}/claim.json"

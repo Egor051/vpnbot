@@ -144,3 +144,12 @@ class CertStates(StatesGroup):
     names = State()
     # The bot's Cloudflare token: the message is deleted as soon as it is read.
     token = State()
+
+
+class SetupStates(StatesGroup):
+    """«🧭 Первичная настройка» typed steps (bot/handlers/first_setup.py)."""
+
+    # The domain the server serves.
+    domain = State()
+    # The bot's Cloudflare token: the message is deleted as soon as it is read.
+    token = State()
