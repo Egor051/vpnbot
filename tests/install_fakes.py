@@ -37,8 +37,10 @@ ASSET = "Xray-linux-64.zip"
 
 TOOLS = (
     "systemctl", "dpkg-query", "apt-get", "nginx", "vpn-bot-cert", "xray", "ss", "openssl", "curl",
-    "ufw", "userdel", "useradd", "groupadd", "usermod", "getent", "iptables-save", "pgrep", "nsenter",
+    "ufw", "userdel", "useradd", "groupadd", "groupdel", "usermod", "getent", "iptables-save", "pgrep", "nsenter",
+    "vpn-bot-db-perms", "hysteria", "danted", "ip", "iptables",
 )
+HY2_ASSET = "hysteria-linux-amd64"
 
 STUB = r'''#!/usr/bin/env python3
 import base64, hashlib, json, os, secrets, shutil, sys
@@ -207,7 +209,23 @@ if name == "apt-get":
         UNITS["nginx.service"] = {"enabled": "enabled", "active": "inactive" if held else "active"}
         if not held:
             (ST / "bound_80").write_text("nginx started by its postinst with the default site")
+    elif verb == "install" and "dante-server" in pkgs:
+        held = h("/usr/sbin/policy-rc.d").is_file()
+        (ST / "policy_rc_d_at_install").write_text("held" if held else "absent")
+        for f, body in (("/usr/sbin/danted", "#!/bin/sh\n"), ("/etc/danted.conf", "# package default\n"),
+                        ("/usr/lib/systemd/system/danted.service", "[Unit]\n")):
+            h(f).parent.mkdir(parents=True, exist_ok=True); h(f).write_text(body)
+        PKGS.update({"dante-server": "1.4.3+dfsg-1"})
+        UNITS["danted.service"] = {"enabled": "enabled", "active": "inactive" if held else "failed"}
+    elif verb == "purge" and "-s" in args:
+        for p in pkgs:
+            print(f"Purg {p} [{PKGS.get(p, '0')}]")
+        sys.exit(0)
     elif verb == "purge":
+        if "dante-server" in pkgs:
+            for f in ("/usr/sbin/danted", "/etc/danted.conf", "/usr/lib/systemd/system/danted.service"):
+                h(f).unlink(missing_ok=True)
+            UNITS.pop("danted.service", None)
         for p in pkgs:
             PKGS.pop(p, None)
         if "nginx" in pkgs or "nginx-common" in pkgs:
@@ -234,7 +252,11 @@ if name == "nginx":
 
 if name == "vpn-bot-cert":
     if args[:1] == ["status"]:
-        print(json.dumps(load("cert_status.json", {}))); sys.exit(0)
+        st = load("cert_status.json", {})
+        hy = h("/etc/hysteria/cert.pem").is_file()
+        st["consumers"] = [{"name": "hysteria", "installed": load_state("hysteria-server.service") == "loaded"
+                            and h("/etc/hysteria").is_dir(), "in_sync": True if hy else False}]
+        print(json.dumps(st)); sys.exit(0)
     if args[:1] == ["deploy"]:
         if failing("cert_deploy"):
             print(json.dumps({"ok": False, "error": "stub"})); sys.exit(1)
@@ -242,6 +264,13 @@ if name == "vpn-bot-cert":
             print(json.dumps({"ok": False, "error": "nginx.service is not active, cannot reload"})); sys.exit(1)
         tls = h("/etc/vpn-bot/tls"); tls.mkdir(parents=True, exist_ok=True)
         (tls / "fullchain.pem").write_text("CHAIN\n"); (tls / "privkey.pem").write_text("KEY\n")
+        if (load_state("hysteria-server.service") == "loaded" and h("/etc/hysteria").is_dir()
+                and not h("/etc/vpn-bot/uninstalled/hysteria2").exists()):
+            (h("/etc/hysteria") / "cert.pem").write_text("CHAIN\n"); (h("/etc/hysteria") / "key.pem").write_text("KEY\n")
+            if not h("/etc/hysteria/config.yaml").is_file():
+                print(json.dumps({"ok": False, "error": "hysteria-server failed"})); save("units.json", UNITS); sys.exit(1)
+            UNITS.setdefault("hysteria-server.service", {"enabled": "disabled"})["active"] = "active"
+            save("units.json", UNITS)
         print(json.dumps({"ok": True})); sys.exit(0)
     sys.exit(2)
 
@@ -273,7 +302,18 @@ if name == "xray":
         sys.exit(0 if xray_config_ok(args[3]) else 23)
     sys.exit(2)
 
+if name == "ss" and "-Hlun" in args:
+    if UNITS.get("hysteria-server.service", {}).get("active") == "active":
+        print("UNCONN 0 0 *:443 *:*")
+    sys.exit(0)
+
 if name == "ss":
+    if UNITS.get("hysteria-server.service", {}).get("active") == "active":
+        print("LISTEN 0 4096 127.0.0.1:9999 0.0.0.0:*")
+    if UNITS.get("vpnbot-hy2-auth.service", {}).get("active") == "active":
+        print("LISTEN 0 4096 127.0.0.1:8444 0.0.0.0:*")
+    if UNITS.get("danted.service", {}).get("active") == "active":
+        print("LISTEN 0 4096 0.0.0.0:31337 0.0.0.0:*")
     if UNITS.get("xray.service", {}).get("active") == "active":
         for a in ("0.0.0.0:443", "127.0.0.1:10085", "127.0.0.1:8001"):
             print(f"LISTEN 0 4096 {a} 0.0.0.0:*")
@@ -286,10 +326,85 @@ if name == "openssl":
         print("Protocol version: TLSv1.3\nALPN protocol: h2\nVerification: OK"); sys.exit(0)
     print("connect: Connection refused", file=sys.stderr); sys.exit(1)
 
+if name == "curl" and args and args[-1].endswith("/healthz"):
+    ok = UNITS.get("vpnbot-hy2-auth.service", {}).get("active") == "active"
+    print("200" if ok else "000"); sys.exit(0 if ok else 7)
+
 if name == "curl":
     if nginx_serving():
         print("200"); sys.exit(0)
     print("000"); sys.exit(7)
+
+def passwd_lines(db):
+    f = h(f"/etc/{db}")
+    return f.read_text().splitlines() if f.is_file() else []
+
+
+def write_lines(db, lines):
+    h(f"/etc/{db}").write_text("".join(f"{ln}\n" for ln in lines))
+
+
+if name == "groupadd":
+    g = args[-1]
+    if any(ln.split(":")[0] == g for ln in passwd_lines("group")):
+        sys.exit(9)
+    gid = 990
+    used = {int(ln.split(":")[2]) for ln in passwd_lines("group")}
+    while gid in used:
+        gid -= 1
+    write_lines("group", passwd_lines("group") + [f"{g}:x:{gid}:"]); sys.exit(0)
+
+if name == "groupdel":
+    write_lines("group", [ln for ln in passwd_lines("group") if ln.split(":")[0] != args[-1]]); sys.exit(0)
+
+if name == "useradd":
+    if failing("useradd"):
+        sys.exit(1)
+    user = args[-1]
+    if any(ln.split(":")[0] == user for ln in passwd_lines("passwd")):
+        sys.exit(9)
+    opts = dict(zip(args[:-1], args[1:-1] + [""]))
+    used = {int(ln.split(":")[2]) for ln in passwd_lines("passwd")}
+    uid = int(opts["--uid"]) if "--uid" in opts else max(u for u in range(100, 999) if u not in used)
+    if uid in used:
+        sys.exit(4)
+    if "--user-group" in args:
+        write_lines("group", passwd_lines("group") + [f"{user}:x:{uid}:"])
+        gid = uid
+    else:
+        gname = opts.get("--gid", "nogroup")
+        gid = next(int(ln.split(":")[2]) for ln in passwd_lines("group") if ln.split(":")[0] == gname)
+    write_lines("passwd", passwd_lines("passwd") + [f"{user}:x:{uid}:{gid}::{opts.get('--home-dir', '/')}:{opts.get('--shell', '/bin/sh')}"])
+    sys.exit(0)
+
+if name == "userdel":
+    user = args[-1]
+    lines = passwd_lines("passwd")
+    if not any(ln.split(":")[0] == user for ln in lines):
+        sys.exit(6)
+    write_lines("passwd", [ln for ln in lines if ln.split(":")[0] != user])
+    write_lines("group", [ln for ln in passwd_lines("group") if ln.split(":")[0] != user]); sys.exit(0)
+
+if name == "vpn-bot-db-perms":
+    if any(ln.split(":")[0] == "vpn-bot" for ln in passwd_lines("passwd")) and h("/opt/vpn-service/data/vpn.db").exists():
+        f = R / ".owners.json"
+        data = json.loads(f.read_text()) if f.is_file() else {}
+        data["/opt/vpn-service/data/vpn.db"] = "vpn-bot:vpn-bot"
+        f.write_text(json.dumps(data, sort_keys=True))
+    sys.exit(0)
+
+if name == "hysteria":
+    print("Version: v2.8.2 (stub)"); sys.exit(0)
+
+if name == "danted":
+    if failing("danted_v"):
+        sys.exit(1)
+    text = Path(args[-1]).read_text() if args and Path(args[-1]).is_file() else ""
+    body = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    sys.exit(0 if "internal: 0.0.0.0 port = " in body and "<" not in body else 1)
+
+if name == "ip":
+    print("default via 203.0.113.1 dev eth0 proto static"); sys.exit(0)
 
 if name == "getent":
     db, key = args[0], (args[-1] if len(args) > 1 else None)
@@ -341,8 +456,11 @@ class InstallHost:
         wrapper = self.bin / "vpn-bot-protocol-install"
         wrapper.write_text(f'#!/bin/bash\nexec {sys.executable} -I {HELPER} "$@"\n', encoding="utf-8")
         wrapper.chmod(0o755)
+        self.file("/opt/vpn-service/data").mkdir(parents=True, exist_ok=True)
+        self.file("/opt/vpn-service/data/vpn.db").write_bytes(b"SQLite format 3\0")
         self.cert()
         self.release()
+        self.hy2_release()
 
     # ---------------------------------------------------------------- the host
     def file(self, path: str) -> Path:
@@ -370,6 +488,18 @@ class InstallHost:
             f"MD5= 00\nSHA1= 00\nSHA2-256= {dgst_sha or sha}\nSHA2-512= 00\n", encoding="utf-8")
         self.pin = sha
         return sha
+
+    def hy2_release(self, *, data: bytes = b"#!/bin/sh\necho fake hysteria\n", sums_sha: str | None = None) -> str:
+        sha = hashlib.sha256(data).hexdigest()
+        (self.releases / HY2_ASSET).write_bytes(data)
+        (self.releases / "hashes.txt").write_text(
+            f"{'0' * 64}  build/hysteria-android-386\n{sums_sha or sha}  build/{HY2_ASSET}\n", encoding="utf-8")
+        self.hy2_pin = sha
+        return sha
+
+    def warp(self) -> None:
+        self.file("/etc/amnezia").mkdir(parents=True, exist_ok=True)
+        self.file("/etc/amnezia/out-warp.conf").write_text("[Interface]\nAddress = 172.16.0.2/32\n")
 
     def marker(self, proto: str = "xray") -> None:
         d = self.file("/etc/vpn-bot/uninstalled")
@@ -412,7 +542,7 @@ class InstallHost:
             "VPN_BOT_PROTOCOL_INSTALL_SELFTEST": "1", "VPN_BOT_PROTOCOL_INSTALL_ROOT": str(self.root),
             "VPN_BOT_PROTOCOL_INSTALL_SELFTEST_BIN": str(self.bin), "VPN_BOT_PROTOCOL_INSTALL_REPO": str(ROOT),
             "VPN_BOT_PROTOCOL_INSTALL_SELFTEST_RELEASES": str(self.releases),
-            "VPN_BOT_PROTOCOL_INSTALL_SELFTEST_PINS": json.dumps({ASSET: self.pin}),
+            "VPN_BOT_PROTOCOL_INSTALL_SELFTEST_PINS": json.dumps({ASSET: self.pin, HY2_ASSET: self.hy2_pin}),
             "VPN_BOT_PROTOCOL_INSTALL_SELFTEST_ARCH": "x86_64",
         })
         env.update(extra)

@@ -107,7 +107,7 @@ from typing import Any
 
 SELFTEST = os.environ.get("VPN_BOT_PROTOCOL_INSTALL_SELFTEST") == "1"
 HELPER_VERSION = 1
-PROTOCOLS = ("xray",)
+PROTOCOLS = ("xray", "hysteria2", "socks5")
 
 EXIT_OK, EXIT_USAGE, EXIT_REFUSED, EXIT_VERIFY, EXIT_CANNOT, EXIT_ROLLED_BACK, EXIT_ROLLBACK_FAILED = 0, 2, 3, 4, 5, 6, 7
 
@@ -181,6 +181,63 @@ REPO_SKELETON = "deploy/xray/config.skeleton.json"
 REPO_XRAY_UNITS = "deploy/xray"
 REPO_SELFSTEAL = "deploy/nginx/selfsteal.conf"
 REPO_SITE = "deploy/site/default"
+
+# --------------------------------------------------------------------------- #
+# Hysteria2: the pinned official release (apernet/hysteria). Its sha256 pinned here AND
+# equal to the release's own hashes.txt line for the asset.
+# --------------------------------------------------------------------------- #
+HY2_VERSION = "app/v2.8.2"
+HY2_RELEASE_BASE = f"https://github.com/apernet/hysteria/releases/download/{HY2_VERSION}"
+HY2_ASSETS: Mapping[str, tuple[str, str]] = {
+    "x86_64": ("hysteria-linux-amd64", "b11bf0fb5f84a3f5c6baff3696e899539e68af4cee868c9203cfb896784ad3b0"),
+    "aarch64": ("hysteria-linux-arm64", "802d77ae3ca37bdc235ec848edfaaa7cb9109007d9044f50b0746239269cb8cf"),
+}
+HY2_HASHES = "hashes.txt"
+HY2_BIN = "/usr/local/bin/hysteria"
+HY2_ETC = "/etc/hysteria"
+HY2_CONFIG = f"{HY2_ETC}/config.yaml"
+HY2_CERT = f"{HY2_ETC}/cert.pem"
+HY2_KEY = f"{HY2_ETC}/key.pem"
+HY2_UNIT = "hysteria-server.service"
+HY2_TEMPLATE = "hysteria-server@.service"
+HY2_AUTH_UNIT = "vpnbot-hy2-auth.service"
+HY2_MARK_UNIT = "vpnbot-hy2-warp-mark.service"
+HY2_MARK_HELPER = "/usr/local/sbin/vpnbot-hy2-warp-mark"
+HY2_USER = "hysteria"
+# scripts/vpnbot-hy2-warp-mark tags hysteria's packets by THIS uid (HYUID): the user is
+# created with it whenever it is free.
+HY2_UID = 992
+HY2_PUBLIC_PORT = "443"           # deploy/hysteria/config.yaml pins `listen: :443` (drift-checked)
+HY2_AUTH_LISTEN = "127.0.0.1:8444"
+HY2_STATS_LISTEN = "127.0.0.1:9999"
+HY2_SECRET_PLACEHOLDER = '"<random-secret>"'  # noqa: S105 — the template's placeholder, not a secret
+REPO_HY2_CONFIG = "deploy/hysteria/config.yaml"
+REPO_HY2_UNITS = "deploy/hysteria"
+REPO_HY2_AUTH_UNIT = "deploy/vpnbot-hy2-auth.service"
+REPO_HY2_MARK_UNIT = "deploy/vpnbot-hy2-warp-mark.service"
+REPO_HY2_MARK_HELPER = "scripts/vpnbot-hy2-warp-mark"
+
+# The bot's own user: vpnbot-hy2-auth runs as it and reads vpn.db (deploy/create-vpn-bot-user.sh).
+BOT_USER = "vpn-bot"
+BOT_HOME = "/var/lib/vpn-bot"
+DB_PERMS_HELPER = "/usr/local/sbin/vpn-bot-db-perms"
+NOLOGIN = "/usr/sbin/nologin"
+
+# SOCKS5 (Dante): the package's daemon, /etc/danted.conf from deploy/danted.conf.example.
+SOCKS_PACKAGE = "dante-server"
+SOCKS_UNIT = "danted.service"
+SOCKS_CONF = "/etc/danted.conf"
+SOCKS_BIN = "/usr/sbin/danted"
+SOCKS_DROPIN_DIR = f"{UNIT_DIR}/danted.service.d"
+SOCKS_DROPIN = f"{SOCKS_DROPIN_DIR}/vpn-bot-warp.conf"
+REPO_SOCKS_CONF = "deploy/danted.conf.example"
+REPO_SOCKS_DROPIN = "deploy/danted-warp.conf"
+SOCKS_HEADER = "# managed by vpn-bot-protocol-install (deploy/danted.conf.example)"
+
+# WARP (docs/warp.md): deployed when its AmneziaWG config is on the host. The protocols
+# only follow it — the WARP helpers (vpn-bot-warp-install / -iface / -routes / -split,
+# warp-failsafe) own it and are never re-implemented here.
+WARP_DEFAULT_CONFIG = "/etc/amnezia/out-warp.conf"
 
 _DNS_NAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -273,6 +330,9 @@ XRAY_ENV_SETTINGS = (
     "XRAY_STATS_SERVER", "XRAY_XHTTP_ENABLED", "XRAY_XHTTP_INBOUND_TAG",
 )
 
+HY2_ENV_SETTINGS = ("HYSTERIA2_HOST", "HYSTERIA2_SNI", "HYSTERIA2_STATS_SECRET")
+SOCKS_ENV_SETTINGS = ("SOCKS5_HOST",)
+
 MANIFESTS: Mapping[str, Manifest] = {
     "xray": Manifest(
         protocol="xray",
@@ -293,6 +353,43 @@ MANIFESTS: Mapping[str, Manifest] = {
             Shared("/etc/vpn-bot/tls", "the certificate's registry (vpn-bot-cert): nginx reads the pair there",
                    paths=(TLS_FULLCHAIN, TLS_PRIVKEY)),
             Shared("/etc/logrotate.d/xray", "installed by deploy.sh (MANAGED_HOST_FILES)"),
+        ),
+    ),
+    "hysteria2": Manifest(
+        protocol="hysteria2",
+        units=(HY2_MARK_UNIT, HY2_UNIT, HY2_AUTH_UNIT),
+        templates=(HY2_TEMPLATE,),
+        unit_files=(
+            f"{UNIT_DIR}/{HY2_MARK_UNIT}", f"{UNIT_DIR}/{HY2_UNIT}", f"{UNIT_DIR}/{HY2_TEMPLATE}",
+            f"{UNIT_DIR}/{HY2_UNIT}.d", f"{UNIT_DIR}/{HY2_TEMPLATE}.d", f"{UNIT_DIR}/{HY2_AUTH_UNIT}",
+        ),
+        paths=(HY2_MARK_HELPER, HY2_BIN, HY2_ETC),
+        users=(HY2_USER,),
+        env_flag="HYSTERIA2_ENABLED",
+        env_settings=HY2_ENV_SETTINGS,
+        shared=(
+            Shared(
+                "nginx", "the masquerade proxies to the self-steal on 127.0.0.1:8443 (the decoy site)",
+                paths=(NGINX_SITE_CONF, SITE_ROOT), packages=(NGINX_PACKAGE,), units=(NGINX_UNIT,),
+            ),
+            Shared("/etc/vpn-bot/tls", "the certificate's registry: vpn-bot-cert lays the pair out to /etc/hysteria",
+                   paths=(TLS_FULLCHAIN, TLS_PRIVKEY)),
+            Shared("user vpn-bot", "vpnbot-hy2-auth runs as the bot's user and reads vpn.db (deploy/create-vpn-bot-user.sh)"),
+            Shared("/usr/local/sbin/acme-reload.sh", "the old renewal hook, deploy.sh's"),
+        ),
+    ),
+    "socks5": Manifest(
+        protocol="socks5",
+        units=(SOCKS_UNIT,),
+        templates=(),
+        unit_files=(SOCKS_DROPIN_DIR,),
+        paths=(),
+        packages=(SOCKS_PACKAGE,),
+        env_flag="SOCKS5_ENABLED",
+        env_settings=SOCKS_ENV_SETTINGS,
+        shared=(
+            Shared("/etc/danted.conf", "the package's conffile: written here, removed by apt-get purge dante-server",
+                   paths=()),
         ),
     ),
 }
@@ -1104,6 +1201,221 @@ def plan_xray(ctx: Ctx, plan: Plan, domain: str) -> None:
         plan.add("marker", "marker", f"{MARKER_DIR}/xray", "remove", "a reinstall: the protocol is back on the host")
 
 
+def warp_deployed(ctx: Ctx) -> bool:
+    """WARP's AmneziaWG config is on the host (vpn-bot-warp-install put it there)."""
+    return ctx.host(ctx.env().get("WARP_CONFIG_PATH") or WARP_DEFAULT_CONFIG).is_file()
+
+
+def plan_env(ctx: Ctx, plan: Plan, wanted: Mapping[str, str]) -> None:
+    """The .env lines to change: a key whose value already is the wanted one stays."""
+    env = ctx.env()
+    for key, value in wanted.items():
+        if env.get(key, "") != value or value == "<generated>":
+            plan.env_updates[key] = value
+            plan.env_current[key] = env.get(key, "")
+    for key in sorted(plan.env_updates):
+        plan.add("env", "env", key, "set", f"{plan.env_current[key] or '(unset)'} → {plan.env_updates[key]}")
+
+
+def plan_marker(ctx: Ctx, plan: Plan) -> None:
+    if ctx.host(f"{MARKER_DIR}/{plan.protocol}").is_file():
+        plan.add("marker", "marker", f"{MARKER_DIR}/{plan.protocol}", "remove", "a reinstall: the protocol is back on the host")
+
+
+def uid_taken(ctx: Ctx, uid: int) -> bool:
+    if SELFTEST:
+        with contextlib.suppress(OSError):
+            return any(line.split(":")[2:3] == [str(uid)] for line in ctx.host("/etc/passwd").read_text().splitlines())
+        return False
+    try:
+        pwd.getpwuid(uid)
+    except KeyError:
+        return False
+    return True
+
+
+def plan_users(ctx: Ctx, plan: Plan, *, bot_user: bool, hysteria: bool) -> None:
+    if bot_user:
+        if user_exists(ctx, BOT_USER):
+            plan.add("users", "user", BOT_USER, "keep", "the bot's account is there")
+        else:
+            plan.add("users", "user", BOT_USER, "create",
+                     f"system user and group {BOT_USER}, {BOT_HOME}, {NOLOGIN} (shared: never removed); "
+                     f"vpn-bot-db-perms hands vpn.db to it")
+    if hysteria:
+        if user_exists(ctx, HY2_USER):
+            plan.add("users", "user", HY2_USER, "keep", "the account is there")
+        elif uid_taken(ctx, HY2_UID):
+            plan.add("users", "user", HY2_USER, "create", f"system user (uid {HY2_UID} is taken: another uid)")
+            plan.facts["hy2_uid"] = ""
+            if warp_deployed(ctx):
+                plan.blocking.append(f"uid {HY2_UID} is taken, and vpnbot-hy2-warp-mark tags hysteria's packets by it "
+                                     "(WARP is deployed here): free the uid or change HYUID first")
+        else:
+            plan.add("users", "user", HY2_USER, "create", f"system user uid {HY2_UID} (vpnbot-hy2-warp-mark's HYUID), "
+                     f"no home, {NOLOGIN}")
+            plan.facts["hy2_uid"] = str(HY2_UID)
+
+
+def plan_file(ctx: Ctx, plan: Plan, step: str, path: str, want: bytes, note: str) -> None:
+    h = ctx.host(path)
+    if h.is_symlink():
+        plan.blocking.append(f"{path} is a symlink")
+    elif h.is_file():
+        plan.add(step, "file", path, "keep", "as in the repo" if h.read_bytes() == want else "differs: kept")
+    else:
+        plan.add(step, "file", path, "create", note)
+
+
+def hy2_sources(ctx: Ctx, with_mark: bool) -> dict[str, tuple[bytes, int]]:
+    """host path -> (content, mode) of hysteria2's unit files (and the WARP mark helper)."""
+    out = {
+        f"{UNIT_DIR}/{HY2_UNIT}": (repo_file(ctx, f"{REPO_HY2_UNITS}/{HY2_UNIT}").read_bytes(), 0o644),
+        f"{UNIT_DIR}/{HY2_TEMPLATE}": (repo_file(ctx, f"{REPO_HY2_UNITS}/{HY2_TEMPLATE}").read_bytes(), 0o644),
+        f"{UNIT_DIR}/{HY2_AUTH_UNIT}": (repo_file(ctx, REPO_HY2_AUTH_UNIT).read_bytes(), 0o644),
+    }
+    if with_mark:
+        out[f"{UNIT_DIR}/{HY2_MARK_UNIT}"] = (repo_file(ctx, REPO_HY2_MARK_UNIT).read_bytes(), 0o644)
+        out[HY2_MARK_HELPER] = (repo_file(ctx, REPO_HY2_MARK_HELPER).read_bytes(), 0o755)
+    return out
+
+
+def hy2_config_text(ctx: Ctx, secret: str) -> bytes:
+    """deploy/hysteria/config.yaml with the stats secret filled in — what
+    deploy/hysteria/install-config.sh installs (the same file, the same one substitution)."""
+    text = repo_file(ctx, REPO_HY2_CONFIG).read_text(encoding="utf-8")
+    if text.count(HY2_SECRET_PLACEHOLDER) != 1:
+        raise Cannot(f"{REPO_HY2_CONFIG}: expected exactly one {HY2_SECRET_PLACEHOLDER}")
+    return text.replace(HY2_SECRET_PLACEHOLDER, json.dumps(secret)).encode()
+
+
+def plan_hysteria2(ctx: Ctx, plan: Plan, domain: str) -> None:
+    env = ctx.env()
+    for key, want in (("HYSTERIA2_PORT", HY2_PUBLIC_PORT), ("HYSTERIA2_AUTH_LISTEN", HY2_AUTH_LISTEN),
+                      ("HYSTERIA2_STATS_LISTEN", HY2_STATS_LISTEN), ("HYSTERIA2_CONFIG_PATH", HY2_CONFIG),
+                      ("HYSTERIA2_SERVICE_NAME", "hysteria-server"), ("HYSTERIA2_AUTH_SERVICE_NAME", "vpnbot-hy2-auth")):
+        have = env.get(key, "")
+        if have and have.removesuffix(".service") != want:
+            plan.blocking.append(f".env {key}={have}: deploy/hysteria/config.yaml and the units use {want} "
+                                 "(the deploy's drift check compares every key of that file)")
+    with_mark = warp_deployed(ctx)
+    plan.facts["warp"] = with_mark
+    probes = installed_probes("hysteria2")
+    present = [p for p in probes if ctx.host(p).exists()]
+    plan.state = "installed" if len(present) == len(probes) else "partial" if present else "absent"
+    plan_users(ctx, plan, bot_user=True, hysteria=True)
+    arch = machine()
+    asset = pinned_hy2_assets().get(arch)
+    if ctx.host(HY2_BIN).is_symlink():
+        plan.blocking.append(f"{HY2_BIN} is a symlink")
+    elif ctx.host(HY2_BIN).exists():
+        plan.add("hy2_bin", "file", HY2_BIN, "keep", "installed (an upgrade is not this installer's job)")
+    elif asset is None:
+        plan.blocking.append(f"no pinned Hysteria2 release for the architecture {arch}")
+    else:
+        plan.facts["release"] = {"version": HY2_VERSION, "asset": asset[0], "sha256": asset[1]}
+        plan.add("hy2_bin", "download", f"{HY2_RELEASE_BASE}/{asset[0]}", "install",
+                 f"Hysteria2 {HY2_VERSION}, sha256 {asset[1][:16]}… (pinned) = the release's {HY2_HASHES}")
+        plan.add("hy2_bin", "file", HY2_BIN, "create", "root:root 0755")
+    for path, (data, mode) in hy2_sources(ctx, with_mark).items():
+        plan_file(ctx, plan, "hy2_units", path, data, f"root:root {mode:04o}")
+    etc = ctx.host(HY2_ETC)
+    if etc.is_symlink() or (etc.exists() and not etc.is_dir()):
+        plan.blocking.append(f"{HY2_ETC} is not a directory")
+    if ctx.host(HY2_CONFIG).exists():
+        plan.add("hy2_config", "file", HY2_CONFIG, "keep", "the live config (its stats secret) stays")
+    else:
+        hy2_config_text(ctx, "x" * 48)  # the template is usable
+        plan.add("hy2_config", "file", HY2_CONFIG, "create",
+                 f"from {REPO_HY2_CONFIG}: UDP :{HY2_PUBLIC_PORT}, auth http://{HY2_AUTH_LISTEN}, trafficStats "
+                 f"{HY2_STATS_LISTEN} with a new secret, masquerade proxy → https://{SELFSTEAL_LISTEN}; "
+                 f"{HY2_USER}:{HY2_USER} 0600")
+    config_new = any(c.step == "hy2_config" and c.action == "create" for c in plan.changes)
+    wanted = {"HYSTERIA2_ENABLED": "true", "HYSTERIA2_HOST": domain, "HYSTERIA2_SNI": domain}
+    if config_new:
+        wanted["HYSTERIA2_STATS_SECRET"] = "<generated>"  # noqa: S105 — a marker, the value is generated at apply
+    plan_env(ctx, plan, wanted)
+    plan_marker(ctx, plan)
+    starts = [u for u in (HY2_AUTH_UNIT, HY2_UNIT) if not (unit_loaded(ctx, u) and unit_active(ctx, u))]
+    for unit in starts:
+        plan.add("hy2_start", "service", unit, "start", "enable --now" if unit == HY2_AUTH_UNIT else "enable")
+    for unit in (HY2_AUTH_UNIT, HY2_UNIT):
+        if unit not in starts:
+            plan.add("hy2_start", "service", unit, "keep", "active")
+    if starts or config_new or not ctx.host(HY2_CERT).is_file():
+        plan.add("hy2_cert", "cert", "vpn-bot-cert deploy", "deploy",
+                 f"the registry's pair to the hysteria reader ({HY2_CERT}, {HY2_KEY}); it restarts hysteria-server")
+    if with_mark:
+        if unit_loaded(ctx, HY2_MARK_UNIT) and unit_active(ctx, HY2_MARK_UNIT):
+            plan.add("warp", "service", HY2_MARK_UNIT, "keep", "active")
+        else:
+            plan.add("warp", "service", HY2_MARK_UNIT, "start",
+                     "WARP is deployed: hysteria's packets follow its policy table (vpnbot-hy2-warp-mark apply)")
+
+
+def socks_conf_text(ctx: Ctx, port: str, external: str) -> bytes:
+    text = repo_file(ctx, REPO_SOCKS_CONF).read_text(encoding="utf-8")
+    body = text.replace("<SOCKS5_PORT>", port).replace("<WAN_INTERFACE>", external)
+    if re.search(r"<[A-Z_]+>", "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))):
+        raise Cannot(f"{REPO_SOCKS_CONF}: a placeholder this installer does not fill")
+    return (f"{SOCKS_HEADER}\n# external: {external}\n" + body).encode()
+
+
+def wan_interface(ctx: Ctx) -> str | None:
+    rc, out = run(ctx, ["ip", "-4", "route", "show", "default"])
+    m = re.search(r"\bdev\s+([A-Za-z0-9_.@-]{1,15})", out) if rc == 0 else None
+    return m.group(1) if m else None
+
+
+def plan_socks5(ctx: Ctx, plan: Plan, domain: str) -> None:
+    env = ctx.env()
+    for key, want in (("SOCKS5_SERVICE_NAME", "danted"),):
+        have = env.get(key, "")
+        if have and have.removesuffix(".service") != want:
+            plan.blocking.append(f".env {key}={have}: the package's unit is {want}")
+    port = env.get("SOCKS5_PORT", "31337") or "31337"
+    if not port.isdigit() or not 1 <= int(port) <= 65535:
+        plan.blocking.append(f".env SOCKS5_PORT={port!r} is not a port")
+    probes = installed_probes("socks5")
+    present = [p for p in probes if ctx.host(p).exists()]
+    plan.state = "installed" if len(present) == len(probes) else "partial" if present else "absent"
+    status = dpkg_status(ctx, SOCKS_PACKAGE)
+    installed = status == "ii"
+    if installed:
+        plan.add("socks_pkg", "package", SOCKS_PACKAGE, "keep", "installed")
+    else:
+        plan.add("socks_pkg", "package", SOCKS_PACKAGE, "install", "apt-get install dante-server; policy-rc.d keeps it stopped")
+    # external: the WARP tunnel address when WARP proxy egress is on (the bot's rule for
+    # Xray's sendThrough, warp/proxy_egress.py), else the WAN device.
+    tunnel = warp_send_through(ctx)
+    external = tunnel or wan_interface(ctx) or ""
+    plan.facts["socks_external"] = external
+    if not external:
+        plan.blocking.append("no default route: the WAN device for danted's `external:` is not known")
+    conf = ctx.host(SOCKS_CONF)
+    want = socks_conf_text(ctx, port, external or "eth0")
+    if conf.is_symlink():
+        plan.blocking.append(f"{SOCKS_CONF} is a symlink")
+    elif not installed or not conf.exists():
+        plan.add("socks_config", "file", SOCKS_CONF, "create",
+                 f"from {REPO_SOCKS_CONF}: port {port}, external {external or '?'}, socksmethod username")
+    elif conf.read_bytes() == want:
+        plan.add("socks_config", "file", SOCKS_CONF, "keep", "as the installer writes it")
+    elif conf.read_bytes().startswith(SOCKS_HEADER.encode()):
+        plan.add("socks_config", "file", SOCKS_CONF, "replace", "ours, another port or external")
+    else:
+        plan.add("socks_config", "file", SOCKS_CONF, "keep", "an operator's danted.conf: kept")
+        plan.warnings.append(f"{SOCKS_CONF} is not this installer's: kept as it is")
+    plan_file(ctx, plan, "socks_dropin", SOCKS_DROPIN, repo_file(ctx, REPO_SOCKS_DROPIN).read_bytes(),
+              "the WARP ordering drop-in (deploy.sh's MANAGED_HOST_FILES entry, gate=SOCKS5 — the same bytes)")
+    plan_env(ctx, plan, {"SOCKS5_ENABLED": "true", "SOCKS5_HOST": domain})
+    plan_marker(ctx, plan)
+    if installed and unit_active(ctx, SOCKS_UNIT) and not plan.acts("socks_config"):
+        plan.add("socks_start", "service", SOCKS_UNIT, "keep", "active")
+    else:
+        plan.add("socks_start", "service", SOCKS_UNIT, "start", "enable, restart")
+
+
 def compute_plan(ctx: Ctx, proto: str, wanted_domain: str | None) -> Plan:
     if wanted_domain is not None and wanted_domain and not _DNS_NAME_RE.match(wanted_domain):
         raise Refused(f"--domain {wanted_domain!r} is not a lowercase DNS name")
@@ -1115,6 +1427,11 @@ def compute_plan(ctx: Ctx, proto: str, wanted_domain: str | None) -> Plan:
     if proto == "xray":
         plan_nginx(ctx, plan, domain)
         plan_xray(ctx, plan, domain)
+    elif proto == "hysteria2":
+        plan_nginx(ctx, plan, domain)
+        plan_hysteria2(ctx, plan, domain)
+    elif proto == "socks5":
+        plan_socks5(ctx, plan, domain)
     if not ctx.host(ENV_FILE).is_file():
         plan.blocking.append(f"{ENV_FILE} does not exist")
     return plan
@@ -1174,7 +1491,7 @@ def backup(ctx: Ctx, proto: str, plan: Plan) -> str:
     bdir.mkdir(parents=True, exist_ok=True)
     os.chmod(bdir, 0o700)
     archive = f"{BACKUP_DIR}/{proto}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.tar.gz"
-    targets = sorted({ENV_FILE, NGINX_SITE_CONF, NGINX_DEFAULT_SITE, POLICY_RC_D, f"{MARKER_DIR}/{proto}",
+    targets = sorted({ENV_FILE, NGINX_SITE_CONF, NGINX_DEFAULT_SITE, POLICY_RC_D, f"{MARKER_DIR}/{proto}", SOCKS_CONF,
                       *MANIFESTS[proto].unit_files, *MANIFESTS[proto].paths})
     members: list[str] = []
     buf = io.BytesIO()
@@ -1213,31 +1530,7 @@ def systemctl(ctx: Ctx, step: str, *args: str) -> None:
 def step_nginx_pkg(ctx: Ctx, plan: Plan, journal: Journal) -> None:
     if not plan.acts("nginx_pkg"):
         return
-    before = installed_packages(ctx)
-    policy = ctx.host(POLICY_RC_D)
-    created_policy = False
-    if not policy.exists() and not policy.is_symlink():
-        journal.add("nginx_pkg", "created", path=POLICY_RC_D)
-        write_file(ctx, policy, POLICY_RC_D_BODY.encode(), 0o755)
-        created_policy = True
-    journal.add("nginx_pkg", "packages", before=sorted(before))
-    try:
-        argv = ["apt-get", "install", "-y", "-q", "--no-install-recommends", NGINX_PACKAGE]
-        env = {"DEBIAN_FRONTEND": "noninteractive"}
-        rc, out = run(ctx, argv, timeout=APT_TIMEOUT, env=env)
-        if rc != 0 and "Unable to locate package" in out:
-            run(ctx, ["apt-get", "update", "-q"], timeout=APT_TIMEOUT, env=env)
-            rc, out = run(ctx, argv, timeout=APT_TIMEOUT, env=env)
-        if rc != 0:
-            raise StepFailed("nginx_pkg", f"apt-get install nginx failed (exit {rc}): {out.strip()[-300:]}")
-    finally:
-        if created_policy:
-            with contextlib.suppress(OSError):
-                remove_path(ctx, policy)
-    after = installed_packages(ctx)
-    journal.add("nginx_pkg", "installed", packages=sorted(after - before))
-    if NGINX_PACKAGE not in after:
-        raise StepFailed("nginx_pkg", "nginx is not installed after apt-get install")
+    apt_install(ctx, journal, "nginx_pkg", NGINX_PACKAGE)
     default = ctx.host(NGINX_DEFAULT_SITE)
     if default.is_symlink() or default.exists():
         target = os.readlink(default) if default.is_symlink() else None
@@ -1315,6 +1608,14 @@ def fetch(ctx: Ctx, url: str) -> bytes:
     if len(data) > MAX_DOWNLOAD:
         raise Cannot(f"{url}: larger than {MAX_DOWNLOAD} bytes")
     return data
+
+
+def pinned_hy2_assets() -> Mapping[str, tuple[str, str]]:
+    raw = os.environ.get("VPN_BOT_PROTOCOL_INSTALL_SELFTEST_PINS", "") if SELFTEST else ""
+    if not raw:
+        return HY2_ASSETS
+    pins = json.loads(raw)
+    return {arch: (name, str(pins.get(name, want))) for arch, (name, want) in HY2_ASSETS.items()}
 
 
 def pinned_assets() -> Mapping[str, tuple[str, str]]:
@@ -1502,8 +1803,261 @@ def step_marker(ctx: Ctx, plan: Plan, journal: Journal) -> None:
 
 # xray_logs before xray_config: `xray run -test` opens the log files the config names and
 # fails while /var/log/xray does not exist (measured with v25.10.15).
+# --------------------------------------------------------------------------- #
+# Hysteria2 / SOCKS5 / users / WARP steps
+# --------------------------------------------------------------------------- #
+def db_path(ctx: Ctx) -> str:
+    return ctx.env().get("DB_PATH") or f"{APP_DIR}/data/vpn.db"
+
+
+def step_users(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    for change in plan.acts("users"):
+        name = change.target
+        if name == BOT_USER:
+            group_new = not group_exists(ctx, BOT_USER)
+            journal.add("users", "user_created", name=name, group=BOT_USER if group_new else "")
+            if group_new:
+                rc, out = run(ctx, ["groupadd", "--system", BOT_USER])
+                if rc != 0:
+                    raise StepFailed("users", f"groupadd {BOT_USER} failed (exit {rc}): {out.strip()[-200:]}")
+            rc, out = run(ctx, ["useradd", "--system", "--gid", BOT_USER, "--home-dir", BOT_HOME, "--no-create-home",
+                                "--shell", NOLOGIN, BOT_USER])
+            if rc != 0:
+                raise StepFailed("users", f"useradd {BOT_USER} failed (exit {rc}): {out.strip()[-200:]}")
+            # vpnbot-hy2-auth (User=vpn-bot) opens vpn.db read-only: the helper of
+            # vpn-bot.service's ExecStartPre hands the database to the bot's user.
+            db = ctx.host(db_path(ctx))
+            journal.add("users", "db_owner", path=db_path(ctx), owner=owner_of(ctx, db) if db.exists() else "")
+            rc, out = run(ctx, ["vpn-bot-db-perms" if SELFTEST else DB_PERMS_HELPER])
+            if rc != 0:
+                raise StepFailed("users", f"vpn-bot-db-perms failed (exit {rc}): {out.strip()[-200:]}")
+        elif name == HY2_USER:
+            journal.add("users", "user_created", name=name, group=HY2_USER)
+            argv = ["useradd", "--system", "--user-group", "--no-create-home", "--home-dir", "/nonexistent",
+                    "--shell", NOLOGIN]
+            if plan.facts.get("hy2_uid"):
+                argv += ["--uid", str(plan.facts["hy2_uid"])]
+            rc, out = run(ctx, [*argv, HY2_USER])
+            if rc != 0:
+                raise StepFailed("users", f"useradd {HY2_USER} failed (exit {rc}): {out.strip()[-200:]}")
+    fault(ctx, "users")
+
+
+def fetch_checked(ctx: Ctx, step: str, url: str, want: str, sums_url: str, sums_name: str) -> bytes:
+    """A release asset: its sha256 must be the pin AND the release's own sums line."""
+    try:
+        data = fetch(ctx, url)
+        sums = fetch(ctx, sums_url).decode("utf-8", errors="replace")
+    except (OSError, ValueError) as exc:
+        raise StepFailed(step, f"cannot download {url}: {exc}") from None
+    got = sha256_bytes(data)
+    published = None
+    for line in sums.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].rsplit("/", 1)[-1] == sums_name and _SHA_RE.match(parts[0].lower()):
+            published = parts[0].lower()
+    if got != want:
+        raise StepFailed(step, f"{sums_name}: sha256 {got} is not the pinned {want} — refusing to install it")
+    if published != got:
+        raise StepFailed(step, f"{sums_name}: the release's {sums_url.rsplit('/', 1)[-1]} says {published}, the download is {got}")
+    ctx.log(f"{sums_name}: sha256 {got} = the pin = the release's sums")
+    return data
+
+
+def step_hy2_bin(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    if not plan.acts("hy2_bin"):
+        return
+    asset, want = pinned_hy2_assets()[machine()]
+    data = fetch_checked(ctx, "hy2_bin", f"{HY2_RELEASE_BASE}/{asset}", want, f"{HY2_RELEASE_BASE}/{HY2_HASHES}", asset)
+    journal.add("hy2_bin", "created", path=HY2_BIN)
+    write_file(ctx, ctx.host(HY2_BIN), data, 0o755)
+    rc, out = run(ctx, ["hysteria" if SELFTEST else HY2_BIN, "version"])
+    if rc != 0:
+        raise StepFailed("hy2_bin", f"{HY2_BIN} version failed (exit {rc}): {out.strip()[-200:]}")
+    fault(ctx, "hy2_bin")
+
+
+def write_created(ctx: Ctx, journal: Journal, step: str, path: str, data: bytes, mode: int,
+                  owner: tuple[str, str] = ("root", "root")) -> None:
+    h = ctx.host(path)
+    if not h.parent.exists():
+        journal.add(step, "created", path=ctx.unroot(h.parent))
+        make_dir(ctx, h.parent, 0o755)
+    journal.add(step, "created", path=path)
+    write_file(ctx, h, data, mode, owner)
+
+
+def step_hy2_units(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    acts = plan.acts("hy2_units")
+    if not acts:
+        return
+    sources = hy2_sources(ctx, bool(plan.facts.get("warp")))
+    for change in acts:
+        data, mode = sources[change.target]
+        write_created(ctx, journal, "hy2_units", change.target, data, mode)
+    systemctl(ctx, "hy2_units", "daemon-reload")
+    fault(ctx, "hy2_units")
+
+
+def step_hy2_config(ctx: Ctx, plan: Plan, journal: Journal, generated: dict[str, str]) -> None:
+    if not plan.acts("hy2_config"):
+        return
+    etc = ctx.host(HY2_ETC)
+    if not etc.is_dir():
+        journal.add("hy2_config", "created", path=HY2_ETC)
+        make_dir(ctx, etc, 0o755)
+    secret = secrets.token_hex(24)
+    journal.add("hy2_config", "created", path=HY2_CONFIG)
+    write_file(ctx, ctx.host(HY2_CONFIG), hy2_config_text(ctx, secret), 0o600, (HY2_USER, HY2_USER))
+    generated["HYSTERIA2_STATS_SECRET"] = secret
+    fault(ctx, "hy2_config")
+
+
+def enable_start(ctx: Ctx, journal: Journal, step: str, unit: str, *, start: bool = True, restart: bool = False) -> None:
+    journal.add(step, "service", unit=unit, was_enabled=unit_prop(ctx, unit, "UnitFileState"),
+                was_active=unit_active(ctx, unit))
+    systemctl(ctx, step, "enable", "--", unit)
+    if start:
+        systemctl(ctx, step, "restart" if restart else "start", "--", unit)
+        if not unit_active(ctx, unit):
+            raise StepFailed(step, f"{unit} is not active after the start")
+
+
+def step_hy2_start(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    for change in plan.acts("hy2_start"):
+        # hysteria-server is started by the certificate's deploy (its reader's action is a
+        # restart): without its pair in /etc/hysteria it cannot start.
+        enable_start(ctx, journal, "hy2_start", change.target, start=change.target == HY2_AUTH_UNIT)
+    fault(ctx, "hy2_start")
+
+
+def step_hy2_cert(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    if not plan.acts("hy2_cert"):
+        return
+    journal.add("hy2_cert", "deploy", note="the registry's pair: shared, not undone (the reader's files go with /etc/hysteria)")
+    if not unit_active(ctx, HY2_UNIT):
+        journal.add("hy2_cert", "service", unit=HY2_UNIT, was_enabled="enabled", was_active=False)
+    rc, out = run(ctx, cert_argv(ctx, "deploy", "--json"), timeout=600)
+    if rc != 0:
+        raise StepFailed("hy2_cert", f"vpn-bot-cert deploy failed (exit {rc}): {out.strip()[-300:]}")
+    for path in (HY2_CERT, HY2_KEY):
+        if not ctx.host(path).is_file():
+            raise StepFailed("hy2_cert", f"{path} is not there after vpn-bot-cert deploy")
+    if not unit_active(ctx, HY2_UNIT):
+        systemctl(ctx, "hy2_cert", "restart", "--", HY2_UNIT)
+    if not unit_active(ctx, HY2_UNIT):
+        raise StepFailed("hy2_cert", f"{HY2_UNIT} is not active with the certificate in place")
+    fault(ctx, "hy2_cert")
+
+
+def step_warp(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    for change in plan.acts("warp"):
+        enable_start(ctx, journal, "warp", change.target)
+    fault(ctx, "warp")
+
+
+def step_socks_pkg(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    if not plan.acts("socks_pkg"):
+        return
+    apt_install(ctx, journal, "socks_pkg", SOCKS_PACKAGE)
+    fault(ctx, "socks_pkg")
+
+
+def step_socks_config(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    for change in plan.acts("socks_config"):
+        port = ctx.env().get("SOCKS5_PORT", "31337") or "31337"
+        data = socks_conf_text(ctx, port, str(plan.facts.get("socks_external") or "eth0"))
+        # The package's own default (installed by this run) or ours: either is in no backup
+        # an uninstall needs — a rollback removes it, a purge of the package removes it too.
+        journal.add("socks_config", "created" if change.action == "create" else "replaced", path=SOCKS_CONF)
+        write_file(ctx, ctx.host(SOCKS_CONF), data, 0o644)
+        rc, out = run(ctx, ["danted" if SELFTEST else SOCKS_BIN, "-V", "-f", str(ctx.host(SOCKS_CONF))])
+        if rc != 0:
+            raise StepFailed("socks_config", f"danted -V refused {SOCKS_CONF} (exit {rc}): {out.strip()[-300:]}")
+    fault(ctx, "socks_config")
+
+
+def step_socks_dropin(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    for change in plan.acts("socks_dropin"):
+        write_created(ctx, journal, "socks_dropin", change.target, repo_file(ctx, REPO_SOCKS_DROPIN).read_bytes(), 0o644)
+        systemctl(ctx, "socks_dropin", "daemon-reload")
+    fault(ctx, "socks_dropin")
+
+
+def step_socks_start(ctx: Ctx, plan: Plan, journal: Journal) -> None:
+    for change in plan.acts("socks_start"):
+        enable_start(ctx, journal, "socks_start", change.target, restart=True)
+    fault(ctx, "socks_start")
+
+
+def apt_install(ctx: Ctx, journal: Journal, step: str, package: str) -> None:
+    """apt-get install with policy-rc.d holding every service from starting; the packages
+    this run installed are journaled (a rollback purges exactly those)."""
+    before = installed_packages(ctx)
+    policy = ctx.host(POLICY_RC_D)
+    created_policy = False
+    if not policy.exists() and not policy.is_symlink():
+        journal.add(step, "created", path=POLICY_RC_D)
+        write_file(ctx, policy, POLICY_RC_D_BODY.encode(), 0o755)
+        created_policy = True
+    try:
+        argv = ["apt-get", "install", "-y", "-q", "--no-install-recommends", package]
+        env = {"DEBIAN_FRONTEND": "noninteractive"}
+        rc, out = run(ctx, argv, timeout=APT_TIMEOUT, env=env)
+        if rc != 0 and "Unable to locate package" in out:
+            run(ctx, ["apt-get", "update", "-q"], timeout=APT_TIMEOUT, env=env)
+            rc, out = run(ctx, argv, timeout=APT_TIMEOUT, env=env)
+        after = installed_packages(ctx)
+        journal.add(step, "installed", packages=sorted(after - before))
+        if rc != 0:
+            raise StepFailed(step, f"apt-get install {package} failed (exit {rc}): {out.strip()[-300:]}")
+    finally:
+        if created_policy:
+            with contextlib.suppress(OSError):
+                remove_path(ctx, policy)
+    if package not in installed_packages(ctx):
+        raise StepFailed(step, f"{package} is not installed after apt-get install")
+
+
 STEPS: tuple[str, ...] = ("nginx_pkg", "nginx_start", "cert", "nginx_site", "xray_bin", "xray_units", "xray_logs",
                           "xray_config", "env", "xray_start", "marker")
+
+
+# The steps of each protocol, in order. hysteria2: the marker goes before its certificate
+# and its start — vpn-bot-cert lays nothing out to a reader whose uninstall marker is
+# there (docs/protocol-install.md); a rollback puts the marker back.
+PROTO_STEPS: Mapping[str, tuple[str, ...]] = {
+    "xray": STEPS,
+    "hysteria2": ("nginx_pkg", "nginx_start", "cert", "nginx_site", "users", "hy2_bin", "hy2_units", "hy2_config",
+                  "env", "marker", "hy2_start", "hy2_cert", "warp"),
+    "socks5": ("socks_pkg", "socks_config", "socks_dropin", "env", "marker", "socks_start"),
+}
+
+StepFn = Callable[[Ctx, Plan, "Journal", dict[str, str]], None]
+STEP_FUNCS: Mapping[str, StepFn] = {
+    "nginx_pkg": lambda c, p, j, g: step_nginx_pkg(c, p, j),
+    "nginx_start": lambda c, p, j, g: step_nginx_start(c, p, j),
+    "cert": lambda c, p, j, g: step_cert(c, p, j),
+    "nginx_site": lambda c, p, j, g: step_nginx_site(c, p, j),
+    "xray_bin": lambda c, p, j, g: step_xray_bin(c, p, j),
+    "xray_units": lambda c, p, j, g: step_xray_units(c, p, j),
+    "xray_logs": lambda c, p, j, g: step_xray_logs(c, p, j),
+    "xray_config": step_xray_config,
+    "env": step_env,
+    "xray_start": lambda c, p, j, g: step_xray_start(c, p, j),
+    "marker": lambda c, p, j, g: step_marker(c, p, j),
+    "users": lambda c, p, j, g: step_users(c, p, j),
+    "hy2_bin": lambda c, p, j, g: step_hy2_bin(c, p, j),
+    "hy2_units": lambda c, p, j, g: step_hy2_units(c, p, j),
+    "hy2_config": step_hy2_config,
+    "hy2_start": lambda c, p, j, g: step_hy2_start(c, p, j),
+    "hy2_cert": lambda c, p, j, g: step_hy2_cert(c, p, j),
+    "warp": lambda c, p, j, g: step_warp(c, p, j),
+    "socks_pkg": lambda c, p, j, g: step_socks_pkg(c, p, j),
+    "socks_config": lambda c, p, j, g: step_socks_config(c, p, j),
+    "socks_dropin": lambda c, p, j, g: step_socks_dropin(c, p, j),
+    "socks_start": lambda c, p, j, g: step_socks_start(c, p, j),
+}
 
 
 @contextlib.contextmanager
@@ -1543,26 +2097,13 @@ def cmd_apply(ctx: Ctx, proto: str, expect: str, domain: str | None, progress: C
         journal.start(proto, plan, archive)
         generated: dict[str, str] = {}
         current = "backup"
-        handlers: dict[str, Callable[[], None]] = {
-            "nginx_pkg": lambda: step_nginx_pkg(ctx, plan, journal),
-            "nginx_start": lambda: step_nginx_start(ctx, plan, journal),
-            "cert": lambda: step_cert(ctx, plan, journal),
-            "nginx_site": lambda: step_nginx_site(ctx, plan, journal),
-            "xray_bin": lambda: step_xray_bin(ctx, plan, journal),
-            "xray_units": lambda: step_xray_units(ctx, plan, journal),
-            "xray_config": lambda: step_xray_config(ctx, plan, journal, generated),
-            "xray_logs": lambda: step_xray_logs(ctx, plan, journal),
-            "env": lambda: step_env(ctx, plan, journal, generated),
-            "xray_start": lambda: step_xray_start(ctx, plan, journal),
-            "marker": lambda: step_marker(ctx, plan, journal),
-        }
         try:
-            for current in STEPS:
+            for current in PROTO_STEPS[proto]:
                 if not plan.acts(current):
                     progress(current, "skip")
                     continue
                 progress(current, "run")
-                handlers[current]()
+                STEP_FUNCS[current](ctx, plan, journal, generated)
                 progress(current, "ok")
         except (StepFailed, Cannot, Refused, OSError, ValueError) as exc:
             step = exc.step if isinstance(exc, StepFailed) else current
@@ -1605,6 +2146,12 @@ def restore_from_archive(ctx: Ctx, archive: str, rel: str) -> None:
                     os.chown(dst, m.uid, m.gid)
 
 
+def _ids(user: str, group: str) -> tuple[int, int]:
+    uid = int(user) if user.isdigit() else pwd.getpwnam(user).pw_uid
+    gid = int(group) if group.isdigit() else grp.getgrnam(group).gr_gid
+    return uid, gid
+
+
 def rollback_journal(ctx: Ctx, journal: Journal) -> list[str]:
     data = journal.data or journal.load()
     errors: list[str] = []
@@ -1642,6 +2189,26 @@ def rollback_journal(ctx: Ctx, journal: Journal) -> list[str]:
                     run(ctx, ["systemctl", "stop", "--", unit])
                 if entry.get("was_enabled") not in ("enabled", "enabled-runtime"):
                     run(ctx, ["systemctl", "disable", "--", unit])
+            elif kind == "user_created":
+                name = str(entry["name"])
+                if user_exists(ctx, name):
+                    rc, _ = run(ctx, ["userdel", name])
+                    if rc != 0:
+                        errors.append(f"userdel {name}: exit {rc}")
+                group = str(entry.get("group") or "")
+                if group and group_exists(ctx, group):
+                    run(ctx, ["groupdel", group])
+            elif kind == "db_owner":
+                path = ctx.host(str(entry["path"]))
+                owner = str(entry.get("owner") or "")
+                if owner and path.exists():
+                    user, _, group = owner.partition(":")
+                    for f in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+                        if f.exists():
+                            if SELFTEST:
+                                set_owner(ctx, f, user, group)
+                            else:
+                                os.chown(f, *_ids(user, group))
             elif kind == "installed":
                 pkgs = [p for p in entry.get("packages", []) if re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", p)]
                 if pkgs:
@@ -1686,22 +2253,56 @@ def listening(found: set[str], addr: str) -> bool:
     return False
 
 
-def verify(ctx: Ctx, proto: str, wanted_domain: str | None) -> dict[str, Any]:
-    checks: list[dict[str, Any]] = []
+class Checks:
+    def __init__(self) -> None:
+        self.items: list[dict[str, Any]] = []
 
-    def check(key: str, ok: bool, text: str) -> None:
-        checks.append({"key": key, "ok": ok, "text": text})
+    def __call__(self, key: str, ok: bool, text: str) -> None:
+        self.items.append({"key": key, "ok": ok, "text": text})
 
+
+def udp_listeners(ctx: Ctx) -> set[str]:
+    rc, out = run(ctx, ["ss", "-Hlun"])
+    found = set()
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 4:
+                found.add(parts[3])
+    return found
+
+
+def verify_selfsteal(ctx: Ctx, check: Checks, domain: str) -> None:
+    """nginx serves the domain on 127.0.0.1:8443: its certificate, TLS 1.3, ALPN h2, 200."""
+    active = unit_active(ctx, NGINX_UNIT)
+    check(f"unit:{NGINX_UNIT}", active, f"{NGINX_UNIT} {'active' if active else 'NOT active'}")
+    ok = listening(listeners(ctx), SELFSTEAL_LISTEN)
+    check(f"listen:{SELFSTEAL_LISTEN}", ok, f"nginx self-steal listens on {SELFSTEAL_LISTEN}" if ok
+          else f"nothing listens on {SELFSTEAL_LISTEN} (nginx self-steal)")
+    rc, out = run(ctx, ["openssl", "s_client", "-connect", SELFSTEAL_LISTEN, "-servername", domain, "-alpn", "h2",
+                        "-verify_hostname", domain, "-verify_return_error", "-brief"], timeout=30, stdin="")
+    tls13 = "TLSv1.3" in out
+    alpn = bool(re.search(r"ALPN protocol:\s*h2\b", out))
+    verified = rc == 0 and ("Verification: OK" in out or "Verify return code: 0" in out)
+    check("tls", tls13 and alpn and verified,
+          f"127.0.0.1:8443 SNI {domain}: " + ", ".join([
+              "certificate of the domain" if verified else "certificate NOT verified for the domain",
+              "TLSv1.3" if tls13 else "not TLSv1.3", "ALPN h2" if alpn else "no ALPN h2"]))
+    rc, out = run(ctx, ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--http2", "--max-time", "15",
+                        "--resolve", f"{domain}:8443:127.0.0.1", f"https://{domain}:8443/"], timeout=30)
+    code = out.strip().splitlines()[-1] if out.strip() else ""
+    check("http", rc == 0 and code == "200", f"GET https://{domain}:8443/ → {code or 'no answer'}")
+
+
+def verify_xray(ctx: Ctx, check: Checks, domain: str) -> None:
     env = ctx.env()
-    domain = wanted_domain or env.get("XRAY_SNI") or ""
     rc, out = run(ctx, [xray_exe(ctx), "run", "-test", "-config", str(ctx.host(XRAY_CONFIG))])
     check("xray_config", rc == 0, "xray run -test: ok" if rc == 0 else f"xray run -test: exit {rc} {out.strip()[-200:]}")
-    for unit in (XRAY_UNIT, NGINX_UNIT):
-        active = unit_active(ctx, unit)
-        check(f"unit:{unit}", active, f"{unit} {'active' if active else 'NOT active'}")
+    active = unit_active(ctx, XRAY_UNIT)
+    check(f"unit:{XRAY_UNIT}", active, f"{XRAY_UNIT} {'active' if active else 'NOT active'}")
     found = listeners(ctx)
     for addr, who in ((f"0.0.0.0:{XRAY_PUBLIC_PORT}", "xray vless-in"), (XRAY_API, "xray api"),
-                      (f"127.0.0.1:{XRAY_XHTTP_LOOPBACK_PORT}", "xray xhttp"), (SELFSTEAL_LISTEN, "nginx self-steal")):
+                      (f"127.0.0.1:{XRAY_XHTTP_LOOPBACK_PORT}", "xray xhttp")):
         ok = listening(found, addr)
         check(f"listen:{addr}", ok, f"{who} listens on {addr}" if ok else f"nothing listens on {addr} ({who})")
     try:
@@ -1726,21 +2327,64 @@ def verify(ctx: Ctx, proto: str, wanted_domain: str | None) -> dict[str, Any]:
         check("public_key", bool(pub) and derived == pub,
               "XRAY_REALITY_PUBLIC_KEY is the public half of the REALITY key" if derived == pub and pub
               else "XRAY_REALITY_PUBLIC_KEY does NOT match the REALITY private key")
-    rc, out = run(ctx, ["openssl", "s_client", "-connect", SELFSTEAL_LISTEN, "-servername", domain, "-alpn", "h2",
-                        "-verify_hostname", domain, "-verify_return_error", "-brief"], timeout=30, stdin="")
-    tls13 = "TLSv1.3" in out
-    alpn = bool(re.search(r"ALPN protocol:\s*h2\b", out))
-    verified = rc == 0 and ("Verification: OK" in out or "Verify return code: 0" in out)
-    check("tls", tls13 and alpn and verified,
-          f"127.0.0.1:8443 SNI {domain}: " + ", ".join([
-              "certificate of the domain" if verified else "certificate NOT verified for the domain",
-              "TLSv1.3" if tls13 else "not TLSv1.3", "ALPN h2" if alpn else "no ALPN h2"]))
-    rc, out = run(ctx, ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--http2", "--max-time", "15",
-                        "--resolve", f"{domain}:8443:127.0.0.1", f"https://{domain}:8443/"], timeout=30)
+    verify_selfsteal(ctx, check, domain)
+
+
+def verify_hysteria2(ctx: Ctx, check: Checks, domain: str) -> None:
+    for unit in (HY2_UNIT, HY2_AUTH_UNIT):
+        active = unit_active(ctx, unit)
+        check(f"unit:{unit}", active, f"{unit} {'active' if active else 'NOT active'}")
+    udp = udp_listeners(ctx)
+    ok = any(a in udp for a in (f"*:{HY2_PUBLIC_PORT}", f"0.0.0.0:{HY2_PUBLIC_PORT}", f"[::]:{HY2_PUBLIC_PORT}"))
+    check(f"listen:udp/{HY2_PUBLIC_PORT}", ok, f"hysteria listens on UDP :{HY2_PUBLIC_PORT}" if ok
+          else f"nothing listens on UDP :{HY2_PUBLIC_PORT}")
+    found = listeners(ctx)
+    for addr, who in ((HY2_AUTH_LISTEN, "vpnbot-hy2-auth"), (HY2_STATS_LISTEN, "hysteria trafficStats")):
+        ok = listening(found, addr)
+        check(f"listen:{addr}", ok, f"{who} listens on {addr}" if ok else f"nothing listens on {addr} ({who})")
+    rc, out = run(ctx, ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10",
+                        f"http://{HY2_AUTH_LISTEN}/healthz"], timeout=20)
     code = out.strip().splitlines()[-1] if out.strip() else ""
-    check("http", rc == 0 and code == "200", f"GET https://{domain}:8443/ → {code or 'no answer'}")
-    ok = all(c["ok"] for c in checks)
-    return {"ok": ok, "protocol": proto, "domain": domain, "checks": checks}
+    check("auth_health", rc == 0 and code == "200",
+          f"vpnbot-hy2-auth /healthz → {code or 'no answer'}" + ("" if code == "200" else " (vpn.db not readable?)"))
+    try:
+        st = cert_status(ctx)
+        reader = next((c for c in st.get("consumers", []) if c.get("name") == "hysteria"), {})
+        in_sync = bool(reader.get("installed")) and reader.get("in_sync") is True
+    except Cannot:
+        in_sync = False
+    check("cert:hysteria", in_sync, f"{HY2_CERT} holds the bot's certificate" if in_sync
+          else f"{HY2_CERT} is not the registry's pair (vpn-bot-cert status)")
+    if warp_deployed(ctx):
+        active = unit_active(ctx, HY2_MARK_UNIT)
+        check(f"unit:{HY2_MARK_UNIT}", active, f"{HY2_MARK_UNIT} {'active' if active else 'NOT active'} (WARP is deployed)")
+    verify_selfsteal(ctx, check, domain)
+
+
+def verify_socks5(ctx: Ctx, check: Checks) -> None:
+    port = ctx.env().get("SOCKS5_PORT", "31337") or "31337"
+    rc, out = run(ctx, ["danted" if SELFTEST else SOCKS_BIN, "-V", "-f", str(ctx.host(SOCKS_CONF))])
+    check("socks_config", rc == 0, "danted -V: ok" if rc == 0 else f"danted -V: exit {rc} {out.strip()[-200:]}")
+    active = unit_active(ctx, SOCKS_UNIT)
+    check(f"unit:{SOCKS_UNIT}", active, f"{SOCKS_UNIT} {'active' if active else 'NOT active'}")
+    ok = listening(listeners(ctx), f"0.0.0.0:{port}")
+    check(f"listen:{port}", ok, f"danted listens on :{port}" if ok else f"nothing listens on TCP :{port}")
+
+
+def verify(ctx: Ctx, proto: str, wanted_domain: str | None) -> dict[str, Any]:
+    env = ctx.env()
+    check = Checks()
+    if proto == "xray":
+        domain = wanted_domain or env.get("XRAY_SNI") or ""
+        verify_xray(ctx, check, domain)
+    elif proto == "hysteria2":
+        domain = wanted_domain or env.get("HYSTERIA2_SNI") or ""
+        verify_hysteria2(ctx, check, domain)
+    else:
+        domain = wanted_domain or env.get("SOCKS5_HOST") or ""
+        verify_socks5(ctx, check)
+    ok = all(c["ok"] for c in check.items)
+    return {"ok": ok, "protocol": proto, "domain": domain, "checks": check.items}
 
 
 # --------------------------------------------------------------------------- #
@@ -1763,6 +2407,10 @@ def installed_probes(proto: str) -> tuple[str, ...]:
     """The paths whose presence means "installed" (services/protocol_install.py: the same)."""
     if proto == "xray":
         return (XRAY_BIN, f"{UNIT_DIR}/{XRAY_UNIT}", XRAY_CONFIG)
+    if proto == "hysteria2":
+        return (HY2_BIN, f"{UNIT_DIR}/{HY2_UNIT}", HY2_CONFIG)
+    if proto == "socks5":
+        return (SOCKS_BIN, SOCKS_CONF)
     return ()
 
 

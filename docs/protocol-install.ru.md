@@ -9,9 +9,9 @@
 
 🇬🇧 English version: [protocol-install.md](protocol-install.md)
 
-Что ставит этот релиз: **Xray (VLESS + REALITY) с self-steal на nginx**. Hysteria2, SOCKS5,
-оркестровка WARP и переустановка протокола, удалённого с сервера, — следующие шаги; место для
-них в манифесте helper'а уже есть.
+Что ставит бот: **Xray (VLESS + REALITY) с self-steal на nginx**, **Hysteria2** и **SOCKS5
+(Dante)** — каждый с учётом WARP, если он развёрнут, — и **переустанавливает** протокол, удалённый
+с сервера (ниже). AmneziaWG и MTProto из бота не ставятся.
 
 ## Перед началом
 
@@ -64,6 +64,8 @@ stdlib; каждая команда — список argv; при запуске
 | Протокол | Свой (удаление его убирает) | Общий (не удаляется) | `.env` |
 |---|---|---|---|
 | Xray | `xray.service` (включён, запущен), `xray@.service`, `/etc/systemd/system/xray{,@}.service{,.d}`, `/usr/local/bin/xray`, `/usr/local/share/xray`, `/usr/local/etc/xray`, `/var/log/xray` | пользователь `nobody`; nginx (пакет, `/etc/nginx/conf.d/selfsteal.conf`, `/var/www/selfsteal`); реестр сертификата `/etc/vpn-bot/tls`; `/etc/logrotate.d/xray` (deploy.sh) | `XRAY_PUBLIC_HOST`, `XRAY_SNI`, `XRAY_REALITY_PUBLIC_KEY`, `XRAY_SHORT_ID`, `XRAY_INBOUND_TAG`, `XRAY_STATS_SERVER`, `XRAY_XHTTP_ENABLED`, `XRAY_XHTTP_INBOUND_TAG` — настройки, после удаления инертны (маркер), поэтому удаление их оставляет |
+| Hysteria2 | `hysteria-server.service` (включён; стартует при раскладке сертификата), `hysteria-server@.service`, `vpnbot-hy2-auth.service` (включён, запущен), `vpnbot-hy2-warp-mark.service` и `/usr/local/sbin/vpnbot-hy2-warp-mark` (только если развёрнут WARP), их файлы юнитов, `/usr/local/bin/hysteria`, `/etc/hysteria`; пользователь `hysteria` (uid 992 — `HYUID`, по которому метит `vpnbot-hy2-warp-mark`; другой uid — только без WARP) | nginx и сайт-приманка (masquerade проксирует на `https://127.0.0.1:8443`); `/etc/vpn-bot/tls`; пользователь `vpn-bot` (от него работает `vpnbot-hy2-auth`; создаётся как в `deploy/create-vpn-bot-user.sh`, если его нет, затем `vpn-bot-db-perms` отдаёт ему `vpn.db`) | `HYSTERIA2_ENABLED=true` (у удаления — `=false`); `HYSTERIA2_HOST`, `HYSTERIA2_SNI`, `HYSTERIA2_STATS_SECRET` (новый, 48 hex) |
+| SOCKS5 | `danted.service` (из пакета; включён, перезапущен), `/etc/systemd/system/danted.service.d` (`vpn-bot-warp.conf` = `deploy/danted-warp.conf`, байты записи deploy.sh с `gate=SOCKS5`), пакет `dante-server` | `/etc/danted.conf` — conffile пакета, пишется из `deploy/danted.conf.example` (порт `SOCKS5_PORT`, `external:` — адрес туннеля WARP при включённом `WARP_PROXY_EGRESS`, иначе WAN-интерфейс маршрута по умолчанию); `apt-get purge` его удаляет | `SOCKS5_ENABLED=true` (у удаления — `=false`); `SOCKS5_HOST` |
 
 Маркер удаления `/etc/vpn-bot/uninstalled/<proto>`, который удаление пишет последним,
 установка снимает **последним** шагом (переустановка).
@@ -111,9 +113,55 @@ helper, и сравнивает байты.
   <домен>`: сертификат домена проверяется, TLS 1.3, ALPN h2;
 * `curl --http2 --resolve <домен>:8443:127.0.0.1 https://<домен>:8443/` → 200.
 
+
+### Hysteria2 и SOCKS5 по шагам
+
+**Hysteria2** — `nginx_pkg`, `nginx_start`, `cert`, `nginx_site` (self-steal, как у Xray: на него
+проксирует masquerade), затем:
+
+| Шаг | Что | Откат |
+|---|---|---|
+| `users` | `vpn-bot`, если его нет (системный пользователь и группа, `/var/lib/vpn-bot`, nologin; `vpn-bot-db-perms` отдаёт ему `vpn.db` — его читает `vpnbot-hy2-auth`); `hysteria` с uid 992, без home, nologin | `userdel` / `groupdel` созданного этим прогоном; владелец `vpn.db` возвращается |
+| `hy2_bin` | официальный релиз **закреплённой** версии (`HY2_VERSION`, `hysteria-linux-amd64` / `-arm64`): sha256 закреплён в helper'е **и** совпадает со строкой `hashes.txt` релиза | удаляется |
+| `hy2_units` | `deploy/hysteria/hysteria-server{,@}.service`, `deploy/vpnbot-hy2-auth.service` (байт в байт то, что ставит deploy.sh при включённом Hysteria2); при развёрнутом WARP ещё `deploy/vpnbot-hy2-warp-mark.service` и `scripts/vpnbot-hy2-warp-mark`; `daemon-reload` | удаляются |
+| `hy2_config` | `/etc/hysteria/config.yaml` = `deploy/hysteria/config.yaml` с новым `trafficStats.secret` (та же единственная подстановка, что делает `deploy/hysteria/install-config.sh`), `hysteria:hysteria 0600`. `.env` должен совпадать со значениями файла (`HYSTERIA2_PORT=443`, auth `127.0.0.1:8444`, stats `127.0.0.1:9999`): проверка дрейфа деплоя сравнивает каждый ключ файла | удаляется |
+| `env` | `HYSTERIA2_ENABLED=true`, `HYSTERIA2_HOST`, `HYSTERIA2_SNI`, `HYSTERIA2_STATS_SECRET` | `.env` из бэкапа |
+| `marker` | `/etc/vpn-bot/uninstalled/hysteria2` снимается — **до** сертификата: `vpn-bot-cert` ничего не раскладывает потребителю, у которого есть маркер удаления | маркер возвращается |
+| `hy2_start` | `vpnbot-hy2-auth` включён и запущен, `hysteria-server` включён | stop / disable |
+| `hy2_cert` | `vpn-bot-cert deploy`: пара в `/etc/hysteria/{cert,key}.pem` (потребитель `hysteria`), его действие перезапускает `hysteria-server` — после этого он должен быть активен | файлы уходят вместе с `/etc/hysteria`; юнит останавливается |
+| `warp` | при развёрнутом WARP: `vpnbot-hy2-warp-mark` включён и запущен (его `apply`: пакеты hysteria по uid идут по таблице политик WARP) | stop / disable (его `ExecStop` снимает метки) |
+
+Verify: оба юнита активны, слушают UDP `:443`, `127.0.0.1:8444` и `127.0.0.1:9999`, `/healthz`
+`vpnbot-hy2-auth` отвечает 200 (он читает `vpn.db`), `vpn-bot-cert status` подтверждает пару бота у
+потребителя `hysteria`, юнит меток активен при развёрнутом WARP, плюс проверки self-steal.
+
+**SOCKS5** — `socks_pkg` (`apt-get install dante-server`, удерживается `policy-rc.d`; при откате —
+purge), `socks_config` (`/etc/danted.conf` из `deploy/danted.conf.example`, проверка `danted -V`;
+собственный файл оператора остаётся), `socks_dropin`, `env`, `marker`, `socks_start` (`enable`,
+`restart`, active). Verify: `danted -V`, юнит активен, слушает `SOCKS5_PORT`.
+
+### WARP
+
+Протоколы **следуют** за WARP, но не настраивают его. WARP развёрнут, если на хосте есть его
+конфиг AmneziaWG (`WARP_CONFIG_PATH`, его кладёт `vpn-bot-warp-install` из панели WARP бота); им
+владеют его helper'ы (`vpn-bot-warp-install` / `-iface` / `-routes` / `-split`, `warp-failsafe`) —
+ни один не дублируется и не перезапускается здесь. Что делает установка, если WARP есть: у Xray
+freedom outbound получает `sendThrough` = адрес туннеля при включённом `WARP_PROXY_EGRESS`
+(правило бота); у danted `external:` — этот адрес, а drop-in ставит его после
+`awg-quick@out-warp` / `warp-routes`; у Hysteria2 — `vpnbot-hy2-warp-mark` (существующий helper),
+включён и запущен, а его пользователь обязан иметь uid 992 (иначе план отказывает).
+
+### Переустановка
+
+Протокол, удалённый `vpn-bot-protocol-uninstall` (его маркер), показывает в «⚙️ Модули
+протоколов» **♻️ Переустановить** вместо запертого «Включить»; нажатие «Включить» объясняет это и
+предлагает то же. Это тот же прогон `protocol`: в плане `marker: remove`, маркер снимается
+последним шагом установки (у Hysteria2 — до сертификата, см. выше), а после отчёта бот снова
+включает модуль (`enable_protocol` — он же сводит файрвол).
+
 ## Режим мастера `protocol`
 
-`scripts/wizard/vpn-bot-wizard-protocol`, параметры `proto` (`xray`) и `domain` (одно
+`scripts/wizard/vpn-bot-wizard-protocol`, параметры `proto` (`xray`, `hysteria2`, `socks5`) и `domain` (одно
 DNS-имя, которое покрывает сертификат; пусто — имя самого сертификата). Запускается из
 «⚙️ Модули протоколов», а не из меню мастера. Опасный: TOTP перед планом и перед apply.
 

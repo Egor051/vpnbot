@@ -1004,6 +1004,7 @@ async def _build_app(
         registry=uninstall_registry,
         firewall=ufw_applier,
         root=Path("/"),
+        modules=protocol_modules_service,
     )
 
     services = Services(

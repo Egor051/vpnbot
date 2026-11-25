@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Hysteria2 and SOCKS5 are installed from the bot too; a removed protocol is reinstalled**
+  (docs/protocol-install.md). `vpn-bot-protocol-install` gains `hysteria2` and `socks5`, their manifests
+  owned-for-owned with the uninstall's (the symmetry test and install → the real uninstall → install run
+  for all three). Hysteria2: the pinned official release (`app/v2.8.2`, sha256 pinned per architecture
+  AND equal to the release's `hashes.txt`), user `hysteria` with uid 992 (the `HYUID` of
+  `vpnbot-hy2-warp-mark`; another uid only without WARP), user `vpn-bot` when missing (`vpnbot-hy2-auth`
+  runs as it; `vpn-bot-db-perms` hands `vpn.db` to it), the units from `deploy/hysteria/` and
+  `deploy/vpnbot-hy2-auth.service`, `config.yaml` = the tracked file with a new stats secret
+  (`hysteria:hysteria 0600`), the self-steal for its masquerade, the pair laid out by `vpn-bot-cert`
+  (the marker goes before it: the cert helper skips a reader whose module is removed). SOCKS5:
+  `dante-server` held by `policy-rc.d`, `/etc/danted.conf` from `deploy/danted.conf.example` (`danted
+  -V`), the WARP ordering drop-in. WARP is followed, never set up: Xray's `sendThrough` and danted's
+  `external:` take the tunnel address under `WARP_PROXY_EGRESS`, Hysteria2 gets `vpnbot-hy2-warp-mark`
+  enabled. A protocol with an uninstall marker shows **♻️ Переустановить**; «Включить» on it offers the
+  same run, and after it the bot switches the module back on (which converges the firewall).
+
 - **A protocol is installed from the bot** (docs/protocol-install.md). After `install.sh` the bot has no
   protocol; «⚙️ Модули протоколов» now shows one the bot can install and that is not on the server as
   «📦 <protocol>» with **📦 Установить**: a run of the new wizard mode `protocol`

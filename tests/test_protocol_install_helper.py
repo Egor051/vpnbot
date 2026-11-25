@@ -337,11 +337,13 @@ async def _noop(**_: Any) -> None:
 # --------------------------------------------------------------------------- #
 # Rollback: a failure at ANY step puts the host back
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("step", PI.STEPS)
-def test_a_failure_after_each_step_rolls_the_host_back(host: InstallHost, step: str) -> None:
-    host.marker()  # a reinstall: the marker step acts too
+@pytest.mark.parametrize(("proto", "step"), [(p, s) for p in PI.PROTOCOLS for s in PI.PROTO_STEPS[p]])
+def test_a_failure_after_each_step_rolls_the_host_back(host: InstallHost, proto: str, step: str) -> None:
+    host.marker(proto)  # a reinstall: the marker step acts too
+    if proto == "hysteria2":
+        host.warp()  # WARP deployed: the warp step acts too
     before = host.snapshot()
-    rc, res = host.install(VPN_BOT_PROTOCOL_INSTALL_SELFTEST_FAIL=step)
+    rc, res = host.install(proto, VPN_BOT_PROTOCOL_INSTALL_SELFTEST_FAIL=step)
     assert rc == EXIT_ROLLED_BACK, res
     assert res["failed_step"] == step and res["rolled_back"] and not res["rollback_errors"]
     after = host.snapshot(skip=("/etc/vpn-bot/tls",))
@@ -350,8 +352,9 @@ def test_a_failure_after_each_step_rolls_the_host_back(host: InstallHost, step: 
     # The certificate's pair laid out to nginx is the registry's (shared): it may stay.
     tls = sorted(p for p in host.snapshot()["files"] if p.startswith("/etc/vpn-bot/tls"))
     assert tls in ([], ["/etc/vpn-bot/tls", "/etc/vpn-bot/tls/fullchain.pem", "/etc/vpn-bot/tls/privkey.pem"])
-    journal = json.loads(host.file("/var/lib/vpn-bot-protocol-install/xray.journal.json").read_text())
+    journal = json.loads(host.file(f"/var/lib/vpn-bot-protocol-install/{proto}.journal.json").read_text())
     assert journal["state"] == "rolled_back"
+    assert host.file(f"/etc/vpn-bot/uninstalled/{proto}").is_file(), "the marker is back"
 
 
 def host_without(snap: dict[str, Any], prefix: str) -> dict[str, Any]:
@@ -412,6 +415,102 @@ def test_a_committed_install_is_not_rolled_back(host: InstallHost) -> None:
 # --------------------------------------------------------------------------- #
 # Reinstall after an uninstall (the REAL uninstall helper)
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("proto", ["hysteria2", "socks5"])
+def test_reinstall_after_uninstall_of_hysteria2_and_socks5(host: InstallHost, proto: str) -> None:
+    rc, res = host.install(proto)
+    assert rc == 0, res
+    assert host.helper("verify", proto, "--json").returncode == 0
+    assert host.helper("commit", proto, "--json").returncode == 0
+    plan = json.loads(host.uninstall("plan", proto).stdout.strip().splitlines()[-1])
+    assert plan["state"] == "installed" and not plan["blocking"], plan["blocking"]
+    man = PI.MANIFESTS[proto]
+    removed = {f["path"] for f in plan["files"] if f["state"] == "delete"}
+    present_owned = {p for p in (*man.unit_files, *man.paths) if host.file(p).exists()}
+    assert removed == present_owned, "the uninstall removes exactly what the install laid out"
+    assert {k["name"] for k in plan["packages"] if k["state"] == "purge"} == set(man.packages)
+    assert {u["name"] for u in plan["users"] if u["state"] == "delete"} == set(man.users)
+    proc = host.uninstall("apply", proto, plan["sha256"])
+    assert proc.returncode == 0, proc.stdout[-1500:] + proc.stderr[-1500:]
+    assert host.env_values()[man.env_flag] == "false"
+    assert json.loads(host.helper("status", "--json").stdout)["protocols"][proto]["state"] == "uninstalled"
+    plan2 = host.plan(proto)
+    assert any(c["step"] == "marker" and c["action"] == "remove" for c in plan2["changes"])
+    rc, res = host.install(proto)
+    assert rc == 0, res
+    assert not host.file(f"/etc/vpn-bot/uninstalled/{proto}").exists()
+    assert host.env_values()[man.env_flag] == "true"
+    assert host.helper("verify", proto, "--json").returncode == 0
+
+
+def test_hysteria2_lays_out_the_production_layout(host: InstallHost) -> None:
+    rc, res = host.install("hysteria2")
+    assert rc == 0, res
+    passwd = host.file("/etc/passwd").read_text()
+    assert "hysteria:x:992:" in passwd, "the uid vpnbot-hy2-warp-mark tags"
+    assert "\nvpn-bot:x:" in passwd, "the bot's user for vpnbot-hy2-auth"
+    assert host.owners()["/opt/vpn-service/data/vpn.db"] == "vpn-bot:vpn-bot", "vpn-bot-db-perms ran"
+    conf = host.file(PI.HY2_CONFIG).read_text()
+    secret = host.env_values()["HYSTERIA2_STATS_SECRET"]
+    assert f'secret: "{secret}"' in conf and "<random-secret>" not in conf
+    assert host.file(PI.HY2_CONFIG).stat().st_mode & 0o777 == 0o600 and host.owners()[PI.HY2_CONFIG] == "hysteria:hysteria"
+    assert secret not in host.file("/var/log/vpn-bot-protocol-install.log").read_text()
+    assert host.file(f"/etc/systemd/system/{PI.HY2_AUTH_UNIT}").read_bytes() == (ROOT / "deploy/vpnbot-hy2-auth.service").read_bytes()
+    assert not host.file(PI.HY2_MARK_HELPER).exists(), "no WARP here: no mark helper"
+    units = host.units()
+    assert units["hysteria-server.service"]["active"] == "active" and units["vpnbot-hy2-auth.service"]["active"] == "active"
+    # The repo config is what deploy/backend-config-sync.py compares: only the secret differs.
+    assert conf.replace(f'secret: "{secret}"', 'secret: "<random-secret>"') == (ROOT / "deploy/hysteria/config.yaml").read_text()
+
+
+def test_hysteria2_with_warp_marks_its_traffic(host: InstallHost) -> None:
+    host.warp()
+    rc, res = host.install("hysteria2")
+    assert rc == 0, res
+    assert host.file(PI.HY2_MARK_HELPER).read_bytes() == (ROOT / "scripts/vpnbot-hy2-warp-mark").read_bytes()
+    assert host.file(PI.HY2_MARK_HELPER).stat().st_mode & 0o777 == 0o755
+    assert host.units()[PI.HY2_MARK_UNIT] == {"active": "active", "enabled": "enabled"}
+    checks = host.json_of(host.helper("verify", "hysteria2", "--json"))["checks"]
+    assert any(c["key"] == f"unit:{PI.HY2_MARK_UNIT}" and c["ok"] for c in checks)
+
+
+def test_hysteria_uid_taken_with_warp_blocks(host: InstallHost) -> None:
+    host.warp()
+    host.file("/etc/passwd").write_text(host.file("/etc/passwd").read_text() + "someone:x:992:992::/:/bin/false\n")
+    assert any("uid 992 is taken" in b for b in host.plan("hysteria2")["blocking"])
+
+
+def test_hysteria_release_must_match_its_hashes(host: InstallHost) -> None:
+    host.hy2_release(sums_sha="1" * 64)
+    rc, res = host.install("hysteria2")
+    assert rc == EXIT_ROLLED_BACK and res["failed_step"] == "hy2_bin" and "hashes.txt" in res["detail"]
+
+
+def test_socks5_with_warp_egress_leaves_from_the_tunnel(host: InstallHost) -> None:
+    host.warp()
+    env = host.file("/opt/vpn-service/.env")
+    env.write_text(env.read_text() + "WARP_PROXY_EGRESS_ENABLED=true\n")
+    rc, res = host.install("socks5")
+    assert rc == 0, res
+    conf = host.file(PI.SOCKS_CONF).read_text()
+    assert "\nexternal: 172.16.0.2\n" in conf and "internal: 0.0.0.0 port = 31337" in conf
+    assert host.file(PI.SOCKS_DROPIN).read_bytes() == (ROOT / "deploy/danted-warp.conf").read_bytes()
+    assert (host.st / "policy_rc_d_at_install").read_text() == "held"
+
+
+def test_socks5_without_warp_leaves_from_the_wan(host: InstallHost) -> None:
+    rc, res = host.install("socks5")
+    assert rc == 0, res
+    assert "\nexternal: eth0\n" in host.file(PI.SOCKS_CONF).read_text()
+
+
+def test_an_operators_danted_conf_is_kept(host: InstallHost) -> None:
+    assert host.install("socks5")[0] == 0
+    host.file(PI.SOCKS_CONF).write_text("# mine\n")
+    plan = host.plan("socks5")
+    assert any(c["target"] == PI.SOCKS_CONF and c["action"] == "keep" for c in plan["changes"])
+    assert any("not this installer's" in w for w in plan["warnings"])
+
+
 def test_reinstall_after_uninstall(host: InstallHost) -> None:
     assert host.install()[0] == 0
     assert host.helper("commit", "xray", "--json").returncode == 0
@@ -517,3 +616,19 @@ def test_the_helper_refuses_a_real_tool_under_the_seam(host: InstallHost) -> Non
     rc, res = host.install()
     assert rc == EXIT_ROLLED_BACK and res["failed_step"] == "nginx_pkg"
     assert "nginx" not in host.packages()
+
+
+def test_the_wizard_mode_shows_the_helpers_steps() -> None:
+    """scripts/wizard/vpn-bot-wizard-protocol lists each protocol's steps (⚪ before apply):
+    the very steps, in the very order, the helper runs — and every step has its label."""
+    import ast
+
+    from i18n import en, ru
+
+    tree = ast.parse((ROOT / "scripts" / "wizard" / "vpn-bot-wizard-protocol").read_text(encoding="utf-8"))
+    node = next(n for n in tree.body if isinstance(n, ast.Assign) and any(
+        isinstance(t, ast.Name) and t.id == "STEPS" for t in n.targets))
+    assert ast.literal_eval(node.value) == {p: tuple(s) for p, s in PI.PROTO_STEPS.items()}
+    for steps in PI.PROTO_STEPS.values():
+        for step in steps:
+            assert f"install_step_{step}" in ru.STRINGS and f"install_step_{step}" in en.STRINGS, step

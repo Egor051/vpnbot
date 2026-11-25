@@ -37,12 +37,20 @@ INSTALLABLE: tuple[str, ...] = MODES[MODE].params["proto"].choices
 # (vpn-bot-protocol-install installed_probes — tests/test_protocol_install_helper.py).
 HOST_PROBES: Mapping[str, tuple[str, ...]] = {
     "xray": ("/usr/local/bin/xray", "/etc/systemd/system/xray.service", "/usr/local/etc/xray/config.json"),
+    "hysteria2": ("/usr/local/bin/hysteria", "/etc/systemd/system/hysteria-server.service", "/etc/hysteria/config.yaml"),
+    "socks5": ("/usr/sbin/danted", "/etc/danted.conf"),
 }
 HOST_STATES = ("installed", "partial", "absent", "uninstalled", "unknown")
 
 
 class _Registry(Protocol):
     def is_uninstalled(self, name: str) -> bool: ...
+
+
+class _Modules(Protocol):
+    async def is_enabled(self, name: str) -> bool: ...
+
+    async def enable_protocol(self, name: str, actor_id: int) -> object: ...
 
 
 class _Users(Protocol):
@@ -62,11 +70,15 @@ class ProtocolInstallService:
         registry: _Registry,
         firewall: UfwApplier | None = None,
         root: Path | None = None,
+        modules: _Modules | None = None,
     ) -> None:
         self.wizard = wizard
         self.users = users
         self.registry = registry
         self.firewall = firewall
+        # services.protocol_modules.ProtocolModulesService: a reinstall switches the module
+        # back on (the superadmin pressed «Включить» on a removed protocol to get here).
+        self.modules = modules
         # None (every Settings a test builds by hand): nothing on the real host is read,
         # every state is "unknown" and no install is offered.
         self.root = root
@@ -85,10 +97,14 @@ class ProtocolInstallService:
         return "partial" if present else "absent"
 
     def installable(self, name: str) -> bool:
-        """«📦 Установить» is offered: the helper installs it and it is not on the host
-        (all of it, or a part — the helper puts back what is missing and keeps the rest).
-        A protocol removed by an uninstall (its marker) is not offered here."""
-        return name in INSTALLABLE and self.host_state(name) in ("absent", "partial")
+        """«📦 Установить» / «♻️ Переустановить» is offered: the helper installs it and it is
+        not on the host — all of it, a part (the helper puts back what is missing and keeps
+        the rest), or removed by an uninstall (its marker: the same install, the marker goes
+        as its last step)."""
+        return name in INSTALLABLE and self.host_state(name) in ("absent", "partial", "uninstalled")
+
+    def reinstallable(self, name: str) -> bool:
+        return name in INSTALLABLE and self.host_state(name) == "uninstalled"
 
     def missing(self) -> frozenset[str]:
         """Every installable protocol that is not on the host — the panel offers them."""
@@ -106,10 +122,24 @@ class ProtocolInstallService:
         return await self.wizard.start(actor, MODE, {"proto": name, "domain": ""}, chat_id=chat_id, message_id=message_id)
 
     async def after_success(self, run: WizardRun) -> str | None:
-        """The firewall follows the module set (the protocol is back in it): converge."""
+        """A module switched off (a reinstall after an uninstall) is switched on again — that
+        converges the firewall too; otherwise the firewall alone follows the module set (the
+        protocol is in it again): `vpn-bot-ufw-apply apply`."""
+        proto = run.params.get("proto", "?")
+        refresh = getattr(self.registry, "refresh", None)
+        if callable(refresh):
+            refresh()  # the marker the run removed
+        if self.modules is not None and run.started_by is not None and not await self.modules.is_enabled(proto):
+            try:
+                result = await self.modules.enable_protocol(proto, run.started_by)
+            except Exception as exc:  # the report says what is left to do
+                logger.warning("protocol install run %d: enabling %s failed (%s: %s)", run.id, proto,
+                               type(exc).__name__, exc)
+                return f"module {proto}: not switched on ({type(exc).__name__}) — switch it on in «⚙️ Модули протоколов»"
+            summary = getattr(result, "summary", None)
+            return f"module {proto}: switched on" + (f"; UFW: {summary}" if summary else "")
         if self.firewall is None:
             return None
-        proto = run.params.get("proto", "?")
-        result = await self.firewall.apply(f"installing {proto}")
-        prefix = "UFW: " if result.ok else "UFW (failed): "
-        return prefix + result.summary
+        result_fw = await self.firewall.apply(f"installing {proto}")
+        prefix = "UFW: " if result_fw.ok else "UFW (failed): "
+        return prefix + result_fw.summary

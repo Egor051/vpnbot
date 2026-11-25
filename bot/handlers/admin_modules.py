@@ -12,6 +12,7 @@ from bot.keyboards.admin_modules import (
     module_disable_confirm1_keyboard,
     module_disable_confirm2_keyboard,
     module_enable_confirm_keyboard,
+    module_reinstall_keyboard,
     module_uninstall_plan_keyboard,
     modules_panel_keyboard,
 )
@@ -208,8 +209,17 @@ async def admin_module_enable_confirm(callback: CallbackQuery, services: Service
         if name not in PROTOCOL_NAMES:
             return
         if name in _uninstalled(services):
-            # Removed from the host: switching the toggle back would offer a
-            # backend that is not there. Only a reinstall (and the marker gone) helps.
+            # Removed from the host: switching the toggle back would offer a backend
+            # that is not there. Only a reinstall (and the marker gone) helps — offered
+            # here for a protocol the bot installs (the same «protocol» run).
+            install = getattr(services, "protocol_install", None)
+            if install is not None and install.reinstallable(name):
+                await safe_edit_message_text(
+                    callback.message,
+                    t("module_reinstall_offer", label=PROTOCOL_DISPLAY.get(name, name)),
+                    reply_markup=module_reinstall_keyboard(name),
+                )
+                return
             await safe_callback_answer(callback, t("module_enable_blocked_uninstalled"), show_alert=True)
             return
         if name in _env_off(services):

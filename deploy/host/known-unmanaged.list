@@ -20,7 +20,7 @@
 /etc/systemd/system/xray*.service.d/*  # installer — drop-in'ы Xray-install (10-donot_touch_single_conf.conf), обновляются им же
 /usr/local/bin/xray  # installer — бинарник Xray-install, обновляется тем же установщиком (docs/operations.md: переустанавливается)
 
-# --- Hysteria2 (get.hy2.sh) ---------------------------------------------------
+# --- Hysteria2 (get.hy2.sh, or scripts/vpn-bot-protocol-install from deploy/hysteria/) ---
 /etc/systemd/system/hysteria-server*.service  # installer — get.hy2.sh ставит hysteria-server.service и hysteria-server@.service вместе с бинарником
 /etc/systemd/system/hysteria-server*.service.d/*  # installer — drop-in'ы к юнитам get.hy2.sh, живут вместе с установщиком
 /usr/local/bin/hysteria  # installer — бинарник get.hy2.sh, обновляется тем же установщиком
