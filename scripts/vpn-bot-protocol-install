@@ -1177,6 +1177,13 @@ def backup(ctx: Ctx, proto: str, plan: Plan) -> str:
     targets = sorted({ENV_FILE, NGINX_SITE_CONF, NGINX_DEFAULT_SITE, POLICY_RC_D, f"{MARKER_DIR}/{proto}",
                       *MANIFESTS[proto].unit_files, *MANIFESTS[proto].paths})
     members: list[str] = []
+
+    def selftest_owner(member: tarfile.TarInfo) -> tarfile.TarInfo:
+        # Under the seam the owner lives in the sidecar, not in the inode (the tests need
+        # not run as root): the backup keeps what a restore must put back.
+        member.uname, _, member.gname = owner_of(ctx, ctx.host("/" + member.name)).partition(":")
+        return member
+
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         meta = json.dumps({"protocol": proto, "plan": plan.as_json(), "created": iso_now()}, indent=1).encode()
@@ -1186,7 +1193,8 @@ def backup(ctx: Ctx, proto: str, plan: Plan) -> str:
         for target in targets:
             h = ctx.host(target)
             if h.exists() or h.is_symlink():
-                tar.add(str(h), arcname=target.lstrip("/"), recursive=True)
+                tar.add(str(h), arcname=target.lstrip("/"), recursive=True,
+                        filter=selftest_owner if SELFTEST else None)
                 members.append(target.lstrip("/"))
     data = buf.getvalue()
     write_file(ctx, ctx.host(archive), data, 0o600)
