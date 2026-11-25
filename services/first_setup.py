@@ -208,6 +208,9 @@ class FirstSetupService:
             add_hook = getattr(wizard, "add_startup_hook", None)
             if callable(add_hook):
                 add_hook(self.resume)
+            add_tick = getattr(wizard, "add_tick_hook", None)
+            if callable(add_tick):
+                add_tick(self.tick)
 
     # ------------------------------------------------------------- reading
     def available(self) -> bool:
@@ -381,6 +384,18 @@ class FirstSetupService:
             return
         await self._emit(advanced, fresh=True)
 
+    async def tick(self) -> bool:
+        """After every monitor pass: a setup that waits for the wizard to be free (no run of
+        its own yet) tries again — the unit of the run before may still have been there.
+        True while it still waits (the monitor keeps polling often)."""
+        view = await self.current()
+        if view is None or view.waiting != "run" or view.child is not None:
+            return False
+        advanced = await self.advance(view)
+        if advanced.child is not None or advanced.step != view.step or advanced.waiting != "run":
+            await self._emit(advanced, fresh=True)
+        return advanced.waiting == "run" and advanced.child is None
+
     async def resume(self) -> None:
         """At start: an open setup that waits for nothing it can see (a run that finished
         while the bot was down) moves on; one that waits for input stays."""
@@ -445,6 +460,7 @@ class FirstSetupService:
                 view.waiting = "run"
                 return None
             view.waiting = ""
+            view.notes["last_run"] = str(run.id)
             if run.state == "succeeded":
                 return True
             self._fail(view, step, f"run #{run.id} {run.state}: {run.summary[:200]}")
@@ -454,7 +470,22 @@ class FirstSetupService:
             view.waiting = "run"
             view.note = f"waiting for run #{active.id} ({active.mode})"
             return None
-        run = await start()
+        # The unit of the run before may outlive its last status line by a moment, and the
+        # launcher refuses while any wizard unit is active: wait for it (tick() retries).
+        last = view.notes.get("last_run", "")
+        unit_alive = getattr(self.wizard, "unit_alive", None)
+        if last.isdigit() and callable(unit_alive) and await unit_alive(int(last)) is not False:
+            view.waiting = "run"
+            view.note = f"waiting for the unit of run #{last} to end"
+            return None
+        try:
+            run = await start()
+        except InvalidOperation as exc:
+            if getattr(exc, "key", "") not in ("wizard_busy", "wizard_launch_failed"):
+                raise
+            view.waiting = "run"
+            view.note = f"the wizard is busy ({exc}); trying again"
+            return None
         view.child = run.id
         view.waiting = "run"
         self._mark(view, step, "run")

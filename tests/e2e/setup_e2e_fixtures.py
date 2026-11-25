@@ -104,6 +104,11 @@ def acme() -> None:
     wrapper = home / "acme.sh"
     wrapper.write_text(f'#!/bin/bash\nVER=3.1.1\nexport SD={FAKE_HOME}\nexec {sys.executable} {FAKE_HOME}/fake_acme.py "$@"\n')
     os.chmod(wrapper, 0o755)  # noqa: S103 — acme.sh itself is 0755 in its home
+    # acme.sh's own renewal line in root's crontab (the self-check wants it).
+    cron = Path("/var/spool/cron/crontabs/root")
+    cron.parent.mkdir(parents=True, exist_ok=True)
+    cron.write_text('7 0 * * * "/root/.acme.sh"/acme.sh --cron --home "/root/.acme.sh" > /dev/null\n')
+    os.chmod(cron, 0o600)
     print(f"acme.sh home with {DOMAIN} (a pair of the e2e CA, trusted by the system store)")
 
 

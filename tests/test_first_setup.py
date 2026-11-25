@@ -356,3 +356,36 @@ async def test_only_a_superadmin_and_only_the_current_step(world: World) -> None
         await svc.confirm_protocols(ADMIN, view.run_id)
     cancelled = await svc.cancel(ADMIN, view.run_id)
     assert cancelled.finished == "cancelled" and await svc.current() is None
+
+
+async def test_the_next_run_waits_for_the_unit_of_the_one_before(world: World) -> None:
+    """The launcher refuses while any wizard unit is active: the setup waits for the
+    previous run's unit to end, and the monitor's tick starts the next run then."""
+    world.dns.token = TOKEN
+    world.resolved[DOMAIN] = [HOST_IP]
+    world.cert.covered = True
+    alive: dict[int, bool] = {}
+
+    async def unit_alive(run_id: int) -> bool | None:
+        return alive.get(run_id, False)
+
+    world.wizard.unit_alive = unit_alive  # type: ignore[attr-defined]
+    ticks: list[Callable[[], Awaitable[bool]]] = []
+    world.wizard.add_tick_hook = ticks.append  # type: ignore[attr-defined]
+    svc = world.service()
+    view = await svc.begin(ADMIN, chat_id=1)
+    view = await svc.submit_domain(ADMIN, view.run_id, DOMAIN)
+    view = await svc.confirm_protocols(ADMIN, view.run_id)
+    first = view.child
+    assert first is not None
+    alive[first] = True  # its unit outlives its last status line
+    world.install.installed.add("xray")
+    await world.wizard.finish(first)
+    view = await svc.current()  # type: ignore[assignment]
+    assert view.child is None and view.waiting == "run" and "unit" in view.note
+    assert [m for m, _, _ in world.wizard.started] == ["protocol"]
+    assert [await tick() for tick in ticks] == [True]  # still waits: the monitor polls often
+    alive[first] = False
+    assert [await tick() for tick in ticks] == [False]
+    view = await svc.current()  # type: ignore[assignment]
+    assert view.child is not None and [m for m, _, _ in world.wizard.started] == ["protocol", "protocol"]

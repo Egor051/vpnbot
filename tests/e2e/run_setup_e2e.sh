@@ -76,6 +76,8 @@ HOST_IP="$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | he
 python3 "${REPO_ROOT}/tests/e2e/setup_e2e_fixtures.py" hosts "$HOST_IP"
 apt-get update -q >/dev/null
 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --download-only --no-install-recommends nginx >/dev/null
+# The setup's firewall step needs ufw (on the image as on a VPS; installed when missing).
+command -v ufw >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q ufw >/dev/null
 
 # --------------------------------------------------------------------------- #
 step "install.sh"

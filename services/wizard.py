@@ -312,6 +312,10 @@ class WizardService:
         # настройка» moves on when the run it waits for ends (services/first_setup.py).
         self._finish_listeners: list[Callable[[WizardRun], Awaitable[None]]] = []
         self._startup_hooks: list[Callable[[], Awaitable[None]]] = []
+        # Called after every monitor pass (outside its lock): the first setup starts the
+        # run it waits for once the previous run's unit is gone.
+        # A hook that returns True still waits: the monitor keeps its short interval.
+        self._tick_hooks: list[Callable[[], Awaitable[bool]]] = []
         # Plans whose confirmation screen reached the chat in THIS process. Empty after
         # a restart on purpose: the screen is shown again (an edit to the same text is a
         # no-op), so neither a failed delivery nor a restart leaves a stale screen.
@@ -544,7 +548,13 @@ class WizardService:
                 await self._drive(run)
             for done in await self.repo.unreported():
                 await self._report(done)
-            return (await self.repo.active()) is not None
+            busy = (await self.repo.active()) is not None
+        for hook in self._tick_hooks:
+            try:
+                busy = await hook() or busy
+            except Exception as exc:
+                logger.warning("Setup wizard: a tick hook failed (%s: %s)", type(exc).__name__, exc)
+        return busy
 
     async def _drive(self, run: WizardRun) -> None:
         now = datetime.now(timezone.utc)
@@ -633,6 +643,9 @@ class WizardService:
 
     def add_finish_listener(self, listener: Callable[[WizardRun], Awaitable[None]]) -> None:
         self._finish_listeners.append(listener)
+
+    def add_tick_hook(self, hook: Callable[[], Awaitable[bool]]) -> None:
+        self._tick_hooks.append(hook)
 
     def add_startup_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
         """Run once by :meth:`resume_on_startup` (the first setup resumes there)."""
