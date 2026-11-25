@@ -50,6 +50,7 @@ from bot.handlers import (
     admin_warp_split_sources,
     admin_warp_split_ui,
     admin_wizard,
+    admin_cert,
     callbacks,
     common,
     key_bundles,
@@ -72,7 +73,9 @@ from bot.keyboards import keys as kb_keys
 from bot.keyboards import warp_keyboard as kb_warp
 from bot.keyboards import warp_split_keyboard as kb_split
 from bot.keyboards import warp_split_sources_keyboard as kb_src
+from bot import cert_views as cv
 from bot import totp_gate, wizard_views as wv
+from services.cert import CertStatus
 from models.dto import WizardRun
 from i18n import use_locale
 from models.dto import AccessRequest, Relay, RelayAgent, RelayPairing, User, VpnKey
@@ -91,7 +94,7 @@ ROUTERS = [
     start, security, common, settings_handler, admin, admin_dashboard, admin_warp, admin_warp_split, admin_warp_split_ui,
     admin_warp_split_sources, admin_modules, admin_fallback, admin_relays, admin_maintenance, ssh_port, relay_hardening,
     relay_sshd, ufw,
-    admin_wizard, admin_bundles, keys, key_bundles, proxy, callbacks,
+    admin_wizard, admin_cert, admin_bundles, keys, key_bundles, proxy, callbacks,
 ]
 
 
@@ -291,6 +294,17 @@ CASES: list[tuple[str, Callable[[], InlineKeyboardMarkup], str | None]] = [
     ("aio_back", kb_aio.admin_bundles_back_keyboard, None),
     ("wizard_menu", lambda: wv.menu_keyboard(active=_wrun(), daily=True), None),
     ("wizard_menu_idle", lambda: wv.menu_keyboard(active=None, daily=False), None),
+    ("cert_screen_candidate", lambda: cv.screen_keyboard(CertStatus({"adopted": False, "candidate": "example.net"})), None),
+    ("cert_screen_adopted", lambda: cv.screen_keyboard(CertStatus({
+        "adopted": True, "domain": "example.net",
+        "consumers": [{"name": "hysteria", "installed": True, "in_sync": False}],
+    })), None),
+    ("cert_screen_unavailable", lambda: cv.screen_keyboard(None), None),
+    ("cert_screen_ambiguous", lambda: cv.screen_keyboard(CertStatus({
+        "adopted": False, "candidate": None, "candidates": ["a.example.net", "b.example.net"],
+    })), None),
+    ("cert_issue", lambda: cv.issue_keyboard(True), None),
+    ("cert_token", lambda: cv.token_keyboard(True), None),
     ("wizard_progress", lambda: wv.progress_keyboard(_wrun()), None),
     ("wizard_plan", lambda: wv.plan_keyboard(_wrun()), None),
     ("wizard_final", lambda: wv.final_keyboard(_wrun(), artifact=True), None),

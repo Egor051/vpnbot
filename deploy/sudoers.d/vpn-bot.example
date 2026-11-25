@@ -132,4 +132,11 @@ Cmnd_Alias VPN_BOT_UFW = \
 Cmnd_Alias VPN_BOT_WIZARD = \
     /usr/local/sbin/vpn-bot-wizard launch *
 
-vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT, VPN_BOT_SSH_PORT, VPN_BOT_UFW, VPN_BOT_WIZARD
+# The bot's TLS certificate (docs/certificate.md): the bot only READS its status —
+# pinned to exactly `status --json`, no wildcard. Every change (issue, renew, adopt,
+# deploy) is a run of the wizard's `cert` mode, i.e. VPN_BOT_WIZARD above; acme.sh calls
+# `vpn-bot-cert deploy` itself, as root, from its cron.
+Cmnd_Alias VPN_BOT_CERT = \
+    /usr/local/sbin/vpn-bot-cert status --json
+
+vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT, VPN_BOT_SSH_PORT, VPN_BOT_UFW, VPN_BOT_WIZARD, VPN_BOT_CERT

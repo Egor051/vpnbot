@@ -110,3 +110,6 @@ class AuditEntityType(StrEnum):
     # factor (entity_id = the superadmin's Telegram id).
     WIZARD = "wizard"
     SECURITY = "security"
+    # The bot's Cloudflare token and the DNS records it owns (services/dns.py;
+    # entity_id unused — the record's name is in the details).
+    DNS = "dns"

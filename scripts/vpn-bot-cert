@@ -1,0 +1,2271 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-cert — the bot's TLS certificate: issued by acme.sh, laid out by the bot (docs/certificate.md).
+
+WHY. acme.sh keeps ONE install-cert per domain: the paths it copies to and ONE reloadcmd.
+A move of the host once left that reloadcmd naming only a part of the readers, and the
+others served an expiring certificate. The readers are not configuration on the host any
+more: they are THE REGISTRY below (code, reviewed, tested), and the reloadcmd acme.sh
+calls after every renewal is this helper:
+
+    acme.sh --install-cert -d <domain> [--ecc] --reloadcmd "/usr/local/sbin/vpn-bot-cert deploy"
+
+with no --cert-file / --key-file / --fullchain-file at all: acme.sh writes nothing outside
+its own directory, `deploy` lays the material out — atomically, consumer by consumer.
+
+THE REGISTRY (CONSUMERS). Each consumer: the files it reads (path, which half of the pair,
+owner:group, mode), the unit and what happens to it after an update. A consumer is ACTIVE
+only while its module is installed here: its unit exists (`systemctl cat`), it was not
+removed from the host (/etc/vpn-bot/uninstalled/<marker>, vpn-bot-protocol-uninstall) and
+its directory is there (or the registry creates it).
+
+  hysteria      /etc/hysteria/cert.pem hysteria:hysteria 0644 (fullchain)
+                /etc/hysteria/key.pem  hysteria:hysteria 0600            restart hysteria-server
+  nginx         /etc/vpn-bot/tls/fullchain.pem root:vpn-bot 0640
+                /etc/vpn-bot/tls/privkey.pem   root:vpn-bot 0640         nginx -t, reload nginx
+  subscription  the same two files                                       try-restart vpn-bot-subscription
+
+  (/etc/vpn-bot/tls itself root:root 0755.) These are exactly the ownerships the tracked
+  hook deploy/vpn-bot-acme-reload.sh re-asserts — measured on the main server.
+
+VERBS
+
+  status [--json]
+      Read-only. Every acme.sh domain (SAN, expiry, key, reloadcmd, the Cloudflare token it
+      renews with — a fingerprint only), the bot's domain (the one whose reloadcmd is
+      `vpn-bot-cert deploy`) or the domain to adopt, every consumer (installed or why not,
+      its files: present, sha equal to acme.sh's, owner and mode, what it actually reads),
+      the bot's token (fingerprint) and the list of problems with a level. The self-check
+      and the bot's «Сертификат и DNS» read this. Text of the host's own configuration (a
+      hand-made reloadcmd) is shown redacted — it may carry a credential.
+  deploy [--domain D] [--all] [--dry-run] [--json]
+      THE reloadcmd. The source is acme.sh's own pair of the domain (Le_Domain and the
+      working directory acme.sh gives, else the adopted domain): fullchain.cer +
+      <domain>.key, checked first (the key matches the certificate, the certificate has
+      not expired, its SAN covers the domain's names). Consumers sharing a file are one
+      GROUP. Per group: a changed file is written NEXT to its target (same directory,
+      owner and mode set), the staged pair is checked again with openssl, the old copy is
+      kept, then the new files are renamed over the old ones; then the actions. A failed
+      action (or a unit not active after its restart) puts the old files back for THAT
+      group and runs its actions again on them — the other groups keep the new pair.
+      A consumer is acted on only when its files changed or the state file says it last
+      took another pair (--all: every active consumer). Exit 1 when a group was rolled
+      back. When acme.sh runs it from inside `issue` / `renew` / `adopt` (env
+      VPN_BOT_CERT_NESTED) it defers to that verb, which deploys itself afterwards. Run by
+      acme.sh (Le_Domain) for a domain that no longer names it (released by `adopt`
+      meanwhile) it lays nothing out.
+  issue --names a[,b...] --zone ZONE [--json]
+      acme.sh DNS-01 with Cloudflare (dns_cf) and the BOT's token
+      (/etc/vpn-bot/dns_failover/cloudflare_token — the one file of the bot; acme.sh gets it
+      as CF_Token in its environment, never on a command line) for ZONE — the zone NAME
+      the bot checked the token against; its id is asked from Cloudflare with the same
+      token (GET /zones?name=ZONE) and handed to acme.sh as CF_Zone_ID, so a zone id
+      another setup left in acme.sh's account.conf is never used. Let's Encrypt, the key type the domain already has (ec-256 for a
+      new one), --force. acme.sh itself is installed first when it is missing (a pinned
+      release, sha256-checked). Then install-cert as above, then deploy. The certificate's
+      name (acme.sh's main domain) cannot change here: that is a domain change.
+  renew --force [--zone ZONE] [--json]
+      `acme.sh --renew --force` of the bot's domain — to prove the renewal works end to
+      end. With the bot's token, the domain's saved CF_Token / CF_Zone_ID are set to it
+      first (acme.sh sources the domain's conf on a renewal), so cron renews with the same
+      token from then on. Then deploy.
+  adopt [--domain D] [--dry-run] [--json]
+      The migration of a host set up by hand: the existing acme.sh domain is taken AS IS —
+      the certificate is not reissued. Only its install-cert is rewritten (`--install-cert`
+      with the reloadcmd above and no file targets), then deploy (changed only: a consumer
+      whose copy already equals acme.sh's is not restarted). --dry-run prints the change.
+      With several domains naming `vpn-bot-cert deploy`, --domain picks the one that stays
+      the bot's. Every other domain still reaching the readers is released: a reloadcmd
+      naming this helper emptied, and every Le_Real* path into the registry emptied (acme.sh
+      copies to those itself after a renewal). `issue` releases them the same way.
+  deploy / issue / renew / adopt --expect-pair SHA
+      The run was planned on acme.sh's pair SHA (16 hex of status' pair_sha): refused
+      (exit 3, nothing changed) when acme.sh holds another one by the time it starts.
+  issue / adopt --expect-release DIR[,DIR...]
+      The domain directories the plan releases ("" = none): refused the same way when
+      the set differs by the time the run starts (the wizard backed up exactly those).
+  issue --expect-keylength KL
+      The key type the plan showed (ec-256 for a new domain): refused the same way when
+      acme.sh's conf holds another one by then.
+  act [--json]
+      Every installed reader's check and action on the files it has now — nothing is
+      written. The wizard's rollback runs it after it restored a backup, so every reader
+      runs the restored pair again.
+
+acme.sh takes no lock, and its cron does not take this helper's. While the helper's own
+acme.sh works on a domain (issue / renew / adopt) that domain's Le_NextRenewTime is pushed an
+hour ahead — `acme.sh --cron` skips a domain that is not due — and put back afterwards unless
+acme.sh wrote a new one; THEN the helper waits (up to 5 minutes, then refuses) for an acme.sh
+already running. A cron renewal's own `deploy` waits for this helper's lock.
+
+Exit codes: 0 ok; 1 a consumer failed and its group was rolled back; 2 usage; 3 refused
+(nothing to adopt, no token, a bad pair, another domain); 5 cannot (a tool or a file).
+
+Stdlib only, every command an argv list (never a shell), the token only ever in a child's
+environment. Run as root from another mount namespace (the non-root bot's
+ProtectSystem=strict, kept by sudo) it re-executes itself in PID 1's first (nsenter).
+TEST SEAM: VPN_BOT_CERT_SELFTEST=1 needs --root (every host path under it), resolves every
+command inside VPN_BOT_CERT_SELFTEST_BIN (or an absolute path under --root) and keeps
+owners in a sidecar file instead of chown: deploy.sh runs the test suite as root on the
+production host.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import glob as globlib
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import stat
+import subprocess  # noqa: S404 — fixed argv lists of system tools, never a shell
+import sys
+import tempfile
+import time
+import urllib.request
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+SELFTEST = os.environ.get("VPN_BOT_CERT_SELFTEST") == "1"
+
+APP_DIR = "/opt/vpn-service"
+ENV_FILE = f"{APP_DIR}/.env"
+INSTALLED_PATH = "/usr/local/sbin/vpn-bot-cert"
+RELOAD_CMD = f"{INSTALLED_PATH} deploy"
+LEGACY_HOOK = "/usr/local/sbin/acme-reload.sh"
+ACME_HOME = "/root/.acme.sh"
+ACME_ENTRY = "acme.sh"
+TOKEN_FILE = "/etc/vpn-bot/dns_failover/cloudflare_token"  # noqa: S105 — a path, not a secret
+TOKEN_OWNERS = frozenset({"root", "vpn-bot"})
+STATE_DIR = "/var/lib/vpn-bot-cert"
+STATE_FILE = f"{STATE_DIR}/state.json"
+LOCK_FILE = "/run/vpn-bot-cert.lock"
+MARKER_DIR = "/etc/vpn-bot/uninstalled"
+CRON_FILES = ("/var/spool/cron/crontabs/root", "/var/spool/cron/root")
+CRON_DIR = "/etc/cron.d"
+NGINX_CONF_DIRS = ("/etc/nginx/conf.d", "/etc/nginx/sites-enabled")
+NGINX_CONF = "/etc/nginx/nginx.conf"
+HYSTERIA_CONFIG = "/etc/hysteria/config.yaml"
+NESTED_ENV = "VPN_BOT_CERT_NESTED"
+HOSTNS_ENV = "VPN_BOT_CERT_HOSTNS"
+CA_SERVER = "letsencrypt"
+NEW_KEYLENGTH = "ec-256"
+COMMAND_TIMEOUT = 60
+ACME_TIMEOUT = 900
+LOCK_WAIT = 900
+# acme.sh has no lock of its own, and its cron (`acme.sh --cron`, root's crontab) does not
+# take ours: before issue / renew / adopt run acme.sh, another acme.sh process — a cron
+# renewal — is waited for (then refused), so the two never change one domain together.
+ACME_BUSY_WAIT = float(os.environ.get("VPN_BOT_CERT_SELFTEST_ACME_WAIT", "0")) if SELFTEST else 300.0
+# … and a cron run that starts AFTER that wait must leave the domain alone: acme.sh --cron
+# renews a domain only once its Le_NextRenewTime has passed, so the helper pushes it this
+# far ahead while its own acme.sh works on the domain (cron_held_off).
+CRON_HOLD_SECONDS = 3600
+SETTLE_SECONDS = float(os.environ.get("VPN_BOT_CERT_SELFTEST_SETTLE", "0")) if SELFTEST else 2.0
+MAX_PEM_BYTES = 1 << 20
+MAX_NAMES = 10
+RED_DAYS = 7
+YELLOW_DAYS = 21
+STAGE_SUFFIX = ".vpn-bot-cert-new"
+OLD_SUFFIX = ".vpn-bot-cert-old"
+EXIT_OK, EXIT_CONSUMER, EXIT_USAGE, EXIT_REFUSED, EXIT_CANNOT = 0, 1, 2, 3, 5
+
+# acme.sh, installed when a host has none (`issue` only). A release pinned by its tag
+# AND the sha256 of the two files it needs: the client and its Cloudflare DNS plugin.
+ACME_VERSION = "3.1.1"
+ACME_FILES: Mapping[str, tuple[str, str]] = {
+    "acme.sh": (
+        f"https://raw.githubusercontent.com/acmesh-official/acme.sh/{ACME_VERSION}/acme.sh",
+        "e80e3e6d66ab02f7b448c55129c70ec57089a286d7df95282a68d607b4df7ed7",
+    ),
+    "dnsapi/dns_cf.sh": (
+        f"https://raw.githubusercontent.com/acmesh-official/acme.sh/{ACME_VERSION}/dnsapi/dns_cf.sh",
+        "741f2c740ca258471f2dbec7233a9177ed879bd640353acbefe87a2d63193292",
+    ),
+}
+MAX_DOWNLOAD = 2 << 20
+
+_NAME_RE = re.compile(r"^(?=.{1,253}$)(\*\.)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_ZONE_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_ZONE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+CLOUDFLARE_API = "https://api.cloudflare.com/client/v4"
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.-]{20,200}$")
+_CONF_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_B64_START = "__ACME_BASE64__START_"
+_B64_END = "__ACME_BASE64__END_"
+_SKIP_DIRS = frozenset({"ca", "deploy", "dnsapi", "notify", "http.header"})
+_REAL_KEYS = ("Le_RealCertPath", "Le_RealCACertPath", "Le_RealKeyPath", "Le_RealFullChainPath")
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_.~+/=-]{16,}")
+_TOKEN_ASSIGN_RE = re.compile(r"(?i)\b(CF_Token|CF_Key|SAVED_CF_Token|SAVED_CF_Key)\s*=\s*'?[^'\s]+'?")
+# Text of the host's own configuration that status shows (a hand-made reloadcmd may carry
+# a credential: a health-check URL, a header, an API key). First the patterns of
+# utils/redact.py, kept identical by a test; then what such a command line holds besides.
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b(bot_token|token|password|passwd|secret|mtproto_secret|private_key|preshared_key)\s*([:=])\s*[^,\s;]+",
+    re.IGNORECASE,
+)
+_SECRET_QUERY_RE = re.compile(r"(?i)(secret=)[^&\s]+")
+_HEX_SECRET_RE = re.compile(r"\b(?:dd)?[0-9a-fA-F]{32,}\b")
+_TG_BOT_TOKEN_RE = re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{35}\b")
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_.~+/=-]{16,}\b")
+_URL_CREDENTIALS_RE = re.compile(r"(?i)([a-z][a-z0-9+\-.]*://)([^:@/\s]+:[^@/\s]+@)")
+_WG_PRIVATE_KEY_RE = re.compile(r"\b[A-Za-z0-9+/]{43}={1,2}(?=[^A-Za-z0-9+/=]|$)")
+_CREDENTIAL_WORDS = r"(?:token|key|secret|passwd|password|pass|auth|credential|cred)"
+_HEADER_SECRET_RE = re.compile(
+    r"(?i)\b((?:proxy-)?authorization|x-[a-z0-9-]*" + _CREDENTIAL_WORDS + r"[a-z0-9-]*|api-?key)(\s*:\s*)"
+    r"(?:(?:bearer|basic|token|key|apikey|digest)\s+)?[^\s'\"]+"
+)
+_NAMED_SECRET_RE = re.compile(  # API_KEY=…  ?apikey=…  &token=…
+    r"(?i)\b([a-z0-9_.-]*" + _CREDENTIAL_WORDS + r"[a-z0-9_.-]*)=('[^']*'|\"[^\"]*\"|[^\s'\"&;|]+)"
+)
+_FLAG_SECRET_RE = re.compile(  # --api-token VALUE / --password=VALUE
+    r"(?i)(\s--?[a-z0-9-]*" + _CREDENTIAL_WORDS + r"[a-z0-9-]*)(\s+|=)('[^']*'|\"[^\"]*\"|[^\s'\"]+)"
+)
+_USER_SECRET_RE = re.compile(r"(\s(?:-u|--user)(?:\s+|=))('[^']*'|\"[^\"]*\"|[^\s'\"]+)")  # curl -u user:password
+
+
+class Refused(Exception):
+    """The request does not fit (exit 3): the reason is for the operator."""
+
+
+class Cannot(Exception):
+    """A tool or a file failed (exit 5)."""
+
+
+# --------------------------------------------------------------------------- #
+# THE REGISTRY — the one place the readers of the certificate are written down.
+# tests/test_cert_helper.py pins it (and that a path two consumers share has one spec).
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class FileSpec:
+    path: str
+    source: str  # "fullchain" | "key"
+    owner: str
+    group: str
+    mode: int
+
+
+@dataclass(frozen=True)
+class DirSpec:
+    path: str
+    owner: str
+    group: str
+    mode: int
+    # True: the registry creates it and owns its mode; False: the module's own
+    # directory — its absence means the module is not installed.
+    managed: bool
+
+
+@dataclass(frozen=True)
+class Consumer:
+    name: str
+    unit: str
+    action: str  # "restart" | "reload" | "try-restart"
+    files: tuple[FileSpec, ...]
+    directory: DirSpec
+    # The module's uninstall marker (MARKER_DIR/<marker>): removed from the host.
+    marker: str = ""
+    # Run before the action; a non-zero exit is the consumer's failure.
+    check: tuple[str, ...] = ()
+    # A group that may be missing on a host (root-legacy model without the vpn-bot user):
+    # the files then belong to this one.
+    group_fallback: str = ""
+
+    def file_for(self, source: str) -> FileSpec:
+        return next(f for f in self.files if f.source == source)
+
+
+TLS_DIR = DirSpec("/etc/vpn-bot/tls", "root", "root", 0o755, managed=True)
+TLS_FILES = (
+    FileSpec("/etc/vpn-bot/tls/fullchain.pem", "fullchain", "root", "vpn-bot", 0o640),
+    FileSpec("/etc/vpn-bot/tls/privkey.pem", "key", "root", "vpn-bot", 0o640),
+)
+CONSUMERS: tuple[Consumer, ...] = (
+    Consumer(
+        name="hysteria",
+        unit="hysteria-server",
+        action="restart",
+        files=(
+            FileSpec("/etc/hysteria/cert.pem", "fullchain", "hysteria", "hysteria", 0o644),
+            FileSpec("/etc/hysteria/key.pem", "key", "hysteria", "hysteria", 0o600),
+        ),
+        directory=DirSpec("/etc/hysteria", "root", "root", 0o755, managed=False),
+        marker="hysteria2",
+    ),
+    Consumer(
+        name="nginx",
+        unit="nginx",
+        action="reload",
+        files=TLS_FILES,
+        directory=TLS_DIR,
+        check=("nginx", "-t", "-q"),
+        group_fallback="root",
+    ),
+    Consumer(
+        name="subscription",
+        unit="vpn-bot-subscription",
+        action="try-restart",
+        files=TLS_FILES,
+        directory=TLS_DIR,
+        group_fallback="root",
+    ),
+)
+
+
+def registry_paths() -> set[str]:
+    return {f.path for c in CONSUMERS for f in c.files}
+
+
+# --------------------------------------------------------------------------- #
+# Context, commands, files
+# --------------------------------------------------------------------------- #
+@dataclass
+class Ctx:
+    root: str
+    env_text: str = ""
+    secrets: list[str] = field(default_factory=list)
+
+    def host(self, path: str) -> Path:
+        return Path(f"{self.root}{path}")
+
+    def env(self, key: str) -> str:
+        rx = re.compile(r"^\s*(?:export\s+)?" + re.escape(key) + r"\s*=\s*(.*)$")
+        val: str | None = None
+        for line in self.env_text.split("\n"):
+            m = rx.match(line)
+            if m:
+                val = m.group(1)
+        if val is None:
+            return ""
+        val = re.sub(r"\s+#.*$", "", val).strip()
+        for q in ('"', "'"):
+            if len(val) >= 2 and val.startswith(q) and val.endswith(q):
+                val = val[1:-1]
+        return val
+
+    def unroot(self, path: Path) -> str:
+        text = str(path)
+        return text[len(self.root):] if self.root and text.startswith(self.root) else text
+
+
+def redact(ctx: Ctx, text: str) -> str:
+    for secret in ctx.secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    text = _BEARER_RE.sub("Bearer ***", text)
+    return _TOKEN_ASSIGN_RE.sub(lambda m: f"{m.group(1)}=***", text)
+
+
+def shown(ctx: Ctx, text: str) -> str:
+    """*text* from the host's own configuration as status and a plan show it (the bot puts
+    it in Telegram): redact() and utils/redact's patterns, then any header, NAME=value,
+    --flag value or curl -u named like a credential. Only for showing — what the helper
+    decides on (reload_kind, the conf it writes) reads the raw value."""
+    text = redact(ctx, text)
+    text = _FLAG_SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _USER_SECRET_RE.sub(lambda m: f"{m.group(1)}***", text)
+    text = _HEADER_SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _NAMED_SECRET_RE.sub(lambda m: f"{m.group(1)}=***", text)
+    text = _SECRET_QUERY_RE.sub(r"\1***", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _HEX_SECRET_RE.sub("***", text)
+    text = _TG_BOT_TOKEN_RE.sub("***", text)
+    text = _BEARER_TOKEN_RE.sub("Bearer ***", text)
+    text = _URL_CREDENTIALS_RE.sub(r"\1***@", text)
+    return _WG_PRIVATE_KEY_RE.sub("***", text)
+
+
+def tool_allowed(ctx: Ctx, name: str) -> str | None:
+    """Under the test seam: a stub of VPN_BOT_CERT_SELFTEST_BIN, or an absolute path
+    under --root (the fake acme.sh). None = refused. Outside it: the name."""
+    if not SELFTEST:
+        return name
+    if os.path.isabs(name):
+        return name if ctx.root and name.startswith(ctx.root.rstrip("/") + "/") else None
+    stub_dir = os.environ.get("VPN_BOT_CERT_SELFTEST_BIN", "")
+    found = shutil.which(name)
+    if not stub_dir or not found:
+        return None
+    if os.path.realpath(found) != os.path.realpath(os.path.join(stub_dir, name)):
+        return None
+    return found
+
+
+def run(
+    ctx: Ctx,
+    argv: Sequence[str],
+    *,
+    timeout: int = COMMAND_TIMEOUT,
+    env: Mapping[str, str] | None = None,
+    cwd: str | None = None,
+) -> tuple[int, str]:
+    """(exit code, stdout+stderr); 127 = not found (or refused by the seam), 124 = timeout."""
+    args = list(argv)
+    exe = tool_allowed(ctx, args[0])
+    if exe is None:
+        return 127, f"{args[0]}: refused (VPN_BOT_CERT_SELFTEST: not a stub)"
+    args[0] = exe
+    run_env = {k: v for k, v in os.environ.items() if k not in ("LANGUAGE", "LC_MESSAGES", "CF_Token", "CF_Key")}
+    run_env["LC_ALL"] = "C"
+    if env:
+        run_env.update(env)
+    try:
+        # Its own process group: on a timeout every process it started goes with it (acme.sh
+        # runs curl and openssl) — nothing of a timed-out command keeps writing afterwards.
+        proc = subprocess.Popen(  # noqa: S603 — argv list, never a shell
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True,
+            errors="replace", env=run_env, cwd=cwd, start_new_session=True,
+        )
+    except FileNotFoundError:
+        return 127, f"{argv[0]}: not found"
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_group(proc)
+        return 124, f"{argv[0]}: timed out after {timeout}s"
+    return proc.returncode, redact(ctx, (stdout or "") + (stderr or ""))
+
+
+def kill_group(proc: subprocess.Popen[str]) -> None:
+    """SIGKILL the process group *proc* leads, then reap it."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.communicate(timeout=10)
+
+
+def fence(ctx: Ctx, path: Path) -> None:
+    if SELFTEST and (not ctx.root or not str(path).startswith(ctx.root.rstrip("/") + "/")):
+        raise Cannot(f"selftest: refusing to write {path} outside --root {ctx.root!r}")
+
+
+def read_regular(path: Path, limit: int = MAX_PEM_BYTES) -> bytes | None:
+    """A regular file's bytes; None when absent. A symlink is never followed."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise Cannot(f"cannot open {path}: {exc.strerror or exc}") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Cannot(f"{path} is not a regular file")
+        if st.st_size > limit:
+            raise Cannot(f"{path} is larger than {limit} bytes")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def read_text(path: Path) -> str | None:
+    try:
+        data = read_regular(path, 4 << 20)
+    except Cannot:
+        return None
+    return None if data is None else data.decode("utf-8", errors="replace")
+
+
+# --------------------------------------------------------------------------- #
+# Owners: chown for real; under the seam a sidecar file (tests run unprivileged)
+# --------------------------------------------------------------------------- #
+def _sidecar(ctx: Ctx) -> Path:
+    return Path(ctx.root) / ".vpn-bot-cert-owners.json"
+
+
+def _sidecar_read(ctx: Ctx) -> dict[str, list[str]]:
+    try:
+        data = json.loads(_sidecar(ctx).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def account_exists(ctx: Ctx, user: str | None = None, group: str | None = None) -> bool:
+    if SELFTEST:
+        known = set(os.environ.get("VPN_BOT_CERT_SELFTEST_USERS", "root,vpn-bot,hysteria").split(","))
+        return all(name in known for name in (user, group) if name)
+    import grp
+    import pwd
+
+    try:
+        if user:
+            pwd.getpwnam(user)
+        if group:
+            grp.getgrnam(group)
+    except KeyError:
+        return False
+    return True
+
+
+def chown(ctx: Ctx, path: Path, user: str, group: str) -> None:
+    if SELFTEST:
+        data = _sidecar_read(ctx)
+        data[ctx.unroot(path)] = [user, group]
+        _sidecar(ctx).write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+        return
+    import grp
+    import pwd
+
+    os.chown(path, pwd.getpwnam(user).pw_uid, grp.getgrnam(group).gr_gid, follow_symlinks=False)
+
+
+def owner_of(ctx: Ctx, path: Path) -> tuple[str, str]:
+    if SELFTEST:
+        pair = _sidecar_read(ctx).get(ctx.unroot(path))
+        return (str(pair[0]), str(pair[1])) if isinstance(pair, list) and len(pair) == 2 else ("root", "root")
+    import grp
+    import pwd
+
+    st = os.lstat(path)
+    try:
+        user = pwd.getpwuid(st.st_uid).pw_name
+    except KeyError:
+        user = str(st.st_uid)
+    try:
+        group = grp.getgrgid(st.st_gid).gr_name
+    except KeyError:
+        group = str(st.st_gid)
+    return user, group
+
+
+def move_owner(ctx: Ctx, src: Path, dst: Path) -> None:
+    """Under the seam the sidecar follows a rename (a real rename keeps the inode's owner)."""
+    if not SELFTEST:
+        return
+    data = _sidecar_read(ctx)
+    entry = data.pop(ctx.unroot(src), None)
+    if entry is not None:
+        data[ctx.unroot(dst)] = entry
+        _sidecar(ctx).write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+
+def effective_group(ctx: Ctx, spec: FileSpec, consumer: Consumer | None = None) -> str:
+    if account_exists(ctx, group=spec.group):
+        return spec.group
+    fallback = consumer.group_fallback if consumer is not None else ""
+    if not fallback:
+        for c in CONSUMERS:
+            if spec in c.files and c.group_fallback:
+                fallback = c.group_fallback
+    return fallback or spec.group
+
+
+def write_with_owner(ctx: Ctx, path: Path, data: bytes, user: str, group: str, mode: int) -> None:
+    """Exclusive create (never through a planted link), owner and mode BEFORE the data, fsync."""
+    fence(ctx, path)
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        chown(ctx, path, user, group)
+        os.write(fd, data)
+        os.fsync(fd)
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def write_atomic_text(ctx: Ctx, path: Path, text: str, mode: int = 0o644) -> None:
+    fence(ctx, path)
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        if os.geteuid() == 0 and not SELFTEST:
+            os.chown(tmp, 0, 0)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def fingerprint(secret: str) -> str:
+    """adapters/cloudflare_dns.fingerprint: 8 hex of sha256 — never the value."""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:8]
+
+
+def iso(ts: float | None) -> str | None:
+    return None if ts is None else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+# --------------------------------------------------------------------------- #
+# acme.sh: its domain confs (KEY='value', some values base64-wrapped)
+# --------------------------------------------------------------------------- #
+def conf_value(raw: str) -> str:
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    if value.startswith(_B64_START) and value.endswith(_B64_END):
+        import base64
+        import binascii
+
+        try:
+            value = base64.b64decode(value[len(_B64_START) : -len(_B64_END)]).decode("utf-8", errors="replace")
+        except (ValueError, binascii.Error):
+            value = ""
+    return value
+
+
+def parse_conf(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        m = _CONF_LINE_RE.match(line)
+        if m:
+            values[m.group(1)] = conf_value(m.group(2))
+    return values
+
+
+def conf_set(ctx: Ctx, path: Path, updates: Mapping[str, str]) -> None:
+    """acme.sh's _setopt for plain values: replace `KEY=...` or append `KEY='value'`."""
+    text = read_text(path)
+    if text is None:
+        raise Cannot(f"{path} is missing")
+    lines = text.splitlines()
+    for key, value in updates.items():
+        if "'" in value or "\n" in value:
+            raise Refused(f"refusing to write a quote or a newline into {key}")
+        new = f"{key}='{value}'"
+        for i, line in enumerate(lines):
+            if re.match(rf"^\s*{re.escape(key)}=", line):
+                lines[i] = new
+                break
+        else:
+            lines.append(new)
+    st = os.stat(path)
+    write_atomic_text(ctx, path, "\n".join(lines) + "\n", mode=st.st_mode & 0o777)
+
+
+@dataclass
+class AcmeDomain:
+    name: str
+    dir: Path
+    ecc: bool
+    conf: dict[str, str]
+
+    @property
+    def fullchain(self) -> Path:
+        return self.dir / "fullchain.cer"
+
+    @property
+    def key(self) -> Path:
+        return self.dir / f"{self.name}.key"
+
+    @property
+    def conf_path(self) -> Path:
+        return self.dir / f"{self.name}.conf"
+
+    @property
+    def alt(self) -> list[str]:
+        raw = self.conf.get("Le_Alt", "")
+        return [a.strip().lower() for a in raw.split(",") if a.strip() and a.strip() != "no"]
+
+    @property
+    def names(self) -> list[str]:
+        return [self.name.lower(), *[a for a in self.alt if a != self.name.lower()]]
+
+    @property
+    def reloadcmd(self) -> str:
+        return self.conf.get("Le_ReloadCmd", "").strip()
+
+    @property
+    def reload_kind(self) -> str:
+        return reload_kind(self.reloadcmd)
+
+    @property
+    def keylength(self) -> str:
+        return self.conf.get("Le_Keylength", "") or (NEW_KEYLENGTH if self.ecc else "2048")
+
+    def real_paths(self) -> dict[str, str]:
+        return {k: self.conf.get(k, "") for k in _REAL_KEYS}
+
+
+def reload_kind(cmd: str) -> str:
+    norm = " ".join(cmd.split())
+    if not norm:
+        return "empty"
+    if norm in (RELOAD_CMD, "vpn-bot-cert deploy"):
+        return "ours"
+    if norm in (LEGACY_HOOK, "acme-reload.sh") or norm.endswith("/acme-reload.sh"):
+        return "legacy"
+    return "other"
+
+
+def acme_installed(ctx: Ctx) -> bool:
+    path = ctx.host(f"{ACME_HOME}/{ACME_ENTRY}")
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def acme_version(ctx: Ctx) -> str | None:
+    text = read_text(ctx.host(f"{ACME_HOME}/{ACME_ENTRY}")) or ""
+    m = re.search(r"^VER=([0-9][0-9A-Za-z.\-]*)\s*$", text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def load_domains(ctx: Ctx) -> list[AcmeDomain]:
+    home = ctx.host(ACME_HOME)
+    found: list[AcmeDomain] = []
+    if not home.is_dir():
+        return found
+    for d in sorted(home.iterdir()):
+        if d.is_symlink() or not d.is_dir() or d.name in _SKIP_DIRS:
+            continue
+        ecc = d.name.endswith("_ecc")
+        name = d.name[:-4] if ecc else d.name
+        text = read_text(d / f"{name}.conf")
+        if text is None:
+            continue
+        conf = parse_conf(text)
+        if conf.get("Le_Domain", name).lower() != name.lower():
+            continue
+        found.append(AcmeDomain(name=name, dir=d, ecc=ecc, conf=conf))
+    return found
+
+
+def acme_cron(ctx: Ctx) -> bool:
+    texts = [read_text(ctx.host(p)) or "" for p in CRON_FILES]
+    cron_dir = ctx.host(CRON_DIR)
+    if cron_dir.is_dir():
+        texts += [read_text(p) or "" for p in sorted(cron_dir.iterdir()) if p.is_file()]
+    for text in texts:
+        for line in text.splitlines():
+            if not line.lstrip().startswith("#") and "acme.sh" in line and "--cron" in line:
+                return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# openssl
+# --------------------------------------------------------------------------- #
+@dataclass
+class CertInfo:
+    not_after: float | None = None
+    san: tuple[str, ...] = ()
+    sha256: str = ""
+    pubkey: str = ""
+    error: str | None = None
+
+    @property
+    def days_left(self) -> float | None:
+        return None if self.not_after is None else (self.not_after - time.time()) / 86400
+
+
+def cert_info(ctx: Ctx, path: Path) -> CertInfo:
+    rc, out = run(ctx, ["openssl", "x509", "-in", str(path), "-noout", "-enddate", "-fingerprint", "-sha256",
+                        "-ext", "subjectAltName"])
+    if rc != 0:
+        return CertInfo(error=f"openssl x509: {out.strip().splitlines()[-1] if out.strip() else rc}")
+    info = CertInfo()
+    m = re.search(r"notAfter=(.+)", out)
+    if m:
+        with contextlib.suppress(ValueError):
+            import calendar
+
+            info.not_after = float(calendar.timegm(time.strptime(m.group(1).strip().replace(" GMT", ""),
+                                                                 "%b %d %H:%M:%S %Y")))
+    m = re.search(r"Fingerprint=([0-9A-Fa-f:]+)", out)
+    if m:
+        info.sha256 = m.group(1).replace(":", "").lower()
+    info.san = tuple(sorted({n.lower() for n in re.findall(r"DNS:([^,\s]+)", out)}))
+    rc, pub = run(ctx, ["openssl", "x509", "-in", str(path), "-noout", "-pubkey"])
+    if rc != 0 or "BEGIN PUBLIC KEY" not in pub:
+        info.error = "openssl x509 -pubkey failed"
+    else:
+        info.pubkey = _pem_block(pub)
+    if info.not_after is None and info.error is None:
+        info.error = "no notAfter"
+    return info
+
+
+def key_pubkey(ctx: Ctx, path: Path) -> str | None:
+    rc, out = run(ctx, ["openssl", "pkey", "-in", str(path), "-pubout"])
+    return _pem_block(out) if rc == 0 and "BEGIN PUBLIC KEY" in out else None
+
+
+def _pem_block(text: str) -> str:
+    m = re.search(r"-----BEGIN PUBLIC KEY-----.*?-----END PUBLIC KEY-----", text, re.DOTALL)
+    return re.sub(r"\s+", "", m.group(0)) if m else ""
+
+
+def covers(san: Sequence[str], name: str) -> bool:
+    name = name.lower().rstrip(".")
+    for entry in san:
+        entry = entry.lower()
+        if entry == name:
+            return True
+        if entry.startswith("*.") and name.count(".") == entry.count(".") and name.split(".", 1)[1] == entry[2:]:
+            return True
+    return False
+
+
+def check_pair(ctx: Ctx, cert: Path, key: Path, names: Sequence[str]) -> CertInfo:
+    """The pair a consumer would read: the key matches the certificate, it has not
+    expired, its SAN covers *names*. Raises Refused with the reason."""
+    info = cert_info(ctx, cert)
+    if info.error:
+        raise Refused(f"{ctx.unroot(cert)}: {info.error}")
+    pub = key_pubkey(ctx, key)
+    if not pub:
+        raise Refused(f"{ctx.unroot(key)}: not a private key openssl can read")
+    if pub != info.pubkey:
+        raise Refused(f"{ctx.unroot(key)} does not match the certificate {ctx.unroot(cert)}")
+    if info.not_after is not None and info.not_after <= time.time():
+        raise Refused(f"{ctx.unroot(cert)} expired at {iso(info.not_after)}")
+    missing = [n for n in names if not covers(info.san, n)]
+    if missing:
+        raise Refused(f"{ctx.unroot(cert)}: the SAN ({', '.join(info.san) or '—'}) does not cover {', '.join(missing)}")
+    return info
+
+
+@dataclass
+class Source:
+    domain: AcmeDomain
+    fullchain: bytes
+    key: bytes
+    info: CertInfo
+
+    @property
+    def pair_sha(self) -> str:
+        return sha256(self.fullchain + b"\n--vpn-bot-cert--\n" + self.key)
+
+    def data(self, source: str) -> bytes:
+        return self.fullchain if source == "fullchain" else self.key
+
+
+def load_source(ctx: Ctx, domain: AcmeDomain) -> Source:
+    fullchain = read_regular(domain.fullchain)
+    key = read_regular(domain.key)
+    if not fullchain or not key:
+        raise Refused(f"{domain.name}: acme.sh has no {'fullchain.cer' if not fullchain else domain.key.name} in {ctx.unroot(domain.dir)}")
+    info = check_pair(ctx, domain.fullchain, domain.key, domain.names)
+    return Source(domain=domain, fullchain=fullchain, key=key, info=info)
+
+
+# --------------------------------------------------------------------------- #
+# Which domain is the bot's
+# --------------------------------------------------------------------------- #
+def adopted(domains: Sequence[AcmeDomain]) -> list[AcmeDomain]:
+    return [d for d in domains if d.reload_kind == "ours"]
+
+
+def candidate_kind(ctx: Ctx, d: AcmeDomain) -> str | None:
+    """Why *d* could be the bot's: "setup" — set up by hand for these readers (it copies to
+    a registry path, its reloadcmd names the tracked hook or a reader); "sni" — only that
+    it covers HYSTERIA2_SNI; None — neither."""
+    real = set(d.real_paths().values()) - {""}
+    cmd = d.reloadcmd
+    if real & registry_paths() or d.reload_kind == "legacy" or any(w in cmd for w in ("hysteria", "nginx", "vpn-bot-subscription")):
+        return "setup"
+    sni = ctx.env("HYSTERIA2_SNI").strip().lower()
+    return "sni" if sni and sni in d.names else None
+
+
+def candidates(ctx: Ctx, domains: Sequence[AcmeDomain]) -> list[AcmeDomain]:
+    """The domains that could be the bot's — one per name: of an rsa and an ecc directory
+    sharing it, the one _one_variant picks (the plan names that directory)."""
+    found = [d for d in domains if candidate_kind(ctx, d)]
+    by_name: dict[str, list[AcmeDomain]] = {}
+    for d in found:
+        by_name.setdefault(d.name.lower(), []).append(d)
+    return [_one_variant(ctx, group) if len(group) > 1 else group[0] for group in by_name.values()]
+
+
+def bot_domain(ctx: Ctx, domains: Sequence[AcmeDomain], explicit: str | None = None) -> AcmeDomain:
+    if explicit:
+        named = [d for d in domains if d.name.lower() == explicit.lower()]
+        if not named:
+            raise Refused(f"acme.sh has no domain {explicit}")
+        return _one_variant(ctx, named)
+    le = os.environ.get("Le_Domain", "").strip().lower()
+    if le:
+        named = [d for d in domains if d.name.lower() == le]
+        if named:
+            return _one_variant(ctx, named)
+    ours = adopted(domains)
+    if len(ours) > 1:
+        raise Refused("more than one acme.sh domain names vpn-bot-cert deploy: " + ", ".join(d.dir.name for d in ours))
+    if not ours:
+        raise Refused("no acme.sh domain is the bot's yet (its reloadcmd is not vpn-bot-cert deploy) — adopt it first")
+    return ours[0]
+
+
+def _usable(ctx: Ctx, d: AcmeDomain) -> bool:
+    try:
+        load_source(ctx, d)
+    except (Refused, Cannot):
+        return False
+    return True
+
+
+def _one_variant(ctx: Ctx, named: Sequence[AcmeDomain]) -> AcmeDomain:
+    """An rsa and an ecc directory of the same name: the one acme.sh runs us from, else the
+    one that is the bot's, else the one the hand-made setup serves the readers from (the
+    candidate status offered), else the one whose pair is usable — ecc only when all of
+    that leaves both. (The plan names the directory it acts on.)"""
+    if len(named) == 1:
+        return named[0]
+    with contextlib.suppress(OSError):
+        cwd = Path.cwd().resolve()
+        for d in named:
+            if d.dir.resolve() == cwd:
+                return d
+    narrowed = list(named)
+    for keep in (lambda ds: [d for d in ds if d.reload_kind == "ours"],
+                 lambda ds: [d for d in ds if candidate_kind(ctx, d) == "setup"],
+                 lambda ds: [d for d in ds if _usable(ctx, d)]):
+        left = keep(narrowed)
+        if len(left) == 1:
+            return left[0]
+        if left:
+            narrowed = left
+    ecc = [d for d in narrowed if d.ecc]
+    return ecc[0] if ecc else narrowed[0]
+
+
+# --------------------------------------------------------------------------- #
+# Consumers on this host
+# --------------------------------------------------------------------------- #
+def unit_installed(ctx: Ctx, unit: str) -> bool:
+    return run(ctx, ["systemctl", "cat", "--", unit])[0] == 0
+
+
+def unit_active(ctx: Ctx, unit: str) -> bool:
+    return run(ctx, ["systemctl", "is-active", "--quiet", "--", unit])[0] == 0
+
+
+def installed(ctx: Ctx, c: Consumer) -> tuple[bool, str]:
+    if c.marker and ctx.host(f"{MARKER_DIR}/{c.marker}").exists():
+        return False, f"removed from this host (marker {MARKER_DIR}/{c.marker})"
+    if not unit_installed(ctx, c.unit):
+        return False, f"{c.unit} is not installed"
+    if not c.directory.managed and not ctx.host(c.directory.path).is_dir():
+        return False, f"{c.directory.path} does not exist"
+    return True, "installed"
+
+
+def groups_of(consumers: Sequence[Consumer]) -> list[list[Consumer]]:
+    """Consumers that share a file are one group: they get the new pair — and lose it on a
+    rollback — together."""
+    groups: list[list[Consumer]] = []
+    for c in consumers:
+        paths = {f.path for f in c.files}
+        joined = [g for g in groups if paths & {f.path for m in g for f in m.files}]
+        merged = [m for g in joined for m in g] + [c]
+        groups = [g for g in groups if g not in joined] + [merged]
+    order = {c.name: i for i, c in enumerate(CONSUMERS)}
+    return sorted((sorted(g, key=lambda m: order[m.name]) for g in groups), key=lambda g: order[g[0].name])
+
+
+def group_files(group: Sequence[Consumer]) -> list[tuple[FileSpec, Consumer]]:
+    seen: dict[str, tuple[FileSpec, Consumer]] = {}
+    for c in group:
+        for f in c.files:
+            seen.setdefault(f.path, (f, c))
+    return list(seen.values())
+
+
+NGINX_MAX_FILES = 256
+# Where nginx's own files live: the config and the package's module snippets (Debian /
+# Ubuntu link modules-enabled/* there). A file elsewhere is never read — it is reported.
+NGINX_TREES = ("/etc/nginx", "/usr/share/nginx")
+
+
+def nginx_config_files(ctx: Ctx) -> tuple[list[Path], list[str]]:
+    """The files nginx loads: nginx.conf and what its ``include`` directives name (globs,
+    relative to /etc/nginx, followed recursively), plus conf.d/ and sites-enabled/ as the
+    packaging lays them out. (files read, files NOT read: out of NGINX_TREES — never
+    followed — or unreadable)."""
+    trees = [os.path.realpath(ctx.host(t)) + "/" for t in NGINX_TREES]
+    seen: set[str] = set()
+    files: list[Path] = []
+    skipped: list[str] = []
+    queue: list[Path] = [ctx.host(NGINX_CONF)]
+    for d in NGINX_CONF_DIRS:
+        base = ctx.host(d)
+        if base.is_dir():
+            queue += sorted(base.iterdir())
+    while queue and len(files) < NGINX_MAX_FILES:
+        p = queue.pop(0)
+        real = os.path.realpath(p)
+        if real in seen:
+            continue
+        seen.add(real)
+        if not os.path.exists(real):
+            continue
+        if not any(real.startswith(t) for t in trees):
+            skipped.append(ctx.unroot(Path(real)))
+            continue
+        if not os.path.isfile(real):
+            continue
+        text = read_text(Path(real))
+        if text is None:
+            skipped.append(ctx.unroot(Path(real)))
+            continue
+        files.append(Path(real))
+        for m in re.finditer(r"^\s*include\s+['\"]?([^;'\"\s]+)['\"]?\s*;", text, re.MULTILINE):
+            pattern = m.group(1)
+            host_pattern = str(ctx.host(pattern if pattern.startswith("/") else f"/etc/nginx/{pattern}"))
+            queue += [Path(x) for x in sorted(globlib.glob(host_pattern))]
+    return files, skipped
+
+
+def reads(ctx: Ctx, c: Consumer) -> tuple[bool | None, str, bool | None, bool]:
+    """What the consumer is configured to read, against the registry: (it reads only
+    what the registry lays out, the detail, it reads the registry's pair at all, the
+    answer is UNVERIFIABLE — its configuration could not be read in full). None:
+    unknown. The first two differ for nginx only — another vhost with a certificate of
+    its own is a finding, not a reader that misses the registry's pair."""
+    want = {f.source: f.path for f in c.files}
+    if c.name == "hysteria":
+        text = read_text(ctx.host(HYSTERIA_CONFIG))
+        if text is None:
+            return None, f"{HYSTERIA_CONFIG} is not readable", None, True
+        cert = re.search(r"^\s*cert:\s*['\"]?([^'\"\s#]+)", text, re.MULTILINE)
+        key = re.search(r"^\s*key:\s*['\"]?([^'\"\s#]+)", text, re.MULTILINE)
+        got = {"fullchain": cert.group(1) if cert else "", "key": key.group(1) if key else ""}
+        if re.search(r"^\s*acme:", text, re.MULTILINE) and not (cert and key):
+            return False, "hysteria issues its own certificate (acme: in its config) — not this registry's", False, False
+        ok = got == want
+        return ok, f"tls.cert={got['fullchain'] or '—'} tls.key={got['key'] or '—'}", ok, False
+    if c.name == "subscription":
+        cert, key = ctx.env("SUBSCRIPTION_TLS_CERT"), ctx.env("SUBSCRIPTION_TLS_KEY")
+        if not cert and not key:
+            return None, "SUBSCRIPTION_TLS_CERT/KEY are not set (no public TLS port)", None, False
+        ok = cert == want["fullchain"] and key == want["key"]
+        return ok, f"SUBSCRIPTION_TLS_CERT={cert or '—'} SUBSCRIPTION_TLS_KEY={key or '—'}", ok, False
+    if c.name == "nginx":
+        files, skipped = nginx_config_files(ctx)
+        texts = [read_text(f) or "" for f in files]
+        used = sorted({m.group(1) for t in texts for m in re.finditer(r"^\s*ssl_certificate(?:_key)?\s+([^;\s]+)\s*;", t, re.MULTILINE)})
+        unread = f" — not read: {', '.join(skipped[:5])}" if skipped else ""
+        registry: bool | None = set(want.values()) <= set(used)
+        if not registry and skipped:
+            registry = None  # the files not read may hold it
+        foreign = [p for p in used if p not in want.values() and not p.startswith("/etc/ssl/")]
+        if foreign:
+            return False, "nginx also reads " + ", ".join(foreign) + " — not laid out by vpn-bot-cert" + unread, registry, bool(skipped)
+        if not used:
+            return None, "no ssl_certificate in the nginx config" + unread, None, bool(skipped)
+        return (None if skipped else True), "ssl_certificate " + ", ".join(used) + unread, registry, bool(skipped)
+    return None, "", None, False
+
+
+# --------------------------------------------------------------------------- #
+# The state file: which pair each consumer last TOOK (its action ran on it)
+# --------------------------------------------------------------------------- #
+def load_state(ctx: Ctx) -> dict[str, Any]:
+    text = read_text(ctx.host(STATE_FILE))
+    if not text:
+        return {}
+    with contextlib.suppress(ValueError):
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def save_state(ctx: Ctx, state: Mapping[str, Any]) -> None:
+    path = ctx.host(STATE_FILE)
+    fence(ctx, path)
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    write_atomic_text(ctx, path, json.dumps(state, sort_keys=True, indent=1) + "\n", mode=0o644)
+
+
+# --------------------------------------------------------------------------- #
+# The bot's Cloudflare token (root reads the bot's own 0600 file)
+# --------------------------------------------------------------------------- #
+def read_bot_token(ctx: Ctx) -> str:
+    path = ctx.host(TOKEN_FILE)
+    try:
+        data = read_regular(path, 1024)
+    except Cannot as exc:
+        raise Refused(f"the bot's Cloudflare token cannot be read: {exc}") from None
+    if data is None:
+        raise Refused(f"no Cloudflare token in {TOKEN_FILE} — set it in the bot («Токен Cloudflare»)")
+    mode = os.lstat(path).st_mode & 0o777
+    owner, _ = owner_of(ctx, path)
+    if mode & 0o077 or owner not in TOKEN_OWNERS:
+        raise Refused(f"{TOKEN_FILE} is not private (owner {owner}, mode {mode:o}) — refusing to use it")
+    token = data.decode("ascii", errors="replace").strip()
+    if not _TOKEN_RE.match(token):
+        raise Refused(f"{TOKEN_FILE} does not hold a token")
+    ctx.secrets.append(token)
+    return token
+
+
+def token_status(ctx: Ctx) -> dict[str, Any]:
+    try:
+        token = read_bot_token(ctx)
+    except Refused as exc:
+        present = ctx.host(TOKEN_FILE).exists()
+        return {"present": present, "fp": None, "error": None if not present else str(exc)}
+    return {"present": True, "fp": fingerprint(token), "error": None}
+
+
+def acme_token(ctx: Ctx, d: AcmeDomain) -> dict[str, Any]:
+    """The Cloudflare credential acme.sh renews this domain with (a fingerprint only)."""
+    if d.conf.get("CF_Token"):
+        return {"source": "domain", "fp": fingerprint(d.conf["CF_Token"]), "zone": d.conf.get("CF_Zone_ID") or None}
+    account = parse_conf(read_text(ctx.host(f"{ACME_HOME}/account.conf")) or "")
+    token = account.get("SAVED_CF_Token") or account.get("CF_Token")
+    if token:
+        return {"source": "account", "fp": fingerprint(token), "zone": account.get("SAVED_CF_Zone_ID") or None}
+    if d.conf.get("CF_Key") or account.get("SAVED_CF_Key") or account.get("CF_Key"):
+        return {"source": "global_key", "fp": None, "zone": None}
+    return {"source": "none", "fp": None, "zone": None}
+
+
+# --------------------------------------------------------------------------- #
+# status
+# --------------------------------------------------------------------------- #
+def file_status(ctx: Ctx, spec: FileSpec, c: Consumer, src: Source | None) -> dict[str, Any]:
+    path = ctx.host(spec.path)
+    out: dict[str, Any] = {"path": spec.path, "source": spec.source, "exists": False, "same": None,
+                           "owner": None, "mode": None, "want_owner": f"{spec.owner}:{effective_group(ctx, spec, c)}",
+                           "want_mode": f"{spec.mode:04o}", "perms_ok": None, "sha256": None, "not_after": None,
+                           "days_left": None}
+    try:
+        data = read_regular(path)
+    except Cannot as exc:
+        out["error"] = str(exc)
+        return out
+    if data is None:
+        return out
+    user, group = owner_of(ctx, path)
+    mode = os.lstat(path).st_mode & 0o7777
+    out.update(exists=True, owner=f"{user}:{group}", mode=f"{mode:04o}", sha256=sha256(data)[:16])
+    out["perms_ok"] = out["owner"] == out["want_owner"] and mode == spec.mode
+    if src is not None:
+        out["same"] = data == src.data(spec.source)
+    if spec.source == "fullchain":
+        info = cert_info(ctx, path)
+        out["not_after"] = iso(info.not_after)
+        out["days_left"] = None if info.days_left is None else round(info.days_left, 1)
+    return out
+
+
+def domain_status(ctx: Ctx, d: AcmeDomain) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "name": d.name, "dir": ctx.unroot(d.dir), "ecc": d.ecc, "names": d.names, "keylength": d.keylength,
+        # Shown redacted: a hand-made reloadcmd may carry a credential (the kind reads the raw one).
+        "reloadcmd": shown(ctx, d.reloadcmd), "reloadcmd_kind": d.reload_kind,
+        "real_paths": {k: v for k, v in d.real_paths().items() if v},
+        "next_renew": d.conf.get("Le_NextRenewTimeStr") or None, "token": acme_token(ctx, d),
+        "san": [], "not_after": None, "days_left": None, "sha256": None, "key_ok": None, "error": None,
+    }
+    try:
+        src = load_source(ctx, d)
+    except (Refused, Cannot) as exc:
+        out["error"] = str(exc)
+        info = cert_info(ctx, d.fullchain) if d.fullchain.is_file() else CertInfo(error="no fullchain.cer")
+        out["key_ok"] = False if d.fullchain.is_file() and d.key.is_file() else None
+    else:
+        info = src.info
+        out["key_ok"] = True
+        out["pair_sha"] = src.pair_sha[:16]
+    out["san"] = list(info.san)
+    out["not_after"] = iso(info.not_after)
+    out["days_left"] = None if info.days_left is None else round(info.days_left, 1)
+    out["sha256"] = info.sha256[:16] or None
+    return out
+
+
+def status(ctx: Ctx) -> dict[str, Any]:
+    domains = load_domains(ctx)
+    ours = adopted(domains)
+    # Several naming vpn-bot-cert deploy: each is offered (adopt --domain keeps the one
+    # picked and releases the others) — there is no other way out of that state.
+    cands = ours if len(ours) > 1 else [] if ours else candidates(ctx, domains)
+    target = ours[0] if len(ours) == 1 else (cands[0] if len(cands) == 1 else None)
+    src: Source | None = None
+    if target is not None:
+        with contextlib.suppress(Refused, Cannot):
+            src = load_source(ctx, target)
+    state = load_state(ctx)
+    taken = state.get("consumers") if isinstance(state.get("consumers"), dict) else {}
+    consumers = []
+    for c in CONSUMERS:
+        ok, why = installed(ctx, c)
+        files = [file_status(ctx, f, c, src) for f in c.files] if ok else []
+        in_sync = None if not ok or src is None else all(f["same"] for f in files)
+        reads_ok, reads_detail, reads_registry, unverifiable = reads(ctx, c) if ok else (None, "", None, False)
+        deployed = taken.get(c.name, {}).get("sha") if isinstance(taken.get(c.name), dict) else None
+        consumers.append({
+            "name": c.name, "unit": c.unit, "action": c.action, "installed": ok, "why": why, "files": files,
+            "in_sync": in_sync, "reads_ok": reads_ok, "reads": reads_detail, "reads_registry": reads_registry,
+            "reads_unverifiable": unverifiable,
+            "took_current": None if src is None or deployed is None else deployed == src.pair_sha,
+        })
+    report: dict[str, Any] = {
+        "version": 1,
+        "reload_cmd": RELOAD_CMD,
+        "acme": {"installed": acme_installed(ctx), "home": ACME_HOME, "version": acme_version(ctx), "cron": acme_cron(ctx)},
+        "domains": [domain_status(ctx, d) for d in domains],
+        "domain": ours[0].name if len(ours) == 1 else None,
+        "adopted": len(ours) == 1,
+        "candidate": cands[0].name if not ours and len(cands) == 1 else None,  # one candidate: adopt needs no pick
+        "candidates": sorted({d.name for d in cands}),
+        # The directory meant by "domain" / "candidate" (an rsa and an ecc one share the name).
+        "target_dir": ctx.unroot(target.dir) if target is not None else None,
+        "ambiguous": [d.dir.name for d in (ours if len(ours) > 1 else cands if len(cands) > 1 else [])],
+        "consumers": consumers,
+        "token": token_status(ctx),
+        "hysteria2_sni": ctx.env("HYSTERIA2_SNI").strip().lower() or None,
+    }
+    report["problems"] = problems(report)
+    levels = {p["level"] for p in report["problems"]}
+    report["verdict"] = "fail" if "red" in levels else "warn" if "yellow" in levels else "ok"
+    return report
+
+
+def problems(r: Mapping[str, Any]) -> list[dict[str, str]]:
+    """The judgment, written once: the self-check and the bot show these."""
+    out: list[dict[str, str]] = []
+
+    def add(level: str, key: str, text: str) -> None:
+        out.append({"level": level, "key": key, "text": text})
+
+    installed_consumers = [c for c in r["consumers"] if c["installed"]]
+    if not r["domains"]:
+        if installed_consumers:
+            add("yellow", "acme", "acme.sh manages no certificate on this host — «Выпустить» issues one")
+        return out
+    if r["ambiguous"]:
+        add("red", "domain", "cannot tell which acme.sh domain is the bot's: " + ", ".join(r["ambiguous"]))
+    name = r["domain"] or r["candidate"]
+    named = [d for d in r["domains"] if d["name"] == name] if name else []
+    # An rsa and an ecc directory share the name: the one status means (target_dir).
+    dom = next((d for d in named if d["dir"] == r.get("target_dir")), named[0] if named else None)
+    if dom is None:
+        if not r["ambiguous"]:
+            add("yellow", "domain", "no acme.sh domain serves the registry's readers — «Выпустить» issues one")
+        return out
+    if not r["acme"]["cron"]:
+        add("red", "cron", "no acme.sh --cron line in root's crontab — nothing renews the certificate")
+    kind = dom["reloadcmd_kind"]
+    if kind == "ours":
+        pass
+    elif kind == "legacy":
+        add("yellow", "reloadcmd", f"{dom['name']}: acme.sh still calls the old hook ({dom['reloadcmd']}) — "
+                                   "adopt it («Принять текущий сертификат»): then every reader of the registry gets the renewal")
+    else:
+        add("red", "reloadcmd", f"{dom['name']}: acme.sh's reloadcmd is {dom['reloadcmd'] or 'empty'!r} — a renewal does not "
+                                "reach every reader; adopt it («Принять текущий сертификат»)")
+    if dom["error"]:
+        add("red", "acme_pair", f"{dom['name']}: {dom['error']}")
+    for other in r["domains"]:
+        if other is dom:
+            continue
+        hit = sorted(set(other["real_paths"].values()) & registry_paths())
+        if hit:
+            add("red", "writer", f"{other['dir']}: acme.sh also copies this domain's certificate to {', '.join(hit)} on "
+                                 "its renewals — over the bot's; remove its install-cert (or the domain)")
+    days = dom["days_left"]
+    if days is not None:
+        level = "red" if days < RED_DAYS else "yellow" if days < YELLOW_DAYS else ""
+        if level:
+            add(level, "expiry", f"{dom['name']}: {days:.0f} days left (until {dom['not_after']})")
+    sni = r.get("hysteria2_sni")
+    if sni and dom["san"] and not covers(dom["san"], sni):
+        add("yellow", "san", f"{dom['name']}: the SAN ({', '.join(dom['san'])}) does not cover HYSTERIA2_SNI={sni}")
+    for c in installed_consumers:
+        for f in c["files"]:
+            if not f["exists"]:
+                add("yellow", f"copy:{c['name']}", f"{c['name']}: {f['path']} is missing")
+            elif f["same"] is False:
+                d = f["days_left"]
+                level = "red" if d is not None and d < RED_DAYS else "yellow"
+                add(level, f"copy:{c['name']}", f"{c['name']}: {f['path']} is not acme.sh's current certificate"
+                                                 + (f" ({d:.0f} days left on it)" if d is not None else ""))
+            if f["exists"] and f["perms_ok"] is False:
+                add("yellow", f"perms:{c['name']}", f"{c['name']}: {f['path']} is {f['owner']} {f['mode']}, "
+                                                    f"want {f['want_owner']} {f['want_mode']}")
+        if c["reads_ok"] is False:
+            add("yellow", f"reads:{c['name']}", f"{c['name']}: {c['reads']}")
+        elif c.get("reads_unverifiable") and c["reads_registry"] is not True:
+            add("yellow", f"reads:{c['name']}", f"{c['name']}: cannot tell what it reads — {c['reads']}")
+        if c["in_sync"] and c["took_current"] is False:
+            add("yellow", f"action:{c['name']}", f"{c['name']}: the files are current, but its last {c['action']} ran "
+                                                  "on another pair — «Разложить заново» acts on it again")
+    bot, acme_tok = r["token"], dom["token"]
+    if not bot["present"]:
+        add("yellow", "token", "the bot has no Cloudflare token — «Выпустить» / «Проверить продление» need it")
+    elif bot["error"]:
+        add("red", "token", bot["error"])
+    elif acme_tok["fp"] and bot["fp"] != acme_tok["fp"]:
+        add("yellow", "token", f"acme.sh renews with another Cloudflare token ({acme_tok['fp']}, the bot's is {bot['fp']}) — "
+                               "«Проверить продление» switches it to the bot's")
+    elif acme_tok["source"] in ("global_key", "none"):
+        add("yellow", "token", f"acme.sh renews with {'the global API key' if acme_tok['source'] == 'global_key' else 'no saved credential'}"
+                               " — «Проверить продление» switches it to the bot's token")
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# deploy
+# --------------------------------------------------------------------------- #
+class Lock:
+    def __init__(self, ctx: Ctx) -> None:
+        self.ctx = ctx
+        self.path = ctx.host(LOCK_FILE)
+        self.fd: int | None = None
+
+    def acquire(self, wait: float) -> None:
+        fence(self.ctx, self.path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise Cannot(f"{LOCK_FILE} is held by another vpn-bot-cert for {wait:.0f}s") from None
+                time.sleep(0.5)
+
+    def token(self) -> str:
+        assert self.fd is not None
+        st = os.fstat(self.fd)
+        return f"{st.st_dev}:{st.st_ino}"
+
+    def release(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+def nested_in_parent(ctx: Ctx) -> bool:
+    """acme.sh runs the reloadcmd from inside `issue` / `renew` / `adopt`: the parent
+    holds the lock and deploys itself right after."""
+    marker = os.environ.get(NESTED_ENV, "")
+    if not marker:
+        return False
+    try:
+        st = os.stat(ctx.host(LOCK_FILE))
+    except OSError:
+        return False
+    if marker != f"{st.st_dev}:{st.st_ino}":
+        return False
+    fd = os.open(ctx.host(LOCK_FILE), os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True  # held: by the parent
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def run_action(ctx: Ctx, c: Consumer, log: list[str]) -> tuple[bool, str]:
+    """The consumer's check, its action, and that it runs afterwards."""
+    if c.check:
+        rc, out = run(ctx, list(c.check))
+        if rc != 0:
+            return False, f"{' '.join(c.check)} failed (exit {rc}): {out.strip()[-300:]}"
+    was_active = unit_active(ctx, c.unit) if c.action == "try-restart" else True
+    rc, out = run(ctx, ["systemctl", c.action, "--", c.unit])
+    log.append(f"systemctl {c.action} {c.unit}: exit {rc}")
+    if rc != 0:
+        return False, f"systemctl {c.action} {c.unit} failed (exit {rc}): {out.strip()[-300:]}"
+    if c.action in ("restart", "try-restart") and was_active:
+        if SETTLE_SECONDS:
+            time.sleep(SETTLE_SECONDS)
+        if not unit_active(ctx, c.unit):
+            return False, f"{c.unit} is not active after the {c.action}"
+    return True, f"{c.action} {c.unit}: ok"
+
+
+@dataclass
+class Staged:
+    spec: FileSpec
+    owner: str
+    group: str
+    path: Path
+    new: Path | None = None      # the staged copy (None: content already current)
+    old: Path | None = None      # the previous copy kept for a rollback
+    existed: bool = False
+    content_change: bool = False
+    perms_change: bool = False
+
+
+def deploy(ctx: Ctx, domain: AcmeDomain, *, every: bool = False, dry_run: bool = False,
+           expect: str | None = None) -> dict[str, Any]:
+    src = load_source(ctx, domain)
+    if expect and src.pair_sha[:16] != expect[:16]:
+        # The very pair laid out below, not a second read of it (see expect_pair).
+        raise Refused(f"{domain.name}: acme.sh's certificate changed since the plan ({expect[:16]} → "
+                      f"{src.pair_sha[:16]}) — plan again")
+    state = load_state(ctx)
+    taken: dict[str, Any] = state.get("consumers") if isinstance(state.get("consumers"), dict) else {}
+    if state.get("domain") not in (None, domain.name):
+        taken = {}
+    active: list[Consumer] = []
+    skipped: list[dict[str, str]] = []
+    for c in CONSUMERS:
+        ok, why = installed(ctx, c)
+        if ok:
+            active.append(c)
+        else:
+            skipped.append({"consumer": c.name, "why": why})
+    report: dict[str, Any] = {
+        "domain": domain.name, "dry_run": dry_run, "every": every,
+        "source": {"pair_sha": src.pair_sha[:16], "not_after": iso(src.info.not_after), "san": list(src.info.san)},
+        "groups": [], "skipped": skipped,
+    }
+    for group in groups_of(active):
+        report["groups"].append(_deploy_group(ctx, group, src, taken, every=every, dry_run=dry_run))
+    report["ok"] = all(g["result"] in ("ok", "unchanged", "planned") for g in report["groups"])
+    if not dry_run:
+        new_state = {"domain": domain.name, "pair_sha": src.pair_sha, "at": iso(time.time()),
+                     "consumers": {k: v for k, v in taken.items() if isinstance(v, dict)}}
+        save_state(ctx, new_state)
+    return report
+
+
+def _deploy_group(ctx: Ctx, group: list[Consumer], src: Source, taken: dict[str, Any], *,
+                  every: bool, dry_run: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {"consumers": [c.name for c in group], "files": [], "actions": [], "result": "unchanged",
+                           "error": None}
+    staged: list[Staged] = []
+    try:
+        for spec, owner_consumer in group_files(group):
+            path = ctx.host(spec.path)
+            group_name = effective_group(ctx, spec, owner_consumer)
+            cur = read_regular(path)
+            st = Staged(spec=spec, owner=spec.owner, group=group_name, path=path, existed=cur is not None)
+            st.content_change = cur != src.data(spec.source)
+            if cur is not None and not st.content_change:
+                user, grp_ = owner_of(ctx, path)
+                st.perms_change = (user, grp_) != (spec.owner, group_name) or (os.lstat(path).st_mode & 0o7777) != spec.mode
+            staged.append(st)
+            out["files"].append({"path": spec.path, "change": "content" if st.content_change else
+                                 "perms" if st.perms_change else "none"})
+    except Cannot as exc:
+        out["result"], out["error"] = "failed", f"reading the current copies: {exc}"
+        return out
+    changed = any(s.content_change for s in staged)
+    need = [c for c in group if every or changed or
+            (isinstance(taken.get(c.name), dict) and taken[c.name].get("sha") != src.pair_sha)]
+    out["act"] = [c.name for c in need]
+    if dry_run:
+        out["result"] = "planned" if changed or need or any(s.perms_change for s in staged) else "unchanged"
+        return out
+    directory = group[0].directory
+    try:
+        if directory.managed:
+            d = ctx.host(directory.path)
+            fence(ctx, d)
+            d.mkdir(mode=directory.mode, parents=True, exist_ok=True)
+            if d.is_symlink():
+                raise Cannot(f"{directory.path} is a symlink")
+            chown(ctx, d, directory.owner, directory.group)
+            os.chmod(d, directory.mode)
+        for s in staged:
+            if not account_exists(ctx, s.owner, s.group):
+                raise Cannot(f"{s.spec.path}: {s.owner}:{s.group} does not exist on this host")
+            if s.content_change:
+                s.new = s.path.with_name(f".{s.path.name}{STAGE_SUFFIX}")
+                write_with_owner(ctx, s.new, src.data(s.spec.source), s.owner, s.group, s.spec.mode)
+        # The staged pair, checked as each consumer will read it.
+        for c in group:
+            cert = next(s for s in staged if s.spec.path == c.file_for("fullchain").path)
+            key = next(s for s in staged if s.spec.path == c.file_for("key").path)
+            if cert.new or key.new:
+                check_pair(ctx, cert.new or cert.path, key.new or key.path, src.domain.names)
+    except (Refused, Cannot, OSError) as exc:
+        for s in staged:
+            if s.new is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(s.new)
+        out["result"], out["error"] = "failed", f"staging: {exc}"
+        return out
+    # Keep the old copies, then rename the new ones over them — back to back.
+    try:
+        for s in staged:
+            if s.new is not None and s.existed:
+                s.old = s.path.with_name(f".{s.path.name}{OLD_SUFFIX}")
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(s.old)
+                os.link(s.path, s.old)
+                if SELFTEST:
+                    user, grp_ = owner_of(ctx, s.path)
+                    chown(ctx, s.old, user, grp_)
+        for s in staged:
+            if s.new is not None:
+                os.replace(s.new, s.path)
+                move_owner(ctx, s.new, s.path)
+            elif s.perms_change:
+                chown(ctx, s.path, s.owner, s.group)
+                os.chmod(s.path, s.spec.mode)
+    except OSError as exc:
+        _restore(ctx, staged)
+        out["result"], out["error"] = "failed", f"install: {exc}"
+        return out
+    log: list[str] = []
+    ran: list[Consumer] = []
+    took: dict[str, Any] = {}
+    for c in need:
+        ok, text = run_action(ctx, c, log)
+        out["actions"].append({"consumer": c.name, "unit": c.unit, "action": c.action, "ok": ok, "text": text})
+        if not ok:
+            # The old files back for THIS group, and its actions again on them.
+            _restore(ctx, staged)
+            undo = []
+            for again in [*ran, c]:
+                ok2, text2 = run_action(ctx, again, log)
+                undo.append({"consumer": again.name, "ok": ok2, "text": text2})
+            out["rollback"] = undo
+            out["result"], out["error"] = "rolled_back", f"{c.name}: {text}"
+            # The state keeps what each of them took before: the old pair again.
+            return out
+        ran.append(c)
+        took[c.name] = {"sha": src.pair_sha, "at": iso(time.time())}
+    for c in group:
+        if c not in need and c.name not in taken:
+            took[c.name] = {"sha": src.pair_sha, "at": iso(time.time())}
+    taken.update(took)
+    for s in staged:
+        if s.old is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(s.old)
+            if SELFTEST:
+                data = _sidecar_read(ctx)
+                data.pop(ctx.unroot(s.old), None)
+                _sidecar(ctx).write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+    out["result"] = "ok" if changed or need or any(s.perms_change for s in staged) else "unchanged"
+    return out
+
+
+def _restore(ctx: Ctx, staged: Sequence[Staged]) -> None:
+    for s in staged:
+        if s.new is None:
+            continue
+        with contextlib.suppress(OSError):
+            if s.old is not None and s.old.exists():
+                os.replace(s.old, s.path)
+                move_owner(ctx, s.old, s.path)
+            elif not s.existed:
+                os.unlink(s.path)
+        with contextlib.suppress(OSError):
+            os.unlink(s.new)
+
+
+def act(ctx: Ctx) -> dict[str, Any]:
+    log: list[str] = []
+    actions = []
+    for c in CONSUMERS:
+        ok, why = installed(ctx, c)
+        if not ok:
+            actions.append({"consumer": c.name, "ok": True, "text": f"skipped — {why}"})
+            continue
+        done, text = run_action(ctx, c, log)
+        actions.append({"consumer": c.name, "ok": done, "text": text})
+    return {"actions": actions, "ok": all(a["ok"] for a in actions)}
+
+
+# --------------------------------------------------------------------------- #
+# acme.sh: install, issue, install-cert, renew
+# --------------------------------------------------------------------------- #
+def other_acme(ctx: Ctx) -> list[str]:
+    """acme.sh processes running now (pid: argv): the script is the first argument or
+    the interpreter's (`sh /root/.acme.sh/acme.sh --cron …`)."""
+    found: list[str] = []
+    try:
+        entries = sorted(ctx.host("/proc").iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        args = [a.decode("utf-8", errors="replace") for a in raw.split(b"\0") if a]
+        if any(Path(a).name == ACME_ENTRY for a in args[:3]):
+            found.append(f"{entry.name}: {' '.join(args)[:160]}")
+    return found
+
+
+def wait_for_acme(ctx: Ctx, log: list[str]) -> None:
+    deadline = time.monotonic() + ACME_BUSY_WAIT
+    noted = False
+    while True:
+        busy = other_acme(ctx)
+        if not busy:
+            return
+        if not noted:
+            log.append("waiting for another acme.sh: " + "; ".join(busy[:3]))
+            noted = True
+        if time.monotonic() >= deadline:
+            raise Refused("acme.sh is running already (its cron?): " + "; ".join(busy[:3])
+                          + " — try again once it is done")
+        time.sleep(2)
+
+
+@contextlib.contextmanager
+def cron_held_off(ctx: Ctx, domain: AcmeDomain | None, log: list[str]) -> Iterator[None]:
+    """While the helper's acme.sh works on *domain*, `acme.sh --cron` skips it: its
+    Le_NextRenewTime is pushed CRON_HOLD_SECONDS ahead (never pulled earlier), and put back
+    afterwards unless acme.sh wrote a new one (a renewal that went through). The wait for
+    an acme.sh already running comes AFTER this, inside it — the two together leave no
+    moment in which a cron run can take the domain."""
+    if domain is None or not domain.conf_path.is_file():
+        yield
+        return
+    old = parse_conf(read_text(domain.conf_path) or "").get("Le_NextRenewTime", "")
+    hold = int(time.time()) + CRON_HOLD_SECONDS
+    try:
+        due = int(old)
+    except ValueError:
+        due = 0
+    if due >= hold:
+        yield
+        return
+    conf_set(ctx, domain.conf_path, {"Le_NextRenewTime": str(hold)})
+    log.append(f"{domain.name}: acme.sh --cron holds off it until the helper is done")
+    try:
+        yield
+    finally:
+        now_value = parse_conf(read_text(domain.conf_path) or "").get("Le_NextRenewTime", "")
+        if now_value == str(hold):
+            conf_set(ctx, domain.conf_path, {"Le_NextRenewTime": old})
+
+
+def acme_argv(ctx: Ctx, *args: str) -> list[str]:
+    home = str(ctx.host(ACME_HOME))
+    return [f"{home}/{ACME_ENTRY}", "--home", home, "--config-home", home, *args]
+
+
+def _fetch(url: str) -> bytes:
+    if SELFTEST:
+        base = os.environ.get("VPN_BOT_CERT_SELFTEST_ACME_SRC", "")
+        rel = url.split(f"/{ACME_VERSION}/", 1)[-1]
+        path = Path(base) / rel
+        if not base or not path.is_file():
+            raise Cannot(f"selftest: no {rel} in VPN_BOT_CERT_SELFTEST_ACME_SRC")
+        return path.read_bytes()
+    request = urllib.request.Request(url, headers={"User-Agent": "vpn-bot-cert"})  # noqa: S310 — a fixed https URL
+    with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
+        data: bytes = response.read(MAX_DOWNLOAD + 1)
+    if len(data) > MAX_DOWNLOAD:
+        raise Cannot(f"{url}: larger than {MAX_DOWNLOAD} bytes")
+    return data
+
+
+def install_acme(ctx: Ctx, log: list[str]) -> None:
+    pins = dict(ACME_FILES)
+    if SELFTEST and os.environ.get("VPN_BOT_CERT_SELFTEST_ACME_PINS"):
+        pins = {k: (pins[k][0], v) for k, v in json.loads(os.environ["VPN_BOT_CERT_SELFTEST_ACME_PINS"]).items()}
+    base = ctx.host("/root")
+    fence(ctx, base / "x")
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".vpn-bot-cert-acme-", dir=str(base)))
+    try:
+        os.chmod(staging, 0o700)
+        for rel, (url, want) in pins.items():
+            try:
+                data = _fetch(url)
+            except OSError as exc:
+                raise Cannot(f"cannot download {url}: {exc}") from None
+            got = sha256(data)
+            if got != want:
+                raise Refused(f"{url}: sha256 {got} is not the pinned {want} — refusing to install it")
+            target = staging / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            target.chmod(0o700 if rel == ACME_ENTRY else 0o600)
+        home = str(ctx.host(ACME_HOME))
+        rc, out = run(ctx, ["sh", str(staging / ACME_ENTRY), "--install", "--home", home, "--config-home", home],
+                      timeout=300, cwd=str(staging))
+        log.append(f"acme.sh {ACME_VERSION} --install: exit {rc}")
+        if rc != 0 or not acme_installed(ctx):
+            raise Cannot(f"acme.sh --install failed (exit {rc}): {out.strip()[-400:]}")
+        rc, out = run(ctx, acme_argv(ctx, "--set-default-ca", "--server", CA_SERVER))
+        log.append(f"acme.sh --set-default-ca --server {CA_SERVER}: exit {rc}")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def install_cert(ctx: Ctx, domain: AcmeDomain, lock: Lock, log: list[str]) -> AcmeDomain:
+    """Register THE reloadcmd and nothing else (acme.sh writes no file outside its home);
+    acme.sh runs it at once — nested, it defers to us."""
+    args = ["--install-cert", "-d", domain.name, "--reloadcmd", RELOAD_CMD]
+    if domain.ecc:
+        args.append("--ecc")
+    rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT, env={NESTED_ENV: lock.token()})
+    log.append(f"acme.sh --install-cert -d {domain.name}: exit {rc}")
+    fresh = next((d for d in load_domains(ctx) if d.dir == domain.dir), None)
+    if fresh is None:
+        raise Cannot(f"{domain.name}: its conf disappeared after --install-cert")
+    if fresh.reload_kind != "ours" or any(fresh.real_paths().values()):
+        raise Cannot(f"acme.sh --install-cert -d {domain.name} did not leave reloadcmd={RELOAD_CMD!r} and no file "
+                     f"targets (exit {rc}): {out.strip()[-400:]}")
+    return fresh
+
+
+def zone_id(ctx: Ctx, token: str, zone: str) -> str:
+    """The id of *zone* as the token sees it (the bot checked the token against it)."""
+    if SELFTEST:
+        known = json.loads(os.environ.get("VPN_BOT_CERT_SELFTEST_ZONES", "{}"))
+        if zone not in known:
+            raise Refused(f"the Cloudflare token does not see the zone {zone}")
+        return str(known[zone])
+    from urllib.parse import quote
+
+    request = urllib.request.Request(  # noqa: S310 — the fixed Cloudflare API host
+        f"{CLOUDFLARE_API}/zones?name={quote(zone, safe='')}",
+        headers={"Authorization": f"Bearer {token}", "User-Agent": "vpn-bot-cert"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+            body = json.loads(response.read(1 << 20).decode("utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Cannot(f"Cloudflare GET /zones?name={zone}: {redact(ctx, str(exc))}") from None
+    found = [z for z in body.get("result") or [] if isinstance(z, dict) and str(z.get("name", "")).lower() == zone]
+    if not body.get("success") or len(found) != 1 or not _ZONE_ID_RE.match(str(found[0].get("id", ""))):
+        raise Refused(f"the Cloudflare token does not see the zone {zone} (it needs Zone · Zone · Read and Zone · DNS · Edit)")
+    return str(found[0]["id"])
+
+
+def _names(raw: str) -> list[str]:
+    names: list[str] = []
+    for part in raw.split(","):
+        name = part.strip().lower().rstrip(".")
+        if not name:
+            continue
+        if not _NAME_RE.match(name):
+            raise Refused(f"not a DNS name: {name!r}")
+        if name not in names:
+            names.append(name)
+    if not names or len(names) > MAX_NAMES:
+        raise Refused(f"1..{MAX_NAMES} names, please")
+    return names
+
+
+def keylength_now(ctx: Ctx, current: AcmeDomain | None) -> str:
+    """The key type acme.sh's conf of *current* holds now (a new domain: NEW_KEYLENGTH)."""
+    if current is None:
+        return NEW_KEYLENGTH
+    fresh = next((d for d in load_domains(ctx) if d.dir == current.dir), None)
+    if fresh is None:
+        raise Refused(f"{current.dir.name} is gone — plan again")
+    return fresh.keylength
+
+
+def issue(ctx: Ctx, raw_names: str, zone: str, *, expect: str | None = None,
+          expect_released: Sequence[str] | None = None, expect_keylength: str | None = None) -> dict[str, Any]:
+    names = _names(raw_names)
+    zone = zone.strip().lower().rstrip(".")
+    if not _ZONE_RE.match(zone):
+        raise Refused("--zone must be the Cloudflare zone's name")
+    outside = [n for n in names if n != zone and not n.endswith("." + zone)]
+    if outside:
+        raise Refused(f"not in the zone {zone}: {', '.join(outside)}")
+    token = read_bot_token(ctx)
+    log: list[str] = []
+    lock = Lock(ctx)
+    lock.acquire(LOCK_WAIT)
+    try:
+        if not acme_installed(ctx):
+            wait_for_acme(ctx, log)
+            install_acme(ctx, log)
+        domains = load_domains(ctx)
+        ours = adopted(domains)
+        if len(ours) > 1:
+            raise Refused("more than one acme.sh domain is the bot's: " + ", ".join(d.dir.name for d in ours)
+                          + " — adopt one of them first")
+        # Not adopted yet: the domain set up by hand IS the one reissued (its install-cert
+        # is rewritten below) — a second domain beside it would keep copying its own
+        # certificate over the registry's files on every renewal of its own.
+        cands = [] if ours else candidates(ctx, domains)
+        if len(cands) > 1:
+            raise Refused("more than one acme.sh domain could be the bot's: " + ", ".join(d.dir.name for d in cands)
+                          + " — adopt one first")
+        current = ours[0] if ours else cands[0] if cands else None
+        if current is not None and current.name.lower() not in names:
+            raise Refused(f"the certificate's name would change ({current.name} → {names[0]}): that is a domain change, "
+                          "not a reissue")
+        main = current.name.lower() if current is not None else names[0]
+        alts = [n for n in names if n != main]
+        keylength = current.keylength if current is not None else NEW_KEYLENGTH
+        args = ["--issue", "--dns", "dns_cf", "--server", CA_SERVER, "--keylength", keylength, "--force", "-d", main]
+        for alt in alts:
+            args += ["-d", alt]
+        zid = zone_id(ctx, token, zone)
+        ecc = keylength.startswith("ec")
+        with cron_held_off(ctx, current, log):
+            wait_for_acme(ctx, log)
+            expect_pair(ctx, current, expect)
+            expect_release(ctx, to_release(load_domains(ctx), current), expect_released)
+            # The key type: the one the plan showed, and still the one in acme.sh's conf now
+            # (after the wait) — the one handed to acme.sh below.
+            now_keylength = keylength_now(ctx, current)
+            if expect_keylength and now_keylength != expect_keylength:
+                raise Refused(f"{main}: the key type changed since the plan ({expect_keylength} → {now_keylength}) — "
+                              "plan again")
+            if now_keylength != keylength:
+                raise Refused(f"{main}: the key type changed while the run waited ({keylength} → {now_keylength}) — "
+                              "run it again")
+            rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT,
+                          env={"CF_Token": token, "CF_Zone_ID": zid, NESTED_ENV: lock.token()})
+            log.append(f"acme.sh --issue -d {' -d '.join([main, *alts])} --keylength {keylength}: exit {rc}")
+            if rc != 0:
+                raise Cannot(f"acme.sh --issue failed (exit {rc}): {out.strip()[-600:]}")
+            domain = next((d for d in load_domains(ctx) if d.name.lower() == main and d.ecc == ecc), None)
+            if domain is None:
+                raise Cannot(f"acme.sh issued {main} but its directory is not there")
+            domain = install_cert(ctx, domain, lock, log)
+            # Any other domain still reaching the readers (a hand-made install-cert) stops.
+            for other in to_release(load_domains(ctx), domain):
+                release(ctx, other, log)
+            # A token replaced while acme.sh issued: cron renews with the one in the file now.
+            sync_token(ctx, domain, zone, log, unless=token)
+            report = deploy(ctx, domain)
+    finally:
+        lock.release()
+    report["log"] = log
+    report["issued"] = [main, *alts]
+    return report
+
+
+def renew(ctx: Ctx, zone: str | None, *, expect: str | None = None) -> dict[str, Any]:
+    zone = zone.strip().lower().rstrip(".") if zone else None
+    if zone is not None and not _ZONE_RE.match(zone):
+        raise Refused("--zone must be the Cloudflare zone's name")
+    log: list[str] = []
+    lock = Lock(ctx)
+    lock.acquire(LOCK_WAIT)
+    try:
+        domain = bot_domain(ctx, load_domains(ctx))
+        if zone and not all(n.removeprefix("*.") == zone or n.endswith("." + zone) for n in domain.names):
+            raise Refused(f"{domain.name}: not in the zone {zone}")
+        args = ["--renew", "-d", domain.name, "--force"]
+        if domain.ecc:
+            args.append("--ecc")
+        with cron_held_off(ctx, domain, log):
+            wait_for_acme(ctx, log)
+            expect_pair(ctx, domain, expect)
+            # The token as it is NOW (after the wait), not as it was when the helper started.
+            used = sync_token(ctx, domain, zone, log)
+            if used is None:
+                log.append("renewing with acme.sh's own saved credential (the bot has no readable token)")
+            rc, out = run(ctx, acme_argv(ctx, *args), timeout=ACME_TIMEOUT, env={NESTED_ENV: lock.token()})
+            log.append(f"acme.sh --renew -d {domain.name} --force: exit {rc}")
+            if rc != 0:
+                raise Cannot(f"acme.sh --renew failed (exit {rc}): {out.strip()[-600:]}")
+            sync_token(ctx, domain, zone, log, unless=used)
+            fresh = next((d for d in load_domains(ctx) if d.dir == domain.dir), domain)
+            report = deploy(ctx, fresh)
+    finally:
+        lock.release()
+    report["log"] = log
+    return report
+
+
+SYNC_ATTEMPTS = 3
+
+
+def sync_token(ctx: Ctx, domain: AcmeDomain, zone: str | None, log: list[str], *, unless: str | None = None) -> str | None:
+    """The bot's token (and the zone's id) into the domain's acme.sh conf — the credential
+    cron renews it with. The superadmin may replace the token at any moment (acme.sh
+    itself saves the one it was given, and the zone's id is a Cloudflare request away):
+    the file is read again after the request, just before the write, and again after
+    it — a token saved meanwhile is written in its turn, so the conf ends with the one
+    the file holds. *unless*: the token already written — nothing to do while the file
+    still holds it. Returns the token the conf holds (None: the bot has none)."""
+    written = unless
+    for _ in range(SYNC_ATTEMPTS):
+        try:
+            token = read_bot_token(ctx)
+        except Refused:
+            return written
+        if token == written:
+            return token
+        updates = {"CF_Token": token}
+        if zone:
+            updates["CF_Zone_ID"] = zone_id(ctx, token, zone)
+        try:
+            still = read_bot_token(ctx)
+        except Refused:
+            still = None
+        if still != token:
+            continue  # replaced (or removed) during the request: the next turn writes the new one
+        conf_set(ctx, domain.conf_path, updates)
+        log.append(f"{domain.name}: acme.sh renews with the bot's token ({fingerprint(token)}) from now on")
+        written = token
+    try:
+        final = read_bot_token(ctx)
+    except Refused:
+        return written
+    if final == written:
+        return written
+    raise Cannot(f"{domain.name}: the bot's Cloudflare token kept changing while it was written to acme.sh's conf — "
+                 "run again")
+
+
+def adoption_plan(ctx: Ctx, explicit: str | None) -> tuple[AcmeDomain, list[AcmeDomain], dict[str, Any]]:
+    """The domain to adopt, the ones released, and deploy's dry run with the conf diffs.
+
+    Every OTHER acme.sh domain that would still reach the bot's readers is RELEASED: one
+    naming vpn-bot-cert deploy (set by hand, or a domain moved) gets its reloadcmd
+    emptied, and any domain's Le_Real* path into the registry is emptied too — acme.sh
+    copies to those paths itself after a renewal, without calling this helper. Its other
+    install-cert targets are not the bot's to drop."""
+    domains = load_domains(ctx)
+    ours = adopted(domains)
+    if explicit is None and len(ours) > 1:
+        raise Refused("more than one acme.sh domain names vpn-bot-cert deploy: " + ", ".join(d.dir.name for d in ours)
+                      + " — pass --domain")
+    if explicit is not None:
+        domain = bot_domain(ctx, domains, explicit)
+    elif ours:
+        domain = ours[0]
+    else:
+        cands = candidates(ctx, domains)
+        if not cands:
+            raise Refused("no acme.sh domain to adopt (none copies to a registry path, names the old hook or "
+                          "covers HYSTERIA2_SNI) — issue one instead")
+        if len(cands) > 1:
+            raise Refused("more than one acme.sh domain could be the bot's: " + ", ".join(d.dir.name for d in cands)
+                          + " — pass --domain")
+        domain = cands[0]
+    released = to_release(domains, domain)
+    if domain.reload_kind == "ours" and not any(domain.real_paths().values()) and not released:
+        raise Refused(f"{domain.name} is already the bot's (reloadcmd {RELOAD_CMD})")
+    before = dict(domain.real_paths())
+    before["Le_ReloadCmd"] = domain.reloadcmd
+    after = {k: "" for k in _REAL_KEYS}
+    after["Le_ReloadCmd"] = RELOAD_CMD
+    diff = [f"- {k}='{shown(ctx, before[k])}'\n+ {k}='{after[k]}'"
+            for k in (*_REAL_KEYS, "Le_ReloadCmd") if before[k] != after[k]]
+    plan = deploy(ctx, domain, dry_run=True)
+    plan["conf"] = ctx.unroot(domain.conf_path)
+    plan["conf_diff"] = diff
+    plan["release"] = [release_entry(ctx, d) for d in released]
+    return domain, released, plan
+
+
+def release_changes(d: AcmeDomain) -> dict[str, str]:
+    """What stops *d* reaching the bot's readers: a reloadcmd that is ours, every Le_Real*
+    path that is a registry file."""
+    changes = {"Le_ReloadCmd": ""} if d.reload_kind == "ours" else {}
+    paths = registry_paths()
+    changes.update({k: "" for k, v in d.real_paths().items() if v in paths})
+    return changes
+
+
+def to_release(domains: Sequence[AcmeDomain], keep: AcmeDomain | None) -> list[AcmeDomain]:
+    """Every domain but *keep* that still reaches the bot's readers."""
+    return [d for d in domains if (keep is None or d.dir != keep.dir) and release_changes(d)]
+
+
+def expect_release(ctx: Ctx, released: Sequence[AcmeDomain], expected: Sequence[str] | None) -> None:
+    """The plan listed the domains it releases (and the wizard backed up exactly those):
+    a domain that started — or stopped — reaching the readers since means the plan no
+    longer describes the run."""
+    if expected is None:
+        return
+    got = sorted(ctx.unroot(d.dir) for d in released)
+    if got != sorted(expected):
+        raise Refused("the acme.sh domains to release changed since the plan "
+                      f"({', '.join(sorted(expected)) or 'none'} → {', '.join(got) or 'none'}) — plan again")
+
+
+def release_entry(ctx: Ctx, d: AcmeDomain) -> dict[str, Any]:
+    changes = release_changes(d)
+    raw = {**d.real_paths(), "Le_ReloadCmd": d.reloadcmd}
+    return {"domain": d.name, "dir": ctx.unroot(d.dir), "conf": ctx.unroot(d.conf_path),
+            "conf_diff": [f"- {k}='{shown(ctx, raw[k])}'\n+ {k}=''" for k in (*_REAL_KEYS, "Le_ReloadCmd") if k in changes]}
+
+
+def release(ctx: Ctx, domain: AcmeDomain, log: list[str]) -> None:
+    """*domain* no longer reaches the bot's readers (release_changes)."""
+    changes = release_changes(domain)
+    if not changes:
+        return
+    conf_set(ctx, domain.conf_path, changes)
+    log.append(f"{domain.dir.name}: released — {', '.join(sorted(changes))} emptied; its renewals no longer reach "
+               "the bot's readers")
+
+
+def expect_pair(ctx: Ctx, domain: AcmeDomain | None, expected: str | None) -> None:
+    """The plan was shown for acme.sh's pair *expected* (16 hex of its pair hash): the run
+    applies only to that pair. A renewal by cron (or by hand) between the plan and the
+    confirmation means the plan no longer describes what would be done."""
+    if not expected or domain is None:
+        return
+    try:
+        now = load_source(ctx, domain).pair_sha[:16]
+    except (Refused, Cannot):
+        now = "unreadable"
+    if now != expected[:16]:
+        raise Refused(f"{domain.name}: acme.sh's certificate changed since the plan ({expected[:16]} → {now}) — "
+                      "plan again")
+
+
+def adopt(ctx: Ctx, explicit: str | None, *, dry_run: bool, expect: str | None = None,
+          expect_released: Sequence[str] | None = None) -> dict[str, Any]:
+    domain, released, plan = adoption_plan(ctx, explicit)
+    if dry_run:
+        return plan
+    log: list[str] = []
+    lock = Lock(ctx)
+    lock.acquire(LOCK_WAIT)
+    try:
+        with cron_held_off(ctx, domain, log):
+            wait_for_acme(ctx, log)
+            expect_pair(ctx, domain, expect)
+            # Again under the lock: what is released is what the plan showed (and was backed up).
+            released = to_release(load_domains(ctx), domain)
+            expect_release(ctx, released, expect_released)
+            # Released first: a renewal of another domain waiting on the lock then finds it is
+            # no longer the bot's (deploy skips a domain that does not name it).
+            for other in released:
+                release(ctx, other, log)
+            fresh = domain
+            if domain.reload_kind != "ours" or any(domain.real_paths().values()):
+                fresh = install_cert(ctx, domain, lock, log)
+            # Still held: a due domain must not be renewed by cron under deploy's feet.
+            report = deploy(ctx, fresh, expect=expect)
+    finally:
+        lock.release()
+    report["log"] = log
+    report["conf_diff"] = plan["conf_diff"]
+    report["release"] = plan["release"]
+    return report
+
+
+# --------------------------------------------------------------------------- #
+# Output and the CLI
+# --------------------------------------------------------------------------- #
+def human_status(r: Mapping[str, Any]) -> str:
+    lines = [f"acme.sh: {'v' + str(r['acme']['version']) if r['acme']['installed'] else 'not installed'}"
+             f"{'' if r['acme']['cron'] else ' (no --cron line)'}"]
+    for d in r["domains"]:
+        mark = "*" if d["name"] in (r["domain"], r["candidate"]) else " "
+        lines.append(f"{mark} {d['name']} ({'ecc' if d['ecc'] else 'rsa'}): SAN {', '.join(d['san']) or '—'}; "
+                     f"until {d['not_after'] or '?'} ({d['days_left']} d); key {'ok' if d['key_ok'] else 'NOT OK'}; "
+                     f"reloadcmd [{d['reloadcmd_kind']}] {d['reloadcmd'] or '—'}")
+    for c in r["consumers"]:
+        if not c["installed"]:
+            lines.append(f"  {c['name']}: not active — {c['why']}")
+            continue
+        sync = {True: "in sync", False: "DIFFERS", None: "?"}[c["in_sync"]]
+        lines.append(f"  {c['name']}: {sync}; {c['action']} {c['unit']}; {c['reads']}")
+    tok = r["token"]
+    lines.append(f"bot token: {tok['fp'] or ('unreadable' if tok['present'] else 'none')}")
+    for p in r["problems"]:
+        lines.append(f"[{p['level']}] {p['key']}: {p['text']}")
+    lines.append(f"verdict: {r['verdict']}")
+    return "\n".join(lines)
+
+
+def human_deploy(r: Mapping[str, Any]) -> str:
+    lines = [f"{'plan' if r.get('dry_run') else 'deploy'} {r['domain']}: pair {r['source']['pair_sha']} "
+             f"until {r['source']['not_after']}"]
+    for g in r["groups"]:
+        files = ", ".join(f"{f['path']} [{f['change']}]" for f in g["files"])
+        lines.append(f"  {'+'.join(g['consumers'])}: {g['result']} — {files}")
+        for a in g["actions"]:
+            lines.append(f"    {a['consumer']}: {a['text']}")
+        if g.get("error"):
+            lines.append(f"    error: {g['error']}")
+        for u in g.get("rollback", []):
+            lines.append(f"    rollback {u['consumer']}: {u['text']}")
+    for s in r["skipped"]:
+        lines.append(f"  {s['consumer']}: skipped — {s['why']}")
+    for entry in r.get("conf_diff", []):
+        lines.append(entry)
+    for rel in r.get("release", []):
+        lines.append(f"release {rel['dir']} ({rel['conf']}):")
+        lines += rel["conf_diff"]
+    return "\n".join(lines)
+
+
+def host_mount_namespace_argv(argv: list[str]) -> list[str] | None:
+    if SELFTEST or os.geteuid() != 0 or os.environ.get(HOSTNS_ENV) == "1":
+        return None
+    try:
+        if os.readlink("/proc/self/ns/mnt") == os.readlink("/proc/1/ns/mnt"):
+            return None
+    except OSError:
+        return None
+    return ["nsenter", "--mount=/proc/1/ns/mnt", "--", sys.executable, "-I", str(Path(__file__).resolve()), *argv]
+
+
+def _dirs_arg(value: str) -> list[str]:
+    dirs = [d for d in value.split(",") if d]
+    if not all(re.fullmatch(r"/[A-Za-z0-9._*/-]{1,512}", d) and ".." not in d for d in dirs):
+        raise argparse.ArgumentTypeError("absolute acme.sh domain directories, comma-separated")
+    return dirs
+
+
+def _keylength_arg(value: str) -> str:
+    if not re.fullmatch(r"ec-(256|384|521)|2048|3072|4096|8192", value):
+        raise argparse.ArgumentTypeError("an acme.sh key length: ec-256 / ec-384 / ec-521 / 2048 / 3072 / 4096 / 8192")
+    return value
+
+
+def _pair_arg(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{16}", value):
+        raise argparse.ArgumentTypeError("16 lowercase hex characters (status' pair_sha)")
+    return value
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="vpn-bot-cert", allow_abbrev=False)
+    parser.add_argument("--root", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--env", default=ENV_FILE, help=argparse.SUPPRESS)
+    sub = parser.add_subparsers(dest="verb", required=True)
+    p = sub.add_parser("status", allow_abbrev=False)
+    p.add_argument("--json", action="store_true")
+    # --expect-pair SHA: the pair (16 hex of status' pair_sha) the run was planned on —
+    # refused if acme.sh holds another one by the time the run starts (the wizard's plan).
+    p = sub.add_parser("deploy", allow_abbrev=False)
+    p.add_argument("--domain")
+    p.add_argument("--all", action="store_true", dest="every")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--expect-pair", type=_pair_arg)
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("issue", allow_abbrev=False)
+    p.add_argument("--names", required=True)
+    p.add_argument("--zone", required=True)
+    p.add_argument("--expect-pair", type=_pair_arg)
+    p.add_argument("--expect-release", type=_dirs_arg)
+    p.add_argument("--expect-keylength", type=_keylength_arg)
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("renew", allow_abbrev=False)
+    p.add_argument("--force", action="store_true", required=True)
+    p.add_argument("--zone")
+    p.add_argument("--expect-pair", type=_pair_arg)
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("act", allow_abbrev=False)
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("adopt", allow_abbrev=False)
+    p.add_argument("--domain")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--expect-pair", type=_pair_arg)
+    # --expect-release DIR[,DIR...] ("" = none): the acme.sh domain directories the plan
+    # releases — refused when the set differs by the time the run starts.
+    p.add_argument("--expect-release", type=_dirs_arg)
+    p.add_argument("--json", action="store_true")
+    return parser.parse_args(list(argv))
+
+
+def emit(args: argparse.Namespace, report: Mapping[str, Any], human: str) -> None:
+    if getattr(args, "json", False):
+        print(json.dumps(report, sort_keys=True))
+    else:
+        print(human)
+
+
+def main(argv: list[str]) -> int:
+    reexec = host_mount_namespace_argv(argv)
+    if reexec is not None:
+        os.environ[HOSTNS_ENV] = "1"
+        try:
+            os.execvpe(reexec[0], reexec, os.environ)  # noqa: S606 — fixed argv: nsenter, this interpreter, this script
+        except OSError as exc:
+            print(f"vpn-bot-cert: cannot enter the host mount namespace ({exc}) — going on in this one", file=sys.stderr)
+    try:
+        args = parse_args(argv)
+    except SystemExit as exc:
+        return EXIT_USAGE if exc.code not in (0, None) else EXIT_OK
+    root = args.root.rstrip("/")
+    if SELFTEST and not root:
+        print("vpn-bot-cert: VPN_BOT_CERT_SELFTEST=1 needs --root", file=sys.stderr)
+        return EXIT_USAGE
+    if root and not SELFTEST:
+        print("vpn-bot-cert: --root is a test option", file=sys.stderr)
+        return EXIT_USAGE
+    if not SELFTEST and os.geteuid() != 0:
+        print("vpn-bot-cert: run as root", file=sys.stderr)
+        return EXIT_CANNOT
+    ctx = Ctx(root=root)
+    env_path = Path(f"{root}{args.env}") if root else Path(args.env)
+    ctx.env_text = read_text(env_path) or ""
+    try:
+        if args.verb == "status":
+            report = status(ctx)
+            emit(args, report, human_status(report))
+            return EXIT_OK
+        if args.verb == "deploy":
+            if not args.dry_run and nested_in_parent(ctx):
+                print("vpn-bot-cert: deploy deferred to the running vpn-bot-cert (it deploys right after acme.sh)")
+                return EXIT_OK
+            if args.dry_run:
+                domain = bot_domain(ctx, load_domains(ctx), args.domain)
+                report = deploy(ctx, domain, every=args.every, dry_run=True)
+            else:
+                lock = Lock(ctx)
+                lock.acquire(LOCK_WAIT)
+                try:
+                    # Resolved under the lock: an adoption may have released the domain
+                    # whose renewal called this (its acme.sh read the reloadcmd before).
+                    domain = bot_domain(ctx, load_domains(ctx), args.domain)
+                    if not args.domain and os.environ.get("Le_Domain") and domain.reload_kind != "ours":
+                        print(f"vpn-bot-cert: {domain.dir.name} no longer names {RELOAD_CMD!r} — nothing laid out")
+                        return EXIT_OK
+                    report = deploy(ctx, domain, every=args.every, expect=args.expect_pair)
+                finally:
+                    lock.release()
+        elif args.verb == "issue":
+            report = issue(ctx, args.names, args.zone, expect=args.expect_pair, expect_released=args.expect_release,
+                           expect_keylength=args.expect_keylength)
+        elif args.verb == "renew":
+            report = renew(ctx, args.zone, expect=args.expect_pair)
+        elif args.verb == "act":
+            lock = Lock(ctx)
+            lock.acquire(LOCK_WAIT)
+            try:
+                report = act(ctx)
+            finally:
+                lock.release()
+            emit(args, report, "\n".join(f"{a['consumer']}: {a['text']}" for a in report["actions"]))
+            return EXIT_OK if report["ok"] else EXIT_CONSUMER
+        else:
+            report = adopt(ctx, args.domain, dry_run=args.dry_run, expect=args.expect_pair,
+                           expect_released=args.expect_release)
+        emit(args, report, human_deploy(report))
+        return EXIT_OK if report.get("ok", True) else EXIT_CONSUMER
+    except Refused as exc:
+        message = redact(ctx, str(exc))
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "refused": message}))
+        print(f"vpn-bot-cert: refused: {message}", file=sys.stderr)
+        return EXIT_REFUSED
+    except Cannot as exc:
+        message = redact(ctx, str(exc))
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": message}))
+        print(f"vpn-bot-cert: {message}", file=sys.stderr)
+        return EXIT_CANNOT
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

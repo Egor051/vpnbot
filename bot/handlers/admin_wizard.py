@@ -192,6 +192,10 @@ async def wizard_start(callback: CallbackQuery, state: FSMContext, services: Ser
             return
         assert callback.data is not None and callback.from_user is not None and callback.message is not None
         mode = get_mode(callback.data.rsplit(":", 1)[-1])
+        if not mode.menu:
+            # Started from its own screen, with the parameters that screen works out.
+            await safe_callback_answer(callback, t("wizard_mode_not_here"), show_alert=True)
+            return
         if await _already_running(callback, _wizard(services)):
             return
         if mode.dangerous and not await require_totp(callback, state, services, action=f"wizard_{mode.key}"):

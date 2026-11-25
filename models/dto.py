@@ -701,3 +701,21 @@ class WizardRun:
     updated_at: str
     finished_at: str | None
     reported_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedDnsRecord:
+    """A DNS record the bot owns (dns_records, services/dns.py)."""
+
+    id: int
+    name: str
+    type: str
+    purpose: str
+    content: str | None
+    zone_id: str | None
+    record_id: str | None
+    adopted: bool
+    last_error: str | None
+    created_at: str
+    updated_at: str
+    created_by: int | None

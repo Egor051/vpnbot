@@ -24,6 +24,7 @@ the rest of a failed install):
 | `vpn-bot-wizard-selfcheck` | Mode «Самопроверка» |
 | `vpn-bot-wizard-dump` | Mode «Диагностический дамп» |
 | `vpn-bot-wizard-update` | Mode «Обновить бота» |
+| `vpn-bot-wizard-cert` | Mode «Сертификат» (issue / renew / adopt / deploy through `vpn-bot-cert`, [certificate.md](certificate.md)) |
 | `vpn-bot-totp-reset` | The emergency TOTP reset (root CLI, never called by the bot) |
 
 In the helper-nonroot model the bot reaches the launcher through one sudoers line
@@ -103,7 +104,7 @@ Changes nothing. Each check is a green / yellow / red item:
 | `warp:clients_nat` — only while AWG is installed and split is not off | no MASQUERADE/SNAT on `out-warp` for the client subnet: AWG clients leave into WARP without SNAT | nat table unreadable |
 | `warp:egress` — per address xray (`sendThrough`) / danted (`external:`) send from | the address is not on an up `out-warp`; the probe leaves the wrong way; no SNAT for it on the WAN, or on `out-warp` for an address that is not the tunnel address | split off but it still leaves via `out-warp`; `WARP_PROXY_EGRESS` on and nobody bound to the tunnel address; the addresses, the WAN or the nat table unreadable |
 | `failed_units` — `systemctl --failed` | any failed unit | — |
-| `certs` — every acme.sh certificate, `/etc/hysteria/cert.pem`, `SUBSCRIPTION_TLS_CERT` | < 7 days left | < 21 days left (acme.sh renews at 30); acme.sh has no `Le_ReloadCmd` |
+| `certs` — `vpn-bot-cert status --json` ([certificate.md](certificate.md#the-self-check)): the bot's acme.sh domain, every installed reader of the registry; one item `cert:<key>` per problem the helper reports. Without the helper (a host not deployed yet): every acme.sh certificate, `/etc/hysteria/cert.pem`, `SUBSCRIPTION_TLS_CERT` | < 7 days left (also on a reader's stale copy); reloadcmd neither `vpn-bot-cert deploy` nor the old hook; no acme.sh `--cron`; another domain copies over the registry's files | < 21 days left (acme.sh renews at 30); the old hook as reloadcmd (adopt it); a reader's copy differs from acme.sh's, or wrong owner/mode; acme.sh renews with another token |
 | `helpers` — `OUT_OF_REPO_HELPERS` of this role vs the checkout | a `required` helper missing | an installed copy differs (the next deploy closes it) |
 | `perms` — `DB_PATH` (0600) and its directory (0700), owner `vpn-bot` when it exists; `.env` root-owned, not world-accessible, not group-writable | any deviation | — |
 | `disk` — `/`, `/var`, the checkout | < 1 GiB or < 5 % free | < 15 % free |
@@ -255,6 +256,24 @@ instead of `--pty` (there is no terminal) under `set -o pipefail`, so the wrappe
 and exits with deploy.sh's code. The verdict is still read from the report text, as an
 operator reads it. Parameter `force` (`0`/`1`) is `FORCE=1`.
 
+### 🔐 Сертификат и DNS
+
+The mode `cert` (helper `vpn-bot-wizard-cert`, parameters `action` = `issue` | `renew` | `adopt`
+| `deploy`, `names` — a comma list of DNS names, `zone` — the Cloudflare zone's **name**). It has no
+button of its own in the menu: «🔐 Сертификат и DNS» opens the certificate's screen, which works out
+the parameters (the names the certificate has, the zone the bot's token was checked against) and
+starts the run from there. A plan with the diff first (the acme.sh conf lines, the certificate before
+and after, every reader of the registry and what happens to it), then «✅ Применить»; dangerous: TOTP
+before the plan and before apply. apply takes a backup of everything it may touch (the acme.sh domain
+directory, every reader's files, vpn-bot-cert's state) and runs the root helper; verify reads
+`vpn-bot-cert status`; rollback restores the backup and acts on every reader again. No step changes
+the host's network, so no dead-man is armed. Everything about it:
+[certificate.md](certificate.md).
+
+The zone travels as its name, not its id: 32 hex characters look like a secret to every redaction
+(`utils/redact.py`, the run's stored parameters, the log) — vpn-bot-cert asks Cloudflare for the id
+with the token itself.
+
 ### 🛰 Relay
 
 Not a mode: the wizard's «🛰 Relay» opens the admin panel's ONE relay screen — see
@@ -367,6 +386,8 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 | Fallback mode: switch on / off / repeat ([docs/relay.md](relay.md#fallback-mode-hub)) | «✅ Да, …» of the confirmation, «🔁 Повторить» |
 | Fallback mode: the hub role | «🛟 Сделать hub» (the typed origin checks the elevation again), «🛟 Снять роль hub» |
 | Fallback mode: the DNS API token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |
+| Certificate and DNS: a run of the `cert` mode — adopt, issue, renew, lay out ([certificate.md](certificate.md)) | «🔁 Принять текущий сертификат», «▶️ Составить план», «🔄 Проверить продление», «📦 Разложить заново»; «✅ Применить» of the plan |
+| Certificate and DNS: the bot's Cloudflare token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |
 | Fallback mode: names, addresses, direct links' host, `fallback-url` | each button; a typed value checks the elevation again |
 | Fallback mode: broadcast of the new proxy address ([relay.md](relay.md#the-proxies-through-the-hub)) | «✅ Разослать» |
 

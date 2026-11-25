@@ -31,7 +31,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_bundles, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, relay_hardening, relay_sshd, security, settings as settings_handler, ssh_port, start, ufw
+from bot.handlers import admin, admin_bundles, admin_cert, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, relay_hardening, relay_sshd, security, settings as settings_handler, ssh_port, start, ufw
 from bot.fallback import proxy_alert_text
 from bot.keyboards.admin_fallback import open_keyboard as fallback_open_keyboard
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
@@ -64,6 +64,7 @@ from repositories.server_status_settings import ServerStatusSettingsRepository
 from repositories.warp_split_sources import WarpSplitSourceRepository
 from repositories.vpn_keys import VpnKeyRepository
 from repositories.totp import TotpRepository
+from repositories.dns_records import DnsRecordsRepository
 from repositories.wizard_runs import WizardRunRepository
 from services.access_approval import AccessApprovalService
 from services.anomaly_detection import AnomalyDetectionService
@@ -94,6 +95,8 @@ from services.ufw import UfwApplier, UfwDeadmanMonitor
 from aiogram.types import InlineKeyboardMarkup
 
 from services.relay_health import broadcast_to_admins, build_relay_health_supervisor
+from services.cert import CertService
+from services.dns import DnsService
 from services.fallback import FallbackService, ProxyAlert
 from services.fallback_auto import FallbackAutoSwitch
 from services.relays import RelayService, warn_legacy_relay_env
@@ -768,6 +771,17 @@ async def _build_app(
     # the admin enters in the panel (adapters/cloudflare_dns.py). The health loop
     # asks it which relays are behind the hub right now (no alert storm).
     fallback_token = CloudflareTokenFile()
+    # The bot's ONE Cloudflare token (the same file) and the DNS records it owns
+    # (services/dns.py, docs/certificate.md): the fallback's origin, the certificate's
+    # names. Every A write is proxied=false; a token is checked before it is stored.
+    dns_service = DnsService(
+        repo=DnsRecordsRepository(db),
+        users=user_service,
+        audit=audit_service,
+        clock=clock,
+        token_file=fallback_token,
+        dns=CloudflareDns(fallback_token.load),
+    )
     fallback_service = FallbackService(
         repo=FailoverRepository(db),
         relays_repo=relays_repo,
@@ -781,6 +795,7 @@ async def _build_app(
         doh=doh_resolve_a,
         endpoints=proxy_endpoints,
         modules=protocol_modules_service,
+        dns_service=dns_service,
     )
     await fallback_service.refresh_state()
     # Reconcile, not only the switch: a mode switched on before this version could
@@ -969,6 +984,16 @@ async def _build_app(
         runner=PrivilegedHelperRunner(shell=shell, use_sudo=settings.privilege_helpers_enabled),
         store=db,
     )
+    # «🔐 Сертификат и DNS» (services/cert.py): reads `vpn-bot-cert status --json` (sudo in
+    # the helper model, the one exact grant), changes the certificate only through the
+    # wizard's «cert» runs.
+    cert_service = CertService(
+        runner=PrivilegedHelperRunner(shell=shell, use_sudo=settings.privilege_helpers_enabled),
+        wizard=wizard_service,
+        dns=dns_service,
+        users=user_service,
+        settings=settings,
+    )
 
     services = Services(
         settings=settings,
@@ -1016,6 +1041,8 @@ async def _build_app(
         totp=totp_service,
         wizard=wizard_service,
         fallback=fallback_service,
+        dns=dns_service,
+        cert=cert_service,
     )
 
     await _startup_reconcile_keys(services)
@@ -1106,6 +1133,7 @@ async def _build_app(
     dp.include_router(relay_sshd.router)
     dp.include_router(ufw.router)
     dp.include_router(admin_wizard.router)
+    dp.include_router(admin_cert.router)
     dp.include_router(admin_bundles.router)
     dp.include_router(keys.router)
     dp.include_router(key_bundles.router)

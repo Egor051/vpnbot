@@ -32,7 +32,10 @@ Three moving parts, only one of which is the bot:
    `/etc/hysteria/cert.pem`/`key.pem` with the `hysteria` owner and restarting the service — is
    the tracked `deploy/vpn-bot-acme-reload.sh` hook, which deploy.sh installs as
    `/usr/local/sbin/acme-reload.sh` — acme.sh's `--reloadcmd`
-   ([Subscription → TLS termination](subscription.md#tls-termination)).
+   ([Subscription → TLS termination](subscription.md#tls-termination)) — until the domain is adopted
+   in «🔐 Сертификат и DNS»; from then on `/etc/hysteria/cert.pem`/`key.pem` are the `hysteria` reader
+   of `vpn-bot-cert`'s registry, laid out atomically and rolled back if the restart fails
+   ([certificate.md](certificate.md)).
 2. **`hy2_auth` endpoint** (`python -m hy2_auth`, `deploy/vpnbot-hy2-auth.service`) — a small,
    **separate** process the `hysteria` server calls over loopback for every handshake. It opens
    `vpn.db` **read-only** and validates the per-key token in constant time

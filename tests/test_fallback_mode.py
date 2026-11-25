@@ -149,6 +149,8 @@ from adapters.clock import ClockProvider  # noqa: E402
 from adapters.cloudflare_dns import CloudflareDns, CloudflareTokenFile, DohAnswer, HttpReply  # noqa: E402
 from models.dto import Relay, RelayAgent  # noqa: E402
 from services.errors import AccessDenied, InvalidOperation  # noqa: E402
+from repositories.dns_records import DnsRecordsRepository  # noqa: E402
+from services.dns import DnsService  # noqa: E402
 from services.fallback import FallbackService, check_reaches, name_settled  # noqa: E402
 from services.relay import RelayCatalog, relay_link_host  # noqa: E402
 from services.relay_health import LEVEL_HUB, LEVEL_OK, AgentCheck, RelayHealthSupervisor  # noqa: E402
@@ -171,6 +173,8 @@ class FakeCloudflare:
         self.token_status = "active"
         self.reject_token = False
         self.fail_writes: set[str] = set()
+        # The token may read the zone but not edit it (no «DNS · Edit»).
+        self.no_edit = False
         self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
         self._n = 0
 
@@ -205,8 +209,15 @@ class FakeCloudflare:
         if method == "POST":
             if body["name"] in self.fail_writes:
                 return HttpReply(500, {"success": False, "errors": [{"code": 1, "message": "boom"}]})
-            rid = self.add(str(body["name"]), str(body["content"]), proxied=bool(body["proxied"]), ttl=int(body["ttl"]))  # type: ignore[call-overload]
+            if self.no_edit:
+                return HttpReply(403, {"success": False, "errors": [{"code": 10000, "message": "Authentication error"}]})
+            rid = self.add(str(body["name"]), str(body["content"]), rtype=str(body.get("type", "A")),
+                           proxied=bool(body.get("proxied")), ttl=int(body["ttl"]))  # type: ignore[call-overload]
             return self._ok(self.records[rid])
+        if method == "DELETE":
+            rid = path.rsplit("/", 1)[1]
+            self.records.pop(rid)
+            return self._ok({"id": rid})
         if method == "PATCH":
             rid = path.rsplit("/", 1)[1]
             record = self.records[rid]
@@ -265,11 +276,17 @@ class Fallback:
             self.sleeps.append(seconds)
             self.clock_value[0] += seconds
 
+        self.records_repo = DnsRecordsRepository(self.db)
+        self.dns_service = DnsService(
+            repo=self.records_repo, users=_Users(), audit=self.audit, clock=ClockProvider(),  # type: ignore[arg-type]
+            token_file=self.token_file, dns=CloudflareDns(self.token_file.load, transport=self.cf),
+        )
         self.service = FallbackService(
             repo=self.repo, relays_repo=self.relays_repo, relays=self.relay_service, users=_Users(),  # type: ignore[arg-type]
             audit=self.audit, clock=ClockProvider(), settings=self.settings, token_file=self.token_file,  # type: ignore[arg-type]
             dns=CloudflareDns(self.token_file.load, transport=self.cf), doh=doh, sleep=sleep,
             monotonic=lambda: self.clock_value[0], verify_timeout=20.0, verify_interval=5.0,
+            dns_service=self.dns_service,
         )
         return self
 

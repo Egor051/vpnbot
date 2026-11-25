@@ -29,11 +29,13 @@ status file; the bot renders them as a traffic light.
                tunnel address (the tunnel address needs no NAT there). WARP_PROXY_EGRESS
                on with nobody bound to the tunnel address is yellow.
   failed_units `systemctl --failed`
-  certs        every acme.sh certificate (/root/.acme.sh/<domain>[_ecc]/): days left
-               (< 21 yellow — acme.sh renews at 30 —, < 7 red) and a Le_ReloadCmd (no
-               reload command = a renewed certificate nobody picks up: yellow); plus
-               the certificate files the services read (/etc/hysteria/cert.pem,
-               SUBSCRIPTION_TLS_CERT)
+  certs        `vpn-bot-cert status --json` (docs/certificate.md): the bot's acme.sh domain,
+               its days left (< 21 yellow — acme.sh renews at 30 —, < 7 red), its reloadcmd
+               (= vpn-bot-cert deploy; the old hook yellow, anything else red), and every
+               reader of the registry that is installed holds acme.sh's current pair, with
+               its owner and mode — one item per problem the helper reports. Without the
+               helper (a host not deployed yet): every acme.sh certificate's days left and
+               a Le_ReloadCmd, plus /etc/hysteria/cert.pem and SUBSCRIPTION_TLS_CERT
   helpers      drift of the OUT_OF_REPO_HELPERS of this host's role against the
                checkout (/opt/vpn-service): drift = yellow (the next deploy closes it),
                a missing `required` helper = red
@@ -109,6 +111,7 @@ _TRUE = frozenset({"1", "true", "yes", "y", "on"})
 _FALSE = frozenset({"0", "false", "no", "n", "off"})
 _ADDRESS_RE = re.compile(r"^[ \t]*Address[ \t]*=[ \t]*(.+?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 ACME_HOME = "/root/.acme.sh"
+CERT_HELPER = "/usr/local/sbin/vpn-bot-cert"
 FIXED_CERTS = ("/etc/hysteria/cert.pem",)
 CERT_YELLOW_DAYS = 21
 CERT_RED_DAYS = 7
@@ -680,7 +683,41 @@ def _acme_conf(path: Path) -> dict[str, str]:
     return values
 
 
+def cert_helper_items(ctx: Any, items: Items) -> bool:
+    """The judgment of vpn-bot-cert itself; False when it cannot give one (then the
+    per-file checks below run instead)."""
+    if not lib.SELFTEST and not os.access(CERT_HELPER, os.X_OK):
+        return False
+    rc, out = ctx.run(["vpn-bot-cert" if lib.SELFTEST else CERT_HELPER, "status", "--json"], timeout=120)
+    report = None
+    for line in out.splitlines():
+        if line.startswith("{"):
+            try:
+                report = json.loads(line)
+            except ValueError:
+                continue
+    if rc != 0 or not isinstance(report, dict) or not isinstance(report.get("problems"), list):
+        return False
+    for problem in report["problems"]:
+        level = problem.get("level")
+        if level in ("red", "yellow"):
+            items.add(level, f"cert:{problem.get('key', '?')}", str(problem.get("text", "")))
+    if report["problems"]:
+        return True
+    name = report.get("domain")
+    dom = next((d for d in report.get("domains", []) if d.get("name") == name), None)
+    readers = [c["name"] for c in report.get("consumers", []) if c.get("installed")]
+    if dom is None:
+        items.add("green", "certs", "no certificate is managed here and no reader of one is installed")
+    else:
+        items.add("green", "certs", f"{name}: {dom.get('days_left', 0):.0f} days left (until {dom.get('not_after')}); "
+                                    f"reloadcmd = vpn-bot-cert deploy; current at {', '.join(readers) or 'no reader'}")
+    return True
+
+
 def check_certs(ctx: Any, items: Items) -> None:
+    if cert_helper_items(ctx, items):
+        return
     seen = 0
     for domain, d, conf in acme_domain_dirs():
         seen += 1

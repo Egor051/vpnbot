@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 47
+CURRENT_SCHEMA_VERSION = 48
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -435,6 +435,10 @@ class Database:
             await self._migrate_v47()
             await self._set_schema_version(47)
             version = 47
+        if version < 48:
+            await self._migrate_v48()
+            await self._set_schema_version(48)
+            version = 48
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -2107,6 +2111,49 @@ class Database:
         cols = await self._table_columns("relays")
         if "via_hub" not in cols:
             await self.conn.execute("ALTER TABLE relays ADD COLUMN via_hub INTEGER NOT NULL DEFAULT 0")
+
+    async def _migrate_v48(self) -> None:
+        # The DNS records the bot owns — docs/certificate.md «DNS-записи». Idempotent and
+        # additive, mirrored in schema.sql:
+        #
+        #  1) dns_records — ONE list of the A records the bot keeps (services/dns.py).
+        #  2) The backfill: the fallback hub's origin (relays.target_host of the relay
+        #     with role 'hub') was the one record the bot already kept, but only
+        #     implicitly. It becomes a row: purpose 'fallback_origin', adopted = 1 (the
+        #     database never recorded whether the bot created it, so the bot will not
+        #     delete it at Cloudflare), content unknown until the next read. INSERT OR
+        #     IGNORE: a re-run, or a name already there, changes nothing.
+        #
+        # failover_names is NOT folded in: those names are the server's own domain —
+        # the bot switches their address but never created them and never deletes them.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dns_records (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              type TEXT NOT NULL DEFAULT 'A' CHECK (type IN ('A')),
+              purpose TEXT NOT NULL CHECK (purpose IN ('fallback_origin', 'host')),
+              content TEXT,
+              zone_id TEXT,
+              record_id TEXT,
+              adopted INTEGER NOT NULL DEFAULT 0 CHECK (adopted IN (0, 1)),
+              last_error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+              UNIQUE (name, type)
+            )
+            """
+        )
+        if "role" in await self._table_columns("relays"):
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO dns_records (name, type, purpose, adopted, created_at, updated_at) "
+                "SELECT DISTINCT lower(target_host), 'A', 'fallback_origin', 1, ?, ? FROM relays "
+                "WHERE role = 'hub' AND target_host IS NOT NULL AND trim(target_host) != '' "
+                "AND target_host NOT GLOB '[0-9]*.[0-9]*.[0-9]*.[0-9]*' AND target_host GLOB '*.*'",
+                (now, now),
+            )
 
     async def _table_exists(self, table_name: str) -> bool:
         row = await self.conn.execute_fetchone(

@@ -237,9 +237,11 @@ def _row(text: str, data: str) -> list[InlineKeyboardButton]:
 
 
 def menu_keyboard(*, active: WizardRun | None, daily: bool) -> InlineKeyboardMarkup:
-    rows = [_row(f"{mode_title(key)}", f"wiz:start:{key}") for key in MODES]
+    rows = [_row(f"{mode_title(key)}", f"wiz:start:{key}") for key, mode in MODES.items() if mode.menu]
     if active is not None:
         rows.insert(0, _row(t("btn_wizard_active", id=active.id, mode=mode_title(active.mode)), f"wiz:run:{active.id}"))
+    # The certificate's own screen: its runs need the names and the zone it works out.
+    rows.append(_row(t("btn_wizard_cert"), "cert:menu"))
     # «🛰 Relay» opens THE relay screen of the admin panel (no list of its own).
     rows.append(_row(t("btn_wizard_relay"), "admin:relays"))
     # The relays' SSH port: back to a held migration, or another port (bot/handlers/ssh_port.py).

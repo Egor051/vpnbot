@@ -71,6 +71,13 @@ COMMAND_TIMEOUT = 60
 MAX_RUN_ID = 10**9
 _RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,9}$")
 _PARAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# Parameter kinds that carry text: a comma-separated list of DNS names (lowercase, at
+# most MAX_NAMES; a wildcard only as the first label) and a Cloudflare zone's name (its
+# id would look like a secret to every redaction and is asked by vpn-bot-cert). An empty
+# value is the default ("not given"); services/wizard_modes.py types them the same way.
+_DNS_NAME_RE = re.compile(r"^(?=.{1,253}$)(\*\.)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_ZONE_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+MAX_NAMES = 10
 STEPS = ("plan", "apply", "verify", "rollback")
 
 
@@ -88,7 +95,7 @@ class WizardError(Exception):
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class Param:
-    kind: str                    # "int" | "bool" | "enum"
+    kind: str                    # "int" | "bool" | "enum" | "names" | "zone"
     default: str
     minimum: int = 0
     maximum: int = 0
@@ -106,6 +113,15 @@ class Param:
         if self.kind == "enum":
             if raw not in self.choices:
                 raise WizardError(f"must be one of {', '.join(self.choices)}", 2)
+            return raw
+        if self.kind == "names":
+            names = [n for n in raw.split(",") if n] if raw else []
+            if len(names) > MAX_NAMES or len(set(names)) != len(names) or not all(_DNS_NAME_RE.match(n) for n in names):
+                raise WizardError(f"must be up to {MAX_NAMES} distinct lowercase DNS names, comma-separated", 2)
+            return ",".join(names)
+        if self.kind == "zone":
+            if raw and not _ZONE_RE.match(raw):
+                raise WizardError("must be a DNS zone name (lowercase)", 2)
             return raw
         raise WizardError(f"unknown parameter kind {self.kind}", 2)
 
@@ -140,6 +156,18 @@ MODES: dict[str, Mode] = {
         params={"force": Param("bool", "0")},
         # plan = CHECK=1 redeploy (Phase 1 runs the test suite), apply = the deploy.
         timeouts={"plan": 3600, "apply": 5400, "verify": 300, "rollback": 300},
+    ),
+    # «Сертификат и DNS» (docs/certificate.md): vpn-bot-cert issue | renew | adopt | deploy.
+    # apply waits for acme.sh's DNS-01 (Cloudflare propagation) — up to 15 minutes.
+    "cert": Mode(
+        helper="vpn-bot-wizard-cert",
+        read_only=False,
+        params={
+            "action": Param("enum", "deploy", choices=("issue", "renew", "adopt", "deploy")),
+            "names": Param("names", ""),
+            "zone": Param("zone", ""),
+        },
+        timeouts={"plan": 180, "apply": 2700, "verify": 180, "rollback": 300},
     ),
 }
 

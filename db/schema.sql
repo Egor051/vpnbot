@@ -292,6 +292,36 @@ CREATE TABLE IF NOT EXISTS failover_names (
   created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
 );
 
+-- The DNS records the bot OWNS (services/dns.py, docs/certificate.md «DNS-записи»):
+-- ONE list for every A record the bot keeps pointing somewhere — the fallback hub's
+-- origin name among them (it lived only in the hub's upstream before). Written only
+-- through the DNS service, always proxied=false; a name that is not here is never
+-- deleted by the bot. The failover set (failover_names above) is not ownership: those
+-- names belong to the server's own domain, the bot only switches their address.
+-- Mirrors _migrate_v48.
+--   purpose  — 'fallback_origin': the hub's upstream, always the main server's IPv4;
+--              'host': a name of this server (the protocols' and the domain's work).
+--   content  — the address the bot last wrote (or found right); NULL: not read yet.
+--   zone_id / record_id — Cloudflare's ids at the last write (a cache, re-read on use).
+--   adopted  — 1: the record existed before the bot took it over (the v48 backfill, or
+--              an upsert onto a record already there): the bot rewrites it, but a
+--              delete leaves the record at Cloudflare and only drops the ownership.
+CREATE TABLE IF NOT EXISTS dns_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'A' CHECK (type IN ('A')),
+  purpose TEXT NOT NULL CHECK (purpose IN ('fallback_origin', 'host')),
+  content TEXT,
+  zone_id TEXT,
+  record_id TEXT,
+  adopted INTEGER NOT NULL DEFAULT 0 CHECK (adopted IN (0, 1)),
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+  UNIQUE (name, type)
+);
+
 -- Issued pairing codes (services/relays.py, docs/relay.md). Temporary rows:
 -- ``token`` is the one-time token the bot sends in `hello`; it is cleared as soon
 -- as the pairing ends (completed / cancelled / expired), so only a live code keeps
