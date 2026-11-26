@@ -120,6 +120,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`install.sh` never leaves a checkout others can write.** A default ACL on the parent directory
+  (the GitHub ubuntu-24.04 image ships `/opt` with `default:other::rwx`) overrides the umask: every
+  file git wrote into `/opt/vpn-service` was 0666 — code root runs, open to any local user. The
+  installer now makes `APP_DIR` itself, drops an inherited ACL (`setfacl -b -k`; without `setfacl`
+  it refuses), and refuses a checkout with a group/other-writable path. Found by `setup-e2e`
+  (`vpn-bot-protocol-install` refused the template as 0666).
 - `vpn-bot-cert` no longer fails a deploy on a stopped nginx: a reader whose action is `reload` and
   whose unit is not running (nginx installed but disabled — an image that ships it so, a host before
   its first protocol) still gets the pair and its `nginx -t`, and no `systemctl reload` (systemd

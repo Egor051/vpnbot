@@ -684,15 +684,40 @@ resolve_ref() {
   INSTALL_REF_RESOLVED="$ref"
 }
 
+# The checkout is code that root runs (vpn-bot.service, the root helpers read its
+# templates): nobody else may write any of it. A default ACL on the parent directory
+# (a CI image ships /opt with default:other::rwx) overrides the umask for every file
+# git writes — so APP_DIR is made first, any ACL it inherited is dropped, and the
+# finished checkout is checked for a group/other-writable path.
+make_app_dir() {
+  mkdir -p -- "$(dirname -- "$APP_DIR")"
+  mkdir -m 0755 -- "$APP_DIR"
+  if [[ "$(ls -ld -- "$APP_DIR")" == ??????????+* ]]; then
+    command -v setfacl >/dev/null 2>&1 \
+      || die "${APP_DIR} унаследовал ACL от $(dirname "$APP_DIR") (default ACL), а setfacl нет — поставьте пакет acl или уберите default ACL"
+    setfacl -b -k -- "$APP_DIR" || die "не удалось снять унаследованные ACL с ${APP_DIR}"
+    log "${APP_DIR}: dropped the ACL inherited from $(dirname "$APP_DIR")"
+  fi
+  chmod 0755 -- "$APP_DIR"
+}
+
+check_checkout_perms() {
+  local bad
+  bad="$(find "$APP_DIR" -xdev ! -type l -perm /022 -print -quit 2>/dev/null)"
+  [[ -z "$bad" ]] || die "checkout доступен на запись группе/всем: ${bad} — так root-код ставить нельзя"
+}
+
 clone_repo() {
   local repo="${INSTALL_REPO:-$DEFAULT_REPO_URL}" ref="$INSTALL_REF_RESOLVED"
   say "Клонирую ${repo} @ ${ref}…"
   manifest_add dir "$APP_DIR"
+  make_app_dir
   run git clone --quiet --no-checkout -- "$repo" "$APP_DIR"
   if ! run git -C "$APP_DIR" -c advice.detachedHead=false checkout --quiet --detach "${ref}^{commit}"; then
     run git -C "$APP_DIR" fetch --quiet origin -- "$ref"
     run git -C "$APP_DIR" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
   fi
+  check_checkout_perms
 }
 
 clone_checkout() {
