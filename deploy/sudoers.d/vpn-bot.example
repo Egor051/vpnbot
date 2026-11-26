@@ -139,4 +139,11 @@ Cmnd_Alias VPN_BOT_WIZARD = \
 Cmnd_Alias VPN_BOT_CERT = \
     /usr/local/sbin/vpn-bot-cert status --json
 
-vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT, VPN_BOT_SSH_PORT, VPN_BOT_UFW, VPN_BOT_WIZARD, VPN_BOT_CERT
+# The decoy site (docs/site.md): the bot only READS it — pinned to exactly `status --json`,
+# no wildcard. Every change (an uploaded archive, a kept version back) is a run of the
+# wizard's `site` mode, i.e. VPN_BOT_WIZARD above; the archive reaches root as a file the
+# bot stages in its RuntimeDirectory, never as an argument.
+Cmnd_Alias VPN_BOT_SITE = \
+    /usr/local/sbin/vpn-bot-site status --json
+
+vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT, VPN_BOT_SSH_PORT, VPN_BOT_UFW, VPN_BOT_WIZARD, VPN_BOT_CERT, VPN_BOT_SITE

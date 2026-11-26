@@ -215,6 +215,7 @@ checklist, and day-2 operations live in:
 - **[docs/install.md](docs/install.md)** — the one-command installer (`scripts/install.sh`) and the first-superadmin claim.
 - **[docs/wizard.md](docs/wizard.md)** — the setup wizard in the admin panel (self-check, diagnostic dump, update) and the TOTP second factor.
 - **[docs/certificate.md](docs/certificate.md)** — the TLS certificate (acme.sh issues, the bot lays it out to a registry of readers), the bot's one Cloudflare token and the DNS records it owns.
+- **[docs/site.md](docs/site.md)** — the decoy site behind the REALITY self-steal and the Hysteria2 masquerade: deploy an archive from the bot, keep and revert versions, the spiderX pool that follows its pages.
 - **[docs/deployment.md](docs/deployment.md)** — install, both models, Xray API mode.
 - **[docs/operations.md](docs/operations.md)** — runbook: health checks, backup/restore, degraded recovery, rollback.
 
@@ -409,6 +410,7 @@ schema version internally).
 | [docs/operations.md](docs/operations.md) | Production runbook: health checks, backup/restore, degraded recovery, rollback, manual verification. |
 | [docs/wizard.md](docs/wizard.md) | The setup wizard (fixed root helper modes in their own systemd unit: plan → apply → verify → rollback; self-check, diagnostic dump, update) and the superadmins' TOTP second factor, its emergency reset. |
 | [docs/certificate.md](docs/certificate.md) | The TLS certificate: `vpn-bot-cert` (the registry of readers, atomic deploy with a rollback per group, issue / renew / adopt), «🔐 Сертификат и DNS», the bot's one Cloudflare token and the DNS records it owns (always `proxied=false`). |
+| [docs/site.md](docs/site.md) | The decoy site: `vpn-bot-site` (an archive unpacked and checked in isolation, one atomic swap of the docroot, the last five versions kept, verify of every page over h2 with a rollback), «🌐 Сайт», `XRAY_SPIDER_X_POOL` following the site's pages. |
 | [docs/host-state.md](docs/host-state.md) | Host files outside the checkout: what deploy.sh installs, repairs and retires, what it only reports, `ALLOW_SSH_CHANGE`; whether they are in effect (host invariants: BEATEN / MISMATCH / LATENT, at deploy, at boot and daily). |
 | [docs/hysteria.md](docs/hysteria.md) | Hysteria2 (apernet v2): data plane, `hy2_auth` endpoint, Traffic Stats API, health & recovery. |
 | [docs/proxy.md](docs/proxy.md) | SOCKS5/Dante and MTProto (static + managed) deployment and recovery. |

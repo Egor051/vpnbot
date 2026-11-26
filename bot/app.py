@@ -32,7 +32,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_bundles, admin_cert, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, first_setup, key_bundles, keys, proxy, relay_hardening, relay_sshd, security, settings as settings_handler, ssh_port, start, ufw
+from bot.handlers import admin, admin_bundles, admin_cert, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_site, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, first_setup, key_bundles, keys, proxy, relay_hardening, relay_sshd, security, settings as settings_handler, ssh_port, start, ufw
 from bot.fallback import proxy_alert_text
 from bot.keyboards.admin_fallback import open_keyboard as fallback_open_keyboard
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
@@ -99,6 +99,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 from services.relay_health import broadcast_to_admins, build_relay_health_supervisor
 from services.cert import CertService
+from services.site import SiteService
 from services.dns import DnsService
 from services.fallback import FallbackService, ProxyAlert
 from services.fallback_auto import FallbackAutoSwitch
@@ -1000,6 +1001,20 @@ async def _build_app(
         settings=settings,
     )
 
+    # «🌐 Сайт» (services/site.py): reads `vpn-bot-site status --json` (sudo in the helper
+    # model, the one exact grant), stages an uploaded archive in the bot's RuntimeDirectory,
+    # changes the site only through the wizard's «site» runs — and after one, re-lays the
+    # keys whose stored spiderX the new site no longer has.
+    site_service = SiteService(
+        runner=PrivilegedHelperRunner(shell=shell, use_sudo=settings.privilege_helpers_enabled),
+        wizard=wizard_service,
+        users=user_service,
+        keys=vpn_keys_repo,
+        audit=audit_service,
+        clock=clock,
+        staging_dir=settings.helper_staging_root / "site",
+    )
+
     # «📦 Установить» (services/protocol_install.py): reads the host's paths, installs only
     # through the wizard's «protocol» runs; the firewall follows once a run succeeded.
     protocol_install_service = ProtocolInstallService(
@@ -1076,6 +1091,7 @@ async def _build_app(
         dns=dns_service,
         cert=cert_service,
         protocol_install=protocol_install_service,
+        site=site_service,
         first_setup=first_setup_service,
     )
 
@@ -1169,6 +1185,7 @@ async def _build_app(
     dp.include_router(ufw.router)
     dp.include_router(admin_wizard.router)
     dp.include_router(admin_cert.router)
+    dp.include_router(admin_site.router)
     dp.include_router(first_setup.router)
     dp.include_router(admin_bundles.router)
     dp.include_router(keys.router)

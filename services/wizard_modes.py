@@ -29,11 +29,14 @@ class WizardParamError(InvalidOperation):
 _DNS_NAME_RE = re.compile(r"^(?=.{1,253}$)(\*\.)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _ZONE_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 MAX_NAMES = 10
+# "digest": the first 16 hex of a sha256 (the archive «🌐 Сайт» deploys) or "" — 16, not 64:
+# a longer hex run is masked as a secret by utils/redact (the run's stored params, the log).
+_DIGEST_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
 @dataclass(frozen=True, slots=True)
 class ParamSpec:
-    kind: str  # "int" | "bool" | "enum" | "names" | "zone"
+    kind: str  # "int" | "bool" | "enum" | "names" | "zone" | "digest"
     default: str
     minimum: int = 0
     maximum: int = 0
@@ -67,6 +70,10 @@ class ParamSpec:
         if self.kind == "zone":
             if not isinstance(value, str) or (value and not _ZONE_RE.match(value)):
                 raise WizardParamError(f"{name}: не имя зоны", key="wizard_param_invalid", params={"name": name})
+            return value
+        if self.kind == "digest":
+            if not isinstance(value, str) or (value and not _DIGEST_RE.match(value)):
+                raise WizardParamError(f"{name}: не дайджест", key="wizard_param_invalid", params={"name": name})
             return value
         raise WizardParamError(f"{name}: неизвестный тип", key="wizard_param_invalid", params={"name": name})
 
@@ -148,6 +155,22 @@ MODES: dict[str, WizardMode] = {
         params={
             "proto": ParamSpec("enum", "xray", choices=("xray", "hysteria2", "socks5")),
             "domain": ParamSpec("names", ""),
+        },
+        menu=False,
+    ),
+    # «🌐 Сайт» (docs/site.md): the decoy site behind the REALITY self-steal and the Hysteria2
+    # masquerade — an uploaded archive or the newest kept version, through the root helper
+    # vpn-bot-site: a plan with the diff first, TOTP, then apply → verify (→ rollback).
+    # Started from its own screen (the archive is staged there), not from the menu.
+    "site": WizardMode(
+        key="site",
+        helper="vpn-bot-wizard-site",
+        read_only=False,
+        dangerous=True,
+        needs_confirmation=True,
+        params={
+            "action": ParamSpec("enum", "deploy", choices=("deploy", "revert")),
+            "digest": ParamSpec("digest", ""),
         },
         menu=False,
     ),

@@ -85,6 +85,9 @@ DANGEROUS_ACTIONS: dict[str, str] = {
     "wizard_cert": "dangerous_wizard_cert",
     # «📦 Установить» (bot/handlers/admin_modules.py): a run of the wizard's «protocol» mode.
     "wizard_protocol": "dangerous_wizard_protocol",
+    # «🌐 Сайт» (bot/handlers/admin_site.py): a run of the wizard's «site» mode — an
+    # uploaded archive or a kept version on the decoy site.
+    "wizard_site": "dangerous_wizard_site",
     # «🧭 Первичная настройка» (bot/handlers/first_setup.py): its one confirmation (cert, installs, UFW).
     "first_setup": "dangerous_first_setup",
     "dns_token": "dangerous_dns_token",

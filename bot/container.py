@@ -29,6 +29,7 @@ from services.protocol_uninstall import ProtocolUninstallService
 from services.proxy import ProxyService
 from services.relay_health import RelayHealthSupervisor
 from services.cert import CertService
+from services.site import SiteService
 from services.dns import DnsService
 from services.fallback import FallbackService
 from services.relays import RelayService
@@ -150,6 +151,9 @@ class Services:
     # «📦 Установить» (services/protocol_install.py): whether a protocol is on the host,
     # and the wizard's «protocol» runs that install it. None in test doubles.
     protocol_install: ProtocolInstallService | None = None
+    # «🌐 Сайт» (services/site.py): the decoy site — reads `vpn-bot-site status --json`,
+    # stages an uploaded archive, changes the site only through the wizard's «site» runs.
+    site: SiteService | None = None
     # «🧭 Первичная настройка» (services/first_setup.py): offered after the claim while no
     # protocol is on the host; resumable. None in test doubles.
     first_setup: FirstSetupService | None = None

@@ -110,7 +110,10 @@ _Legacy aliases accepted: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SE
 > empty or unset changes nothing. When set, existing xray keys are **backfilled** on
 > the next startup (idempotent; already-assigned values are never overwritten), so it
 > can be enabled at any time — not only at the initial v31 upgrade. Every entry must
-> start with `/` (validated at startup).
+> start with `/` (validated at startup). While the pool is in use, a deploy of the decoy
+> site from «🧙 Мастер настройки → 🌐 Сайт» sets it to the new site's pages and re-lays the
+> keys whose stored value the site no longer has — the backfill itself still never
+> overwrites ([site.md](site.md#spiderx-follows-the-site)).
 
 > **spiderX rotation for subscription children (`XRAY_SPIDER_X_ROTATION_HOURS`).** With
 > the default `0` nothing changes: every VLESS link — standalone or inside a subscription —

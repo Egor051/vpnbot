@@ -218,7 +218,7 @@ def final_text(run: WizardRun, snap: StatusSnapshot) -> str:
         lines += ["", _items_block(snap.items)]
     elif run.mode == "dump" and run.state == "succeeded":
         lines.append(t("wizard_dump_ready"))
-    elif run.mode == "protocol" and snap.helper_steps:
+    elif run.mode in ("protocol", "site") and snap.helper_steps:
         lines += ["", render_steps(t("wizard_install_steps_title"), helper_steps_view(snap, closed=run.state)).strip()]
         if snap.items:
             lines += ["", _items_block(snap.items)]
@@ -276,6 +276,8 @@ def menu_keyboard(*, active: WizardRun | None, daily: bool) -> InlineKeyboardMar
     rows.append(_row(t("btn_wizard_first_setup"), "setup:start"))
     # The certificate's own screen: its runs need the names and the zone it works out.
     rows.append(_row(t("btn_wizard_cert"), "cert:menu"))
+    # The decoy site's own screen: its runs need the archive the screen receives.
+    rows.append(_row(t("btn_wizard_site"), "site:menu"))
     # «🛰 Relay» opens THE relay screen of the admin panel (no list of its own).
     rows.append(_row(t("btn_wizard_relay"), "admin:relays"))
     # The relays' SSH port: back to a held migration, or another port (bot/handlers/ssh_port.py).

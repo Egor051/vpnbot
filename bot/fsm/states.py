@@ -146,6 +146,13 @@ class CertStates(StatesGroup):
     token = State()
 
 
+class SiteStates(StatesGroup):
+    """«🌐 Сайт» (bot/handlers/admin_site.py)."""
+
+    # The next document is the site's archive (zip / tar.gz), after the TOTP.
+    archive = State()
+
+
 class SetupStates(StatesGroup):
     """«🧭 Первичная настройка» typed steps (bot/handlers/first_setup.py)."""
 

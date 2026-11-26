@@ -29,6 +29,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup
 from aiogram.types import User as TgUser
 
 from bot.fsm.states import (
+    SiteStates,
     AdminAnnouncementStates,
     AdminCreateKeyStates,
     AdminRelayStates,
@@ -51,6 +52,7 @@ from bot.handlers import (
     admin_warp_split_ui,
     admin_wizard,
     admin_cert,
+    admin_site,
     callbacks,
     common,
     first_setup,
@@ -75,8 +77,10 @@ from bot.keyboards import warp_keyboard as kb_warp
 from bot.keyboards import warp_split_keyboard as kb_split
 from bot.keyboards import warp_split_sources_keyboard as kb_src
 from bot import cert_views as cv
+from bot import site_views as sv
 from bot import totp_gate, wizard_views as wv
 from services.cert import CertStatus
+from services.site import SiteStatus
 from models.dto import WizardRun
 from i18n import use_locale
 from models.dto import AccessRequest, Relay, RelayAgent, RelayPairing, User, VpnKey
@@ -95,7 +99,7 @@ ROUTERS = [
     start, security, common, settings_handler, admin, admin_dashboard, admin_warp, admin_warp_split, admin_warp_split_ui,
     admin_warp_split_sources, admin_modules, admin_fallback, admin_relays, admin_maintenance, ssh_port, relay_hardening,
     relay_sshd, ufw,
-    admin_wizard, admin_cert, first_setup, admin_bundles, keys, key_bundles, proxy, callbacks,
+    admin_wizard, admin_cert, admin_site, first_setup, admin_bundles, keys, key_bundles, proxy, callbacks,
 ]
 
 
@@ -306,6 +310,13 @@ CASES: list[tuple[str, Callable[[], InlineKeyboardMarkup], str | None]] = [
     })), None),
     ("cert_issue", lambda: cv.issue_keyboard(True), None),
     ("cert_token", lambda: cv.token_keyboard(True), None),
+    ("site_screen", lambda: sv.screen_keyboard(SiteStatus({
+        "ok": True, "revert_to": "20261126T000000Z-0123456789ab", "pages": ["/", "/a.html"],
+    })), None),
+    ("site_screen_refused", lambda: sv.screen_keyboard(SiteStatus({"ok": False, "problems": ["x"]})), None),
+    ("site_screen_unavailable", lambda: sv.screen_keyboard(None), None),
+    ("site_upload", sv.upload_keyboard, SiteStates.archive.state),
+    ("site_pages", lambda: sv.pages_keyboard(SiteStatus({"pages": [f"/p{i}.html" for i in range(90)]}), 1), None),
     ("wizard_progress", lambda: wv.progress_keyboard(_wrun()), None),
     ("wizard_plan", lambda: wv.plan_keyboard(_wrun()), None),
     ("wizard_final", lambda: wv.final_keyboard(_wrun(), artifact=True), None),
@@ -407,7 +418,8 @@ def test_back_leads_to_the_parent(name: str, factory: Callable[[], InlineKeyboar
 # ── every admin handler checks the role ────────────────────────────────────────
 
 ADMIN_MODULES = [admin, admin_dashboard, admin_warp, admin_warp_split, admin_warp_split_ui,
-                 admin_warp_split_sources, admin_modules, admin_relays, admin_fallback, admin_maintenance, admin_bundles]
+                 admin_warp_split_sources, admin_modules, admin_relays, admin_fallback, admin_maintenance, admin_bundles,
+                 admin_site]
 GUARDS = {"require_superadmin", "require_moderator_or_admin"}
 # Handlers that need no role: they only delete the alert message they sit under.
 NO_ROLE_NEEDED = {"anomaly_alert_dismiss", "warp_alert_dismiss"}

@@ -78,6 +78,9 @@ _PARAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _DNS_NAME_RE = re.compile(r"^(?=.{1,253}$)(\*\.)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _ZONE_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 MAX_NAMES = 10
+# Parameter kind "digest": the first 16 hex of a sha256 (the archive «🌐 Сайт» deploys) or ""
+# — 16, not 64: a longer hex run looks like a secret to every redaction (utils/redact.py).
+_DIGEST_RE = re.compile(r"^[0-9a-f]{16}$")
 STEPS = ("plan", "apply", "verify", "rollback")
 
 
@@ -95,7 +98,7 @@ class WizardError(Exception):
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class Param:
-    kind: str                    # "int" | "bool" | "enum" | "names" | "zone"
+    kind: str                    # "int" | "bool" | "enum" | "names" | "zone" | "digest"
     default: str
     minimum: int = 0
     maximum: int = 0
@@ -122,6 +125,10 @@ class Param:
         if self.kind == "zone":
             if raw and not _ZONE_RE.match(raw):
                 raise WizardError("must be a DNS zone name (lowercase)", 2)
+            return raw
+        if self.kind == "digest":
+            if raw and not _DIGEST_RE.match(raw):
+                raise WizardError("must be 16 lowercase hex characters", 2)
             return raw
         raise WizardError(f"unknown parameter kind {self.kind}", 2)
 
@@ -180,6 +187,18 @@ MODES: dict[str, Mode] = {
             "domain": Param("names", ""),
         },
         timeouts={"plan": 300, "apply": 1800, "verify": 300, "rollback": 1200},
+    ),
+    # «🌐 Сайт» (docs/site.md): vpn-bot-site plan | apply | verify | commit | rollback of the
+    # decoy site — an archive the bot staged (`digest` = its sha256's first 16 hex) or the
+    # newest kept version. verify GETs every page of the site through nginx.
+    "site": Mode(
+        helper="vpn-bot-wizard-site",
+        read_only=False,
+        params={
+            "action": Param("enum", "deploy", choices=("deploy", "revert")),
+            "digest": Param("digest", ""),
+        },
+        timeouts={"plan": 300, "apply": 600, "verify": 900, "rollback": 600},
     ),
 }
 

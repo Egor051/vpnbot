@@ -1,0 +1,412 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-wizard-site — the «🌐 Сайт» mode of the setup wizard (docs/site.md).
+
+A thin wrapper around the root helper /usr/local/sbin/vpn-bot-site in the wizard's contract,
+so every change of the decoy site is a run: a plan with the diff first, the superadmin's
+confirmation (TOTP), then apply → verify, and a rollback that puts the site back as the plan
+found it. Parameters: `action` — `deploy` (the archive the bot staged in /run/vpn-bot/site)
+or `revert` (the newest kept version); `digest` — the first 16 hex of the archive's sha256
+(deploy only: the plan takes the upload only when it IS that archive).
+
+  plan      vpn-bot-site recover (an apply whose unit was killed is rolled back first — one
+            run at a time holds the wizard's lock, so an open journal is no live run's), then
+            vpn-bot-site plan: the archive unpacked and checked in isolation, the diff (files,
+            pages), the spiderX pool before → after and how many keys follow, the kept
+            versions, the checks of the self-steal BEFORE the change. Recorded in
+            <run>.site-plan.json (its sha256) for apply.
+  apply     vpn-bot-site apply --expect-plan <sha256>: the new tree next to the docroot,
+            one atomic exchange of the two directories, XRAY_SPIDER_X_POOL of .env; its step
+            events become this run's progress (bot/progress.py); a failed step is already
+            undone by the helper
+  verify    vpn-bot-site verify: the tree is the plan's, nginx active, ALPN h2 and the
+            domain's certificate, GET / and every page 200 over HTTP/2. Green: commit (the
+            replaced tree kept, the last five), and — the pool changed — vpn-bot-subscription
+            and the bot restart to read it (`--no-block`: the run goes on in its own unit, the
+            new bot process reports it and re-lays the keys whose spx left the pool)
+  rollback  vpn-bot-site rollback: the journal backwards (the old tree back, .env as it was)
+
+No step changes the host's network (nor nginx's configuration, nor the certificate), so no
+dead-man is armed; a step that overruns is killed by the runner and rolled back.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import signal
+import subprocess  # noqa: S404 — the fixed argv of vpn-bot-site, never a shell
+import sys
+import time
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+
+def _load_lib() -> ModuleType:
+    path = Path(__file__).resolve().parent / "vpn-bot-wizard-lib"
+    st = os.stat(path, follow_symlinks=False)
+    if os.geteuid() == 0 and os.environ.get("VPN_BOT_WIZARD_SELFTEST") != "1" and (st.st_uid != 0 or st.st_mode & 0o022):
+        sys.exit(f"{Path(__file__).name}: {path} must be root-owned and not group/other-writable")
+    loader = importlib.machinery.SourceFileLoader("vpn_bot_wizard_lib", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+lib = _load_lib()
+MODE = "site"
+SITE_HELPER = "/usr/local/sbin/vpn-bot-site"
+PLAN_ARTIFACT = "site-plan.json"
+BOT_UNIT = "vpn-bot.service"
+SUBSCRIPTION_UNIT = "vpn-bot-subscription.service"
+# The helper's own budgets — under the mode's timeouts (the lib's MODES), so it is this
+# helper that stops vpn-bot-site, never the launcher.
+PLAN_TIMEOUT = 270
+APPLY_TIMEOUT = 540
+VERIFY_TIMEOUT = 840
+ROLLBACK_TIMEOUT = 540
+# vpn-bot-site's apply steps, in its order (APPLY_STEPS); the bot labels them
+# (i18n install_step_<key>) and shows them with bot/progress.py's icons.
+STEPS = ("site_stage", "site_swap", "site_env")
+PROGRESS_STATES = {"run", "ok", "fail", "skip"}
+MAX_LISTED = 12
+
+
+def helper_argv(*args: str) -> list[str]:
+    return ["vpn-bot-site" if lib.SELFTEST else SITE_HELPER, *args]
+
+
+def stream(ctx: Any, argv: list[str], timeout: int, on_line: Any = None) -> tuple[int, list[dict[str, Any]], str]:
+    """*argv* in its own process group, read line by line: every JSON object line is
+    collected (and handed to *on_line* as it comes), the rest is the text. On a timeout
+    the WHOLE group is killed and reaped before this returns."""
+    exe = lib.tool_allowed(argv[0])
+    if exe is None:
+        return 127, [], f"{argv[0]}: refused (VPN_BOT_WIZARD_SELFTEST: not a stub)"
+    env = {k: v for k, v in os.environ.items() if k not in ("LANGUAGE", "LC_MESSAGES")}
+    env["LC_ALL"] = "C"
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — argv list, never a shell
+            [exe, *argv[1:]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            text=True, errors="replace", env=env, start_new_session=True,
+        )
+    except FileNotFoundError:
+        return 127, [], f"{argv[0]}: not found"
+    objects: list[dict[str, Any]] = []
+    text: list[str] = []
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip("\n")
+        obj: Any = None
+        if line.startswith("{"):
+            with contextlib.suppress(ValueError):
+                obj = json.loads(line)
+        if isinstance(obj, dict):
+            objects.append(obj)
+            if on_line is not None:
+                on_line(obj)
+        else:
+            text.append(line)
+        if time.monotonic() > deadline:
+            timed_out = True
+            break
+    try:
+        rc = proc.wait(timeout=max(1.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    if timed_out:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        rc = 124
+        text.append(f"{argv[0]}: timed out after {timeout}s (its process group killed)")
+    ctx.log.write(f"$ {' '.join(argv)}  (exit {rc})\n" + "\n".join(text[-60:]))
+    return rc, objects, "\n".join(text).strip()
+
+
+def result_of(objects: list[dict[str, Any]]) -> dict[str, Any]:
+    """The helper's report: its last JSON object that is not a step event."""
+    for obj in reversed(objects):
+        if "event" not in obj:
+            return obj
+    return {}
+
+
+# --------------------------------------------------------------------------- #
+# The plan's text (English, like every mode's plan; the bot shows it as it is)
+# --------------------------------------------------------------------------- #
+def size_text(n: object) -> str:
+    value = float(n) if isinstance(n, (int, float)) else 0.0
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"
+
+
+def short(sha: object) -> str:
+    """12 hex: a whole sha256 looks like a secret to every redaction (and is masked)."""
+    return str(sha or "")[:12] or "?"
+
+
+def _listed(prefix: str, items: list[str], total: int) -> list[str]:
+    lines = [f"  {prefix} {item}" for item in items[:MAX_LISTED]]
+    if total > len(lines):
+        lines.append(f"  … and {total - len(lines)} more")
+    return lines
+
+
+def plan_text(plan: dict[str, Any], recovered: str = "") -> str:
+    lines: list[str] = []
+    if recovered:
+        lines += [f"⚠ {recovered}", ""]
+    action = plan.get("action")
+    lines.append(f"{'deploy an archive' if action == 'deploy' else 'back to the kept version'} → "
+                 f"{plan.get('docroot') or '?'} ({plan.get('domain') or '?'})")
+    cur = plan.get("current") or {}
+    new = plan.get("new") or {}
+    if cur:
+        origin = f"deployed {cur['deployed_at']}" if cur.get("known") and cur.get("deployed_at") else "not deployed by the bot"
+        lines.append(f"Now: {short(cur.get('tree'))} · {cur.get('pages', 0)} page(s), {cur.get('files', 0)} file(s), "
+                     f"{size_text(cur.get('bytes'))} · {origin if cur.get('exists') else 'no site yet'}")
+    if new:
+        src = f"archive {short(new.get('archive'))}" if action == "deploy" else f"kept {new.get('release')}"
+        extra = ""
+        if new.get("unwrapped"):
+            extra += f", its folder {new['unwrapped']} unwrapped"
+        if new.get("skipped"):
+            extra += f", {new['skipped']} junk entr(ies) skipped"
+        lines.append(f"New: {short(new.get('tree'))} · {new.get('pages', 0)} page(s), {new.get('files', 0)} file(s), "
+                     f"{size_text(new.get('bytes'))} · {src}{extra}")
+    if plan.get("nothing_to_do"):
+        lines += ["", "Nothing to do: the site already is this version."]
+    diff = plan.get("diff") or {}
+    if diff and not plan.get("nothing_to_do"):
+        lines += ["", f"Files: +{diff.get('n_added', 0)} −{diff.get('n_removed', 0)} ~{diff.get('n_changed', 0)} "
+                      f"(={diff.get('n_same', 0)})"]
+        lines += _listed("+", list(diff.get("added") or []), int(diff.get("n_added") or 0))
+        lines += _listed("−", list(diff.get("removed") or []), int(diff.get("n_removed") or 0))
+        lines += _listed("~", list(diff.get("changed") or []), int(diff.get("n_changed") or 0))
+        pages = plan.get("pages") or {}
+        lines.append(f"Pages: {pages.get('before', 0)} → {pages.get('after', 0)}")
+        lines += _listed("+", list(pages.get("added") or []), len(pages.get("added") or []))
+        lines += _listed("−", list(pages.get("removed") or []), len(pages.get("removed") or []))
+    spx = plan.get("spx") or {}
+    if spx and not plan.get("nothing_to_do"):
+        if not spx.get("enabled"):
+            lines.append("spiderX: off (XRAY_SPIDER_X_POOL is empty) — not touched")
+        elif not spx.get("changed"):
+            lines.append(f"spiderX pool (XRAY_SPIDER_X_POOL): {len(spx.get('before') or [])} path(s), all on the new site — unchanged")
+        else:
+            lines.append(f"spiderX pool (XRAY_SPIDER_X_POOL, .env backed up first): {len(spx.get('before') or [])} → "
+                         f"{len(spx.get('after') or [])} path(s)")
+            if spx.get("removed"):
+                lines.append("  − " + ", ".join(spx["removed"][:MAX_LISTED]) + (" …" if len(spx["removed"]) > MAX_LISTED else ""))
+            if spx.get("added"):
+                lines.append("  + " + ", ".join(spx["added"][:MAX_LISTED]) + (" …" if len(spx["added"]) > MAX_LISTED else ""))
+            moved, total = spx.get("keys_moved"), spx.get("keys_with_spx")
+            keys = (f"{moved} of {total} key(s) with a stored spx" if isinstance(moved, int) and isinstance(total, int)
+                    else "the keys")
+            lines.append(f"  {keys} whose path leaves the pool get one of the new site (the bot re-lays them after the run)")
+            lines.append("  vpn-bot-subscription and the bot restart to read the pool")
+    store = plan.get("store") or {}
+    if store and not plan.get("nothing_to_do"):
+        if store.get("save_as"):
+            kept = f"Kept versions: the replaced one is kept ({store['save_as']}), the last {store.get('keep')}"
+        else:
+            kept = f"Kept versions: nothing to keep (no site yet), the last {store.get('keep')}"
+        if store.get("drop"):
+            kept += f"; dropped: {', '.join(store['drop'])}"
+        lines.append(kept)
+        lines.append("Swap: the new tree next to the docroot, then one atomic exchange of the two directories; "
+                     "nginx's configuration and the certificate are not touched")
+    hy2 = plan.get("hy2") or {}
+    layout = hy2.get("layout")
+    if layout == "proxy":
+        lines.append(f"Hysteria2 masquerade: proxies to {hy2.get('detail')} — the same site")
+    elif layout == "file":
+        lines.append(f"Hysteria2 masquerade: its own copy ({hy2.get('detail')})")
+    checks = plan.get("checks") or []
+    if checks:
+        lines.append("Before the change: " + "; ".join(f"{'✓' if c.get('ok') else '✗'} {c.get('text')}" for c in checks))
+    for w in plan.get("warnings") or []:
+        lines.append(f"⚠ {w}")
+    for b in plan.get("blocking") or []:
+        lines.append(f"⛔ {b}")
+    if not plan.get("blocking") and not plan.get("nothing_to_do"):
+        lines.append("Verify: GET / and every page 200 over HTTP/2, ALPN h2, the domain's certificate; a failure rolls back")
+    lines.append(f"plan {short(plan.get('sha256'))}")
+    return "\n".join(lines)
+
+
+def steps_event(ctx: Any, states: dict[str, str]) -> None:
+    ctx.event("steps", steps=dict(states))
+
+
+def recover(ctx: Any) -> tuple[bool, str]:
+    rc, objects, rest = stream(ctx, helper_argv("recover", "--json"), timeout=ROLLBACK_TIMEOUT)
+    result = result_of(objects)
+    if rc != 0 or not result.get("ok"):
+        return False, f"an unfinished change of the site could not be rolled back: " \
+                      f"{'; '.join(result.get('rollback_errors') or []) or result.get('detail') or rest[-300:] or f'exit {rc}'}"
+    if result.get("nothing_to_do"):
+        return True, ""
+    return True, f"run #{result.get('run')} had left its change of the site unfinished: rolled back first"
+
+
+def step_plan(ctx: Any) -> int:
+    ok, recovered = recover(ctx)
+    if not ok:
+        ctx.event("plan", text=recovered)
+        return 1
+    action = ctx.params["action"]
+    args = ["plan", action, "--run", str(ctx.run_id), "--json"]
+    if action == "deploy":
+        if not ctx.params.get("digest"):
+            ctx.event("plan", text="deploy needs the archive's digest: send the archive to the bot again")
+            return 1
+        args += ["--digest", ctx.params["digest"]]
+    rc, objects, rest = stream(ctx, helper_argv(*args), timeout=PLAN_TIMEOUT)
+    plan = result_of(objects)
+    if not plan.get("sha256"):
+        reason = "; ".join(plan.get("blocking") or []) or plan.get("detail") or (rest.splitlines()[-1:] or [f"exit {rc}"])[0]
+        ctx.event("plan", text=(f"⚠ {recovered}\n" if recovered else "") + f"plan failed (exit {rc}): {reason}")
+        return 1
+    spx = plan.get("spx") or {}
+    lib.write_private(lib.artifact_path(ctx.run_id, PLAN_ARTIFACT), json.dumps({
+        "sha256": plan["sha256"], "action": action, "nothing_to_do": bool(plan.get("nothing_to_do")),
+        "pool_changed": bool(spx.get("changed")),
+    }).encode())
+    steps_event(ctx, dict.fromkeys(STEPS, "wait"))
+    ctx.event("plan", text=plan_text(plan, recovered), noop=bool(plan.get("nothing_to_do")) and not plan.get("blocking"))
+    return 1 if plan.get("blocking") else 0
+
+
+def load_plan(ctx: Any) -> dict[str, Any]:
+    try:
+        data = json.loads(lib.artifact_path(ctx.run_id, PLAN_ARTIFACT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise lib.WizardError("no plan of this run: plan it first") from None
+    if data.get("action") != ctx.params["action"]:
+        raise lib.WizardError("the plan is of another action")
+    return dict(data)
+
+
+def save_plan(ctx: Any, data: dict[str, Any]) -> None:
+    lib.write_private(lib.artifact_path(ctx.run_id, PLAN_ARTIFACT), json.dumps(data).encode())
+
+
+def step_apply(ctx: Any) -> int:
+    planned = load_plan(ctx)
+    states = dict.fromkeys(STEPS, "wait")
+    steps_event(ctx, states)
+    last = [0.0]
+
+    def on_line(obj: dict[str, Any]) -> None:
+        if obj.get("event") != "step" or obj.get("step") not in states or obj.get("state") not in PROGRESS_STATES:
+            return
+        states[str(obj["step"])] = str(obj["state"])
+        now = time.monotonic()
+        if obj.get("state") in ("fail", "ok", "skip") or now - last[0] >= 1.0:
+            last[0] = now
+            steps_event(ctx, states)
+
+    rc, objects, rest = stream(ctx, helper_argv("apply", "--run", str(ctx.run_id), "--expect-plan", planned["sha256"],
+                                                "--json"), timeout=APPLY_TIMEOUT, on_line=on_line)
+    steps_event(ctx, states)
+    result = result_of(objects)
+    if rc == 0 and result.get("ok"):
+        planned["applied"] = not result.get("nothing_to_do")
+        save_plan(ctx, planned)
+        if result.get("nothing_to_do"):
+            text = "nothing to do: the site already is this version"
+        else:
+            how = "one atomic exchange" if result.get("atomic", True) else "two renames (no RENAME_EXCHANGE here)"
+            text = f"the site is {short(result.get('tree'))} ({how})" + (
+                "; XRAY_SPIDER_X_POOL follows its pages" if result.get("env_changed") else "")
+        ctx.event("result", text=text, verdict="ok")
+        return 0
+    if result.get("error") == "plan_changed":
+        text = "the site, the archive or the pool changed since the plan: nothing was changed — start again"
+    elif result.get("error") == "step_failed":
+        text = f"step {result.get('failed_step')} failed: {result.get('detail')}; rolled back" + (
+            f" INCOMPLETELY: {'; '.join(result.get('rollback_errors') or [])}" if result.get("rollback_errors") else "")
+    else:
+        text = f"refused (exit {rc}): {result.get('detail') or '; '.join(result.get('blocking') or []) or rest[-300:]}"
+    ctx.event("result", text=text, verdict="failed")
+    return 1
+
+
+def step_verify(ctx: Any) -> int:
+    planned = load_plan(ctx)
+    rc, objects, rest = stream(ctx, helper_argv("verify", "--run", str(ctx.run_id), "--json"), timeout=VERIFY_TIMEOUT)
+    result = result_of(objects)
+    checks = [c for c in result.get("checks") or [] if isinstance(c, dict)]
+    pages = [c for c in checks if str(c.get("key", "")).startswith("page:")]
+    for c in checks:
+        if c in pages:
+            continue
+        ctx.event("item", level="green" if c.get("ok") else "red", key=str(c.get("key")), text=str(c.get("text")))
+    if pages:
+        bad = [c for c in pages if not c.get("ok")]
+        if bad:
+            listed = "; ".join(str(c.get("text")) for c in bad[:MAX_LISTED]) + (" …" if len(bad) > MAX_LISTED else "")
+            ctx.event("item", level="red", key="pages", text=f"{len(bad)} of {len(pages)} page(s) do not answer 200 over h2: {listed}")
+        else:
+            ctx.event("item", level="green", key="pages", text=f"all {len(pages)} page(s) answer 200 over HTTP/2")
+    if rc != 0 or not result.get("ok"):
+        bad_text = [str(c.get("text")) for c in checks if not c.get("ok")][:MAX_LISTED] or [rest[-300:] or f"exit {rc}"]
+        ctx.event("result", text="verify: " + "; ".join(bad_text), verdict="failed")
+        return 1
+    if not planned.get("applied", True):
+        ctx.event("result", text=f"the site already was this version: {len(pages)} page(s) answer 200", verdict="ok")
+        return 0
+    crc, cobjects, crest = stream(ctx, helper_argv("commit", "--run", str(ctx.run_id), "--json"), timeout=PLAN_TIMEOUT)
+    commit = result_of(cobjects)
+    if crc != 0 or not commit.get("ok"):
+        ctx.event("result", text=f"verify ok, but the change could not be committed: {commit.get('detail') or crest[-200:]}",
+                  verdict="failed")
+        return 1
+    parts = [f"the new site answers: {len(pages)} page(s) 200 over HTTP/2"]
+    if commit.get("kept"):
+        parts.append(f"the replaced version kept ({Path(str(commit['kept'])).name})")
+    if commit.get("dropped"):
+        parts.append(f"dropped {', '.join(commit['dropped'])}")
+    parts += [str(w) for w in commit.get("warnings") or []]
+    if commit.get("pool_changed"):
+        # The pool is read at start: vpn-bot-subscription renders the rotating spx of the
+        # bundles, the bot issues new keys from it. --no-block for the bot: this unit does
+        # not wait for the process it restarts (the new one reports the run).
+        src, _ = lib.run_cmd(["systemctl", "try-restart", SUBSCRIPTION_UNIT], log=ctx.log)
+        brc, _ = lib.run_cmd(["systemctl", "try-restart", "--no-block", BOT_UNIT], log=ctx.log)
+        pool = commit.get("pool") or []
+        parts.append(f"XRAY_SPIDER_X_POOL: {len(pool)} path(s) of the new site; "
+                     + ("the subscription endpoint restarted" if src == 0 else "restart vpn-bot-subscription to read it")
+                     + ("; the bot restarts to read it" if brc == 0 else "; restart the bot to read it"))
+    ctx.event("result", text="; ".join(parts), verdict="ok")
+    return 0
+
+
+def step_rollback(ctx: Any) -> int:
+    rc, objects, rest = stream(ctx, helper_argv("rollback", "--run", str(ctx.run_id), "--json"), timeout=ROLLBACK_TIMEOUT)
+    result = result_of(objects)
+    if rc == 0 and result.get("ok"):
+        ctx.event("result", text="rolled back: the site is the one the plan found" if not result.get("nothing_to_do")
+                  else "nothing to roll back", verdict="ok")
+        return 0
+    ctx.event("result", text=f"rollback incomplete (exit {rc}): {'; '.join(result.get('rollback_errors') or []) or rest[-300:]}",
+              verdict="failed")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(lib.contract_main(MODE, {"plan": step_plan, "apply": step_apply, "verify": step_verify, "rollback": step_rollback},
+                               sys.argv[1:]))
