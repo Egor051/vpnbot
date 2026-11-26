@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -455,6 +456,52 @@ def test_ref_without_claim_support_leaves_no_checkout(tmp_path: Path) -> None:
     assert not (tmp_path / "opt/vpn-service").exists()
 
 
+def _repo_with_claim(tmp_path: Path) -> tuple[Path, str]:
+    """A tiny repository with the files clone_checkout insists on."""
+    repo = tmp_path / "release"
+    repo.mkdir()
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    files = [".env.example", "constraints-hashed.txt", "deploy/vpn-bot.service", "scripts/vpn-bot-db-perms", "main.py",
+             "deploy/nginx/selfsteal.conf"]
+    marker = re.search(r'CLAIM_SUPPORT_MARKER="([^"]+)"', INSTALL_SH.read_text(encoding="utf-8"))
+    assert marker is not None
+    for rel in [*files, marker.group(1)]:
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("x\n", encoding="utf-8")
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "release"], check=True)
+    sha = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    return repo, sha
+
+
+@pytest.mark.skipif(shutil.which("setfacl") is None, reason="setfacl (package acl) is not installed")
+def test_a_default_acl_on_the_parent_does_not_reach_the_checkout(tmp_path: Path) -> None:
+    """A CI image ships /opt with default:other::rwx, which overrides the umask: every file
+    git wrote was 0666 — root-run code anyone could change. The checkout drops that ACL."""
+    repo, sha = _repo_with_claim(tmp_path)
+    (tmp_path / "opt").mkdir()
+    subprocess.run(["setfacl", "-d", "-m", "u::rwx,g::rwx,o::rwx", str(tmp_path / "opt")], check=True)
+    _ok(_run(tmp_path, f'open_log; INSTALL_REPO="file://{repo}"; INSTALL_REF_RESOLVED="{sha}"; clone_checkout'))
+    app = tmp_path / "opt/vpn-service"
+    loose = [str(p) for p in [app, *app.rglob("*")] if not p.is_symlink() and p.stat().st_mode & 0o022]
+    assert loose == []
+    acl = subprocess.run(["getfacl", "-pc", str(app)], check=True, capture_output=True, text=True).stdout
+    assert "default:" not in acl, acl
+
+
+def test_a_group_writable_checkout_is_refused(tmp_path: Path) -> None:
+    app = tmp_path / "opt/vpn-service"
+    (app / "deploy").mkdir(parents=True)
+    loose = app / "deploy/selfsteal.conf"
+    loose.write_text("x\n", encoding="utf-8")
+    loose.chmod(0o664)
+    result = _run(tmp_path, "open_log; check_checkout_perms")
+    assert result.returncode == 1 and "selfsteal.conf" in result.stderr
+    loose.chmod(0o644)
+    _ok(_run(tmp_path, "open_log; check_checkout_perms"))
+
+
 def test_injected_failure_point(tmp_path: Path) -> None:
     result = _run(
         tmp_path,
@@ -686,6 +733,9 @@ WIZARD_HELPERS = [
     "vpn-bot-cert",
     "vpn-bot-protocol-install",
     "vpn-bot-totp-reset",
+    "vpn-bot-ufw-apply",
+    "vpn-bot-host-check",
+    "vpn-bot-ssh-port",
 ]
 
 
@@ -750,8 +800,16 @@ install_unit
 
 def test_path_is_ours_covers_the_installed_helpers_only(tmp_path: Path) -> None:
     body = """
-for p in "$SBIN_DIR/vpn-bot-wizard" "$SBIN_DIR/vpn-bot-totp-reset.vpn-bot-install.T.bak" "$SBIN_DIR/vpn-bot-ufw-apply" "$SBIN_DIR/vpn-bot-wizardx"; do
+for p in "$SBIN_DIR/vpn-bot-wizard" "$SBIN_DIR/vpn-bot-totp-reset.vpn-bot-install.T.bak" "$SBIN_DIR/vpn-relay-apply" "$SBIN_DIR/vpn-bot-wizardx"; do
   path_is_ours "$p" && echo ours || echo refused
 done
 """
     assert _ok(_run(tmp_path, body)).stdout.split() == ["ours", "ours", "refused", "refused"]
+
+
+def test_every_required_main_helper_comes_with_a_fresh_install() -> None:
+    """After install.sh the bot sets the rest up from Telegram (docs/first-setup.md): every
+    `required` main helper of deploy.sh is on the host — vpn-bot-db-perms by its own step."""
+    deploy = (ROOT / "scripts/deploy.sh").read_text(encoding="utf-8")
+    required = set(re.findall(r'"(scripts/[A-Za-z0-9/_.-]+)\|/usr/local/sbin/[A-Za-z0-9_.-]+\|required"', deploy))
+    assert required - set(_install_helpers()) == {"scripts/vpn-bot-db-perms"}

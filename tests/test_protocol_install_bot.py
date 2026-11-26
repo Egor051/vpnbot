@@ -94,9 +94,10 @@ def test_host_state_follows_the_probes_and_the_marker(tmp_path: Path) -> None:
     assert svc.host_state("xray") == "partial" and svc.installable("xray")
     _lay(tmp_path, *HOST_PROBES["xray"])
     assert svc.host_state("xray") == "installed" and not svc.installable("xray")
-    assert svc.missing() == frozenset()
+    assert svc.missing() == frozenset({"hysteria2", "socks5"})
     reg.removed.add("xray")
-    assert svc.host_state("xray") == "uninstalled" and not svc.installable("xray")
+    # Removed by an uninstall: the same install is offered again — a reinstall.
+    assert svc.host_state("xray") == "uninstalled" and svc.installable("xray") and svc.reinstallable("xray")
     # A protocol the helper does not install (yet) is never offered.
     assert not svc.installable("awg")
 
@@ -214,10 +215,12 @@ def test_the_panel_offers_install_for_a_protocol_not_on_the_host() -> None:
     rows = [[(b.text, b.callback_data) for b in row] for row in markup.inline_keyboard]
     xray = next(r for r in rows if r[0][0].endswith("Xray (VLESS+Reality)"))
     assert xray[0][0].startswith("📦") and xray[1][1] == "admin:module:install:xray"
-    # Removed from the host (its marker): the locked «Enable», not an install (W2b offers the reinstall).
-    markup = modules_panel_keyboard(modules, frozenset({"xray"}), frozenset(), frozenset({"xray"}))
-    rows = [[b.callback_data for b in row] for row in markup.inline_keyboard]
-    assert "admin:module:install:xray" not in {d for r in rows for d in r}
+    # Removed from the host (its marker): «Включить» says «♻️ Переустановить» (it explains,
+    # then offers the same install run); a protocol the bot does not install keeps the lock.
+    markup = modules_panel_keyboard(modules, frozenset({"xray", "awg"}), frozenset(), frozenset({"xray"}))
+    rows = {b.callback_data: b.text for row in markup.inline_keyboard for b in row}
+    assert rows["admin:module:enable:xray"] == "♻️ Переустановить"
+    assert rows["admin:module:enable:awg"] == "🔒 Включить"
 
 
 # --------------------------------------------------------------------------- #
@@ -300,3 +303,50 @@ async def test_the_install_button_is_refused_for_an_installed_protocol(tmp_path:
     cb.from_user.id = ADMIN
     await handlers.admin_module_install(cb, services, _fsm())  # type: ignore[arg-type]
     assert services.wizard.inner.started == [] and any(alert for alert, _ in cb.alerts)
+
+
+async def test_enable_of_a_removed_protocol_offers_the_reinstall(tmp_path: Path, _private: None) -> None:
+    import bot.handlers.admin_modules as handlers
+    from test_admin_fallback_ui import FakeCallback
+
+    services = _handler_world(tmp_path)
+    services.protocol_install.registry.removed.add("xray")
+    services.protocol_uninstall = type("U", (), {"registry": type("R", (), {"names": frozenset({"xray"})})()})()
+    cb = FakeCallback("admin:module:enable:xray")
+    cb.from_user.id = ADMIN
+    await handlers.admin_module_enable_confirm(cb, services)  # type: ignore[arg-type]
+    _text, markup = cb.message.edits[-1]
+    assert "♻️" in str(markup.inline_keyboard[0][0].text)
+    assert markup.inline_keyboard[0][0].callback_data == "admin:module:install:xray"
+    # The reinstall button starts the same «protocol» run.
+    cb2 = FakeCallback("admin:module:install:xray")
+    cb2.from_user.id = ADMIN
+    from test_admin_fallback_ui import _fsm
+    await handlers.admin_module_install(cb2, services, _fsm())  # type: ignore[arg-type]
+    assert services.wizard.inner.started and services.wizard.inner.started[-1][0] == "protocol"
+
+
+class _Modules:
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.calls: list[tuple[str, int]] = []
+
+    async def is_enabled(self, name: str) -> bool:
+        return self.enabled
+
+    async def enable_protocol(self, name: str, actor_id: int) -> UfwApplyResult:
+        self.calls.append((name, actor_id))
+        return UfwApplyResult(True, "+443/udp (hysteria2)", 0)
+
+
+async def test_a_reinstall_switches_the_module_back_on(tmp_path: Path) -> None:
+    modules = _Modules(enabled=False)
+    firewall = _Firewall()
+    svc = ProtocolInstallService(wizard=None, users=_Users(), registry=_Registry(), firewall=firewall, root=tmp_path,
+                                 modules=modules)
+    note = await svc.after_success(_run("succeeded", "execute", active=False))
+    assert modules.calls == [("xray", ADMIN)] and firewall.reasons == [], "enable_protocol converges the firewall itself"
+    assert note is not None and "switched on" in note
+    modules.enabled = True
+    note = await svc.after_success(_run("succeeded", "execute", active=False))
+    assert firewall.reasons == ["installing xray"] and note == "UFW: +443/tcp (xray)"

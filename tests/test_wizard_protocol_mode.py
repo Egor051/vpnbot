@@ -105,3 +105,16 @@ def test_the_host_changing_between_plan_and_apply_installs_nothing(host: WizardH
     result = [e for e in host.events(5) if e["event"] == "result"]
     assert any("changed since the plan" in r["text"] for r in result)
     assert not host.file("/usr/local/etc/xray/config.json").exists()
+
+
+@pytest.mark.parametrize("proto", ["hysteria2", "socks5"])
+def test_hysteria2_and_socks5_runs_through_the_wizard(host: WizardHost, proto: str) -> None:
+    assert host.wizard(6, "plan", proto=proto).returncode == 0
+    assert host.outcome(6) == "planned"
+    proc = host.wizard(6, "execute", proto=proto)
+    assert proc.returncode == 0, proc.stderr
+    assert host.outcome(6) == "succeeded"
+    steps = [e for e in host.events(6) if e["event"] == "steps"][-1]["steps"]
+    from install_fakes import HELPER  # noqa: F401 — the steps come from the helper's PROTO_STEPS
+    assert set(steps.values()) <= {"ok", "skip"} and "fail" not in steps.values()
+    assert any(c.startswith("systemctl try-restart --no-block vpn-bot.service") for c in host.calls())

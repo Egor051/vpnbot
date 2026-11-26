@@ -374,6 +374,8 @@ manifest_hysteria2() {
 	man_shared "${APP_DIR}/scripts/vpnbot-hy2-warp-mark" "tracked in the repository (the source of the installed copy)"
 	man_shared "/usr/local/sbin/acme-reload.sh" "skips the Hysteria2 copy without /etc/hysteria and the restart without the unit"
 	man_shared "/etc/vpn-bot/tls" "shared with nginx and the subscription endpoint"
+	man_shared "nginx, /etc/nginx, /var/www/selfsteal" "the masquerade's self-steal target, shared with Xray and the host (vpn-bot-protocol-install puts it in place, never removes it)"
+	man_shared "user vpn-bot" "the bot's own account: vpnbot-hy2-auth runs as it (protected by the deny-list)"
 }
 # ============================================================================ #
 # <<< MANIFEST

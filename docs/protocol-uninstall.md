@@ -118,7 +118,8 @@ startup reconcile, the Xray/AWG/Hysteria2 stats collectors, the Hysteria2 health
 probe, the anomaly detector, the subscription composition and the protocol
 availability skip the protocol; BackendHealth reports it as **UNINSTALLED** (never
 degraded); **Enable** answers "the protocol was removed from the server; it has to
-be reinstalled". `protocol_modules.uninstalled_*` mirrors the marker for the panel;
+be reinstalled" and, for Xray / Hysteria2 / SOCKS5, offers **♻️ Переустановить**
+([protocol-install.md](protocol-install.md#reinstall)). `protocol_modules.uninstalled_*` mirrors the marker for the panel;
 a mismatch at start is logged as a warning and the database follows the marker.
 
 `scripts/deploy.sh` leaves the protocol's units out of `UNIT_SET` and the drift
@@ -158,8 +159,9 @@ systemctl restart vpn-bot
 A **reinstall** without the archive works the same way at the end: install the
 protocol by its own procedure, delete `/etc/vpn-bot/uninstalled/<proto>`, set
 `<PROTO>_ENABLED=true` again where it has one, restart the bot, enable the module.
-For Xray that procedure is `vpn-bot-protocol-install` ([protocol-install.md](protocol-install.md)):
-its manifest is this helper's, owned for owned — it removes the marker as its last step.
+For Xray, Hysteria2 and SOCKS5 that procedure is the bot's **♻️ Переустановить**
+(`vpn-bot-protocol-install`, [protocol-install.md](protocol-install.md)): its manifest is this
+helper's, owned for owned; it removes the marker and the bot switches the module back on.
 
 ## Privileges
 

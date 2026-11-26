@@ -73,6 +73,9 @@ ROLLBACK_TIMEOUT = 1000
 STEPS = {
     "xray": ("nginx_pkg", "nginx_start", "cert", "nginx_site", "xray_bin", "xray_units", "xray_logs",
              "xray_config", "env", "xray_start", "marker"),
+    "hysteria2": ("nginx_pkg", "nginx_start", "cert", "nginx_site", "users", "hy2_bin", "hy2_units", "hy2_config",
+                  "env", "marker", "hy2_start", "hy2_cert", "warp"),
+    "socks5": ("socks_pkg", "socks_config", "socks_dropin", "env", "marker", "socks_start"),
 }
 PROGRESS_STATES = {"run", "ok", "fail", "skip"}
 
@@ -180,7 +183,7 @@ def plan_text(plan: dict[str, Any]) -> str:
         lines.append(f"⛔ {b}")
     release = plan.get("release")
     if isinstance(release, dict):
-        lines.append(f"Release: Xray {release.get('version')} {release.get('asset')}, sha256 {str(release.get('sha256'))[:16]}…")
+        lines.append(f"Release: {release.get('version')} {release.get('asset')}, sha256 {str(release.get('sha256'))[:16]}…")
     lines.append(f"Backup: {plan.get('backup_dir')}/<proto>-<UTC ts>.tar.gz · plan {str(plan.get('sha256'))[:12]}")
     return "\n".join(lines)
 

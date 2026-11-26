@@ -308,6 +308,14 @@ class WizardService:
         # firewall after «📦 Установить протокол»); its line goes into the report. Runs in
         # whichever process reports the run (also after a restart), so it is idempotent.
         self._after_success: dict[str, AfterSuccess] = {}
+        # Told of every run once it has been reported (any outcome): «🧭 Первичная
+        # настройка» moves on when the run it waits for ends (services/first_setup.py).
+        self._finish_listeners: list[Callable[[WizardRun], Awaitable[None]]] = []
+        self._startup_hooks: list[Callable[[], Awaitable[None]]] = []
+        # Called after every monitor pass (outside its lock): the first setup starts the
+        # run it waits for once the previous run's unit is gone.
+        # A hook that returns True still waits: the monitor keeps its short interval.
+        self._tick_hooks: list[Callable[[], Awaitable[bool]]] = []
         # Plans whose confirmation screen reached the chat in THIS process. Empty after
         # a restart on purpose: the screen is shown again (an edit to the same text is a
         # no-op), so neither a failed delivery nor a restart leaves a stale screen.
@@ -526,6 +534,11 @@ class WizardService:
         pending = await self.repo.unreported()
         if pending:
             logger.info("Setup wizard: %d finished run(s) still owe their report", len(pending))
+        for hook in self._startup_hooks:
+            try:
+                await hook()
+            except Exception as exc:
+                logger.warning("Setup wizard: a startup hook failed (%s: %s)", type(exc).__name__, exc)
 
     async def poll_once(self) -> bool:
         """One pass over the active run and the undelivered reports. True while a run is active."""
@@ -535,7 +548,13 @@ class WizardService:
                 await self._drive(run)
             for done in await self.repo.unreported():
                 await self._report(done)
-            return (await self.repo.active()) is not None
+            busy = (await self.repo.active()) is not None
+        for hook in self._tick_hooks:
+            try:
+                busy = await hook() or busy
+            except Exception as exc:
+                logger.warning("Setup wizard: a tick hook failed (%s: %s)", type(exc).__name__, exc)
+        return busy
 
     async def _drive(self, run: WizardRun) -> None:
         now = datetime.now(timezone.utc)
@@ -622,6 +641,16 @@ class WizardService:
         if shown:
             self._plan_shown.add(run.id)
 
+    def add_finish_listener(self, listener: Callable[[WizardRun], Awaitable[None]]) -> None:
+        self._finish_listeners.append(listener)
+
+    def add_tick_hook(self, hook: Callable[[], Awaitable[bool]]) -> None:
+        self._tick_hooks.append(hook)
+
+    def add_startup_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
+        """Run once by :meth:`resume_on_startup` (the first setup resumes there)."""
+        self._startup_hooks.append(hook)
+
     def register_after_success(self, mode_key: str, hook: AfterSuccess) -> None:
         get_mode(mode_key)
         self._after_success[mode_key] = hook
@@ -655,6 +684,11 @@ class WizardService:
                 return  # the next pass tries again
             logger.warning("wizard run %d: report undeliverable for %s — giving up", run.id, REPORT_GIVE_UP)
         await self.repo.mark_reported(run.id, self.clock.now())
+        for listener in self._finish_listeners:
+            try:
+                await listener(run)
+            except Exception as exc:
+                logger.warning("wizard run %d: a finish listener failed (%s: %s)", run.id, type(exc).__name__, exc)
 
     # ---------------------------------------------------------------- reading
     async def get(self, run_id: int) -> WizardRun:

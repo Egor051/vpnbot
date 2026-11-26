@@ -185,3 +185,59 @@ class WizardRunRepository:
     async def mark_reported(self, run_id: int, now: str) -> None:
         await self.db.conn.execute("UPDATE wizard_runs SET reported_at = ? WHERE id = ?", (now, run_id))
         await self.db.commit()
+
+    # ------------------------------------------------------------------ the first setup
+    # «🧭 Первичная настройка» (services/first_setup.py) keeps its progress in a row of its
+    # own: mode 'setup', NOT holding the lock (active NULL — its steps are runs of other
+    # modes, which take it), reported_at set at once (no generic report: the setup
+    # renders its own message), the steps' state in params_json, the step in current_step.
+    async def create_setup(self, *, started_by: int, chat_id: int | None, params: dict[str, str], now: str) -> WizardRun:
+        cursor = await self.db.conn.execute(
+            """
+            INSERT INTO wizard_runs (mode, state, phase, current_step, params_json, started_by, origin, chat_id,
+                                     active, created_at, updated_at, reported_at)
+            VALUES ('setup', 'running', 'execute', '', ?, ?, 'manual', ?, NULL, ?, ?, ?)
+            """,
+            (json.dumps(params, sort_keys=True), started_by, chat_id, now, now, now),
+        )
+        await self.db.commit()
+        run = await self.get(int(cursor.lastrowid or 0))
+        assert run is not None
+        return run
+
+    async def open_setup(self) -> WizardRun | None:
+        """The first setup that has not finished (there is at most one)."""
+        row = await self.db.conn.execute_fetchone(
+            "SELECT * FROM wizard_runs WHERE mode = 'setup' AND finished_at IS NULL ORDER BY id DESC LIMIT 1"
+        )
+        return _run(row) if row is not None else None
+
+    async def last_setup(self) -> WizardRun | None:
+        row = await self.db.conn.execute_fetchone(
+            "SELECT * FROM wizard_runs WHERE mode = 'setup' ORDER BY id DESC LIMIT 1"
+        )
+        return _run(row) if row is not None else None
+
+    async def save_setup(self, run_id: int, now: str, *, step: str, params: dict[str, str], summary: str = "") -> None:
+        await self.db.conn.execute(
+            """
+            UPDATE wizard_runs SET current_step = ?, params_json = ?, summary = ?, updated_at = ?
+            WHERE id = ? AND mode = 'setup' AND finished_at IS NULL
+            """,
+            (step, json.dumps(params, sort_keys=True), summary, now, run_id),
+        )
+        await self.db.commit()
+
+    async def finish_setup(self, run_id: int, state: str, summary: str, now: str) -> bool:
+        if state not in TERMINAL_STATES:
+            raise ValueError(f"{state!r} is not a terminal state")
+        cursor = await self.db.conn.execute(
+            """
+            UPDATE wizard_runs SET state = ?, summary = ?, finished_at = ?, updated_at = ?
+            WHERE id = ? AND mode = 'setup' AND finished_at IS NULL
+            """,
+            (state, summary, now, now, run_id),
+        )
+        await self.db.commit()
+        return int(cursor.rowcount or 0) == 1
+

@@ -105,9 +105,9 @@ rm -f /etc/vpn-bot/uninstalled/<proto> && systemctl restart vpn-bot   # зате
 Переустановка без архива заканчивается так же: протокол ставится своим способом,
 `/etc/vpn-bot/uninstalled/<proto>` удаляется, `<PROTO>_ENABLED=true` возвращается там,
 где флаг есть, бот перезапускается, модуль включается.
-Для Xray этот способ — `vpn-bot-protocol-install` ([protocol-install.ru.md](protocol-install.ru.md)):
-его манифест совпадает с манифестом этого helper'а «своё к своему», маркер он снимает
-последним шагом.
+Для Xray, Hysteria2 и SOCKS5 этот способ — **♻️ Переустановить** в боте
+(`vpn-bot-protocol-install`, [protocol-install.ru.md](protocol-install.ru.md)): его манифест
+совпадает с манифестом этого helper'а «своё к своему»; он снимает маркер, а бот снова включает модуль.
 
 ## Привилегии
 

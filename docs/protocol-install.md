@@ -8,9 +8,9 @@ then **✅ Apply** — TOTP before both — then apply → verify, and a rollbac
 
 🇷🇺 Russian version: [protocol-install.ru.md](protocol-install.ru.md)
 
-What this release installs: **Xray (VLESS + REALITY) with the nginx self-steal**. Hysteria2,
-SOCKS5, the WARP orchestration and the reinstall of a protocol removed from the server come
-next; the helper's manifest already has the place for them.
+What the bot installs: **Xray (VLESS + REALITY) with the nginx self-steal**, **Hysteria2** and
+**SOCKS5 (Dante)** — each following WARP when it is deployed — and it **reinstalls** a protocol
+removed from the server (below). AmneziaWG and MTProto are not installed from the bot.
 
 ## Before you start
 
@@ -62,6 +62,8 @@ protects every shared path — the same test checks it).
 | Protocol | Owned (the uninstall removes it) | Shared (never removed) | `.env` |
 |---|---|---|---|
 | Xray | `xray.service` (enabled, started), `xray@.service`, `/etc/systemd/system/xray{,@}.service{,.d}`, `/usr/local/bin/xray`, `/usr/local/share/xray`, `/usr/local/etc/xray`, `/var/log/xray` | user `nobody`; nginx (the package, `/etc/nginx/conf.d/selfsteal.conf`, `/var/www/selfsteal`); the certificate's registry `/etc/vpn-bot/tls`; `/etc/logrotate.d/xray` (deploy.sh) | `XRAY_PUBLIC_HOST`, `XRAY_SNI`, `XRAY_REALITY_PUBLIC_KEY`, `XRAY_SHORT_ID`, `XRAY_INBOUND_TAG`, `XRAY_STATS_SERVER`, `XRAY_XHTTP_ENABLED`, `XRAY_XHTTP_INBOUND_TAG` — settings, inert after an uninstall (the marker), so it keeps them |
+| Hysteria2 | `hysteria-server.service` (enabled; started by its certificate), `hysteria-server@.service`, `vpnbot-hy2-auth.service` (enabled, started), `vpnbot-hy2-warp-mark.service` and `/usr/local/sbin/vpnbot-hy2-warp-mark` (only where WARP is deployed), their unit files, `/usr/local/bin/hysteria`, `/etc/hysteria`; user `hysteria` (uid 992 — the `HYUID` `vpnbot-hy2-warp-mark` tags; another uid only without WARP) | nginx and the decoy site (the masquerade proxies to `https://127.0.0.1:8443`); `/etc/vpn-bot/tls`; user `vpn-bot` (`vpnbot-hy2-auth` runs as it; created like `deploy/create-vpn-bot-user.sh` when missing, then `vpn-bot-db-perms` hands `vpn.db` to it) | `HYSTERIA2_ENABLED=true` (the uninstall's `=false`); `HYSTERIA2_HOST`, `HYSTERIA2_SNI`, `HYSTERIA2_STATS_SECRET` (new, 48 hex) |
+| SOCKS5 | `danted.service` (the package's; enabled, restarted), `/etc/systemd/system/danted.service.d` (`vpn-bot-warp.conf` = `deploy/danted-warp.conf`, the bytes of deploy.sh's `gate=SOCKS5` entry), the package `dante-server` | `/etc/danted.conf` — the package's conffile, written from `deploy/danted.conf.example` (port `SOCKS5_PORT`, `external:` the WARP tunnel address when `WARP_PROXY_EGRESS` is on, else the WAN device of the default route); `apt-get purge` removes it | `SOCKS5_ENABLED=true` (the uninstall's `=false`); `SOCKS5_HOST` |
 
 The uninstall marker `/etc/vpn-bot/uninstalled/<proto>` that the uninstall writes last is
 the one the install removes **last** (a reinstall).
@@ -109,9 +111,58 @@ Read-only, every check an item of the run's report:
   <domain>`: the domain's certificate verifies, TLS 1.3, ALPN h2;
 * `curl --http2 --resolve <domain>:8443:127.0.0.1 https://<domain>:8443/` → 200.
 
+
+### Hysteria2 and SOCKS5, step by step
+
+**Hysteria2** — `nginx_pkg`, `nginx_start`, `cert`, `nginx_site` (the self-steal, as for Xray: the
+masquerade proxies to it), then:
+
+| Step | What | Rolled back by |
+|---|---|---|
+| `users` | `vpn-bot` when missing (system user and group, `/var/lib/vpn-bot`, nologin; `vpn-bot-db-perms` hands `vpn.db` to it — `vpnbot-hy2-auth` reads it); `hysteria` with uid 992, no home, nologin | `userdel` / `groupdel` of what this run created; `vpn.db`'s owner back |
+| `hy2_bin` | the official release of the **pinned** version (`HY2_VERSION`, `hysteria-linux-amd64` / `-arm64`): sha256 pinned in the helper **and** equal to the release's `hashes.txt` line | removed |
+| `hy2_units` | `deploy/hysteria/hysteria-server{,@}.service`, `deploy/vpnbot-hy2-auth.service` (byte for byte what deploy.sh installs while Hysteria2 is on); where WARP is deployed also `deploy/vpnbot-hy2-warp-mark.service` and `scripts/vpnbot-hy2-warp-mark`; `daemon-reload` | removed |
+| `hy2_config` | `/etc/hysteria/config.yaml` = `deploy/hysteria/config.yaml` with a new `trafficStats.secret` (the one substitution `deploy/hysteria/install-config.sh` makes), `hysteria:hysteria 0600`. `.env` must keep the file's values (`HYSTERIA2_PORT=443`, auth `127.0.0.1:8444`, stats `127.0.0.1:9999`): the deploy's drift check compares every key of that file | removed |
+| `env` | `HYSTERIA2_ENABLED=true`, `HYSTERIA2_HOST`, `HYSTERIA2_SNI`, `HYSTERIA2_STATS_SECRET` | `.env` from the backup |
+| `marker` | `/etc/vpn-bot/uninstalled/hysteria2` removed — **before** the certificate: `vpn-bot-cert` lays nothing out to a reader whose uninstall marker is there | the marker back |
+| `hy2_start` | `vpnbot-hy2-auth` enabled and started, `hysteria-server` enabled | stop / disable |
+| `hy2_cert` | `vpn-bot-cert deploy`: the pair to `/etc/hysteria/{cert,key}.pem` (the `hysteria` reader), whose action restarts `hysteria-server` — it must be active then | the files go with `/etc/hysteria`; the unit stopped |
+| `warp` | where WARP is deployed: `vpnbot-hy2-warp-mark` enabled and started (its `apply`: hysteria's packets, by uid, follow WARP's policy table) | stop / disable (its `ExecStop` clears the marks) |
+
+Verify: both units active, UDP `:443`, `127.0.0.1:8444` and `127.0.0.1:9999` listening,
+`vpnbot-hy2-auth` `/healthz` 200 (it can read `vpn.db`), `vpn-bot-cert status` says the
+`hysteria` reader holds the bot's pair, the mark unit active where WARP is deployed, and the
+self-steal checks.
+
+**SOCKS5** — `socks_pkg` (`apt-get install dante-server`, `policy-rc.d` holding it; purged on a
+rollback), `socks_config` (`/etc/danted.conf` from `deploy/danted.conf.example`, checked with
+`danted -V`; an operator's own file is kept), `socks_dropin`, `env`, `marker`, `socks_start`
+(`enable`, `restart`, active). Verify: `danted -V`, the unit active, `SOCKS5_PORT` listening.
+
+### WARP
+
+The protocols **follow** WARP; they never set it up. WARP is deployed when its AmneziaWG config
+is on the host (`WARP_CONFIG_PATH`, put there by `vpn-bot-warp-install` from the bot's WARP panel)
+and is owned by its helpers (`vpn-bot-warp-install` / `-iface` / `-routes` / `-split`,
+`warp-failsafe`) — none of them is re-implemented or re-run here. What an install does when it
+finds WARP: Xray's freedom outbound gets `sendThrough` = the tunnel address when
+`WARP_PROXY_EGRESS` is on (the bot's rule); danted's `external:` is that address, and its
+drop-in orders it after `awg-quick@out-warp` / `warp-routes`; Hysteria2 gets
+`vpnbot-hy2-warp-mark` (the existing tracked helper), enabled and started, and its user must
+have uid 992 (the plan refuses otherwise).
+
+### Reinstall
+
+A protocol removed by `vpn-bot-protocol-uninstall` (its marker) shows **♻️ Переустановить** in
+«⚙️ Модули протоколов» instead of the locked «Включить»; pressing «Включить» on it explains and
+offers the same. It is the same `protocol` run: the plan shows `marker: remove`, the marker is
+removed as the last step of the install (for Hysteria2 before its certificate, see above), and
+after the report the bot switches the module back on (`enable_protocol` — which converges the
+firewall too).
+
 ## The wizard mode `protocol`
 
-`scripts/wizard/vpn-bot-wizard-protocol`, parameters `proto` (`xray`) and `domain` (one DNS
+`scripts/wizard/vpn-bot-wizard-protocol`, parameters `proto` (`xray`, `hysteria2`, `socks5`) and `domain` (one DNS
 name the certificate covers; empty = the certificate's own). Started from «⚙️ Модули
 протоколов», not from the wizard's menu. Dangerous: TOTP before the plan and before apply.
 

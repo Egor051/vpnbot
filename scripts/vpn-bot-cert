@@ -1386,6 +1386,12 @@ def run_action(ctx: Ctx, c: Consumer, log: list[str]) -> tuple[bool, str]:
         rc, out = run(ctx, list(c.check))
         if rc != 0:
             return False, f"{' '.join(c.check)} failed (exit {rc}): {out.strip()[-300:]}"
+    if c.action == "reload" and not unit_active(ctx, c.unit):
+        # A stopped reader (nginx installed, not running: a fresh host before its first
+        # protocol, an image that ships it disabled) has nothing to reload, and systemd
+        # refuses the reload; it reads the new pair — checked above — when it starts.
+        log.append(f"{c.unit} is not running: no reload")
+        return True, f"{c.unit} is not running: it reads the new pair when it starts"
     was_active = unit_active(ctx, c.unit) if c.action == "try-restart" else True
     rc, out = run(ctx, ["systemctl", c.action, "--", c.unit])
     log.append(f"systemctl {c.action} {c.unit}: exit {rc}")
