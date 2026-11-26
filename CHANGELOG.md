@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **«🧭 Первичная настройка»** (docs/first-setup.md): after the claim, a host with no protocol is
+  offered the first setup — domain (it must resolve here) → the bot's Cloudflare token (checked
+  before it is stored, the message deleted at once) → the A record through the bot's DNS when the
+  name does not resolve here → the certificate (a confirmed `cert` run: adopt, else issue) → the
+  protocols (VLESS REALITY + Hysteria2 by default; ONE confirmation, TOTP) → one confirmed `protocol`
+  run each → `vpn-bot-ufw-apply apply` → TOTP (optional) → a self-check without red. Every step checks
+  first and acts only on what is missing; the progress is a `wizard_runs` row (mode `setup`, not
+  holding the lock; no schema change); after a restart it goes on where it stopped (WizardService's
+  new startup hooks and finish listeners); a failed step waits for «🔁 Повторить». Also in «🧙 Мастер
+  настройки». The CI job `setup-e2e` runs install.sh → claim → the first setup on ubuntu-24.04 with a
+  mock Bot API and a mock Cloudflare, the network closed for root, the real nginx / xray / hysteria.
+- `install.sh` installs every `required` main helper (also `vpn-bot-ufw-apply`, `vpn-bot-host-check`,
+  `vpn-bot-ssh-port`): the bot sets the rest up from Telegram.
+- `vpn-bot-protocol-install` uses a release file from `/var/cache/vpn-bot-protocol-install` (root
+  0700) instead of a download when one is there — an offline host; the pin decides either way.
+- `CLOUDFLARE_API_BASE` (https, or http on loopback): the Cloudflare API of the bot's DNS, for the CI mock.
+
 - **Hysteria2 and SOCKS5 are installed from the bot too; a removed protocol is reinstalled**
   (docs/protocol-install.md). `vpn-bot-protocol-install` gains `hysteria2` and `socks5`, their manifests
   owned-for-owned with the uninstall's (the symmetry test and install → the real uninstall → install run
@@ -103,6 +120,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`install.sh` never leaves a checkout others can write.** A default ACL on the parent directory
+  (the GitHub ubuntu-24.04 image ships `/opt` with `default:other::rwx`) overrides the umask: every
+  file git wrote into `/opt/vpn-service` was 0666 — code root runs, open to any local user. The
+  installer now makes `APP_DIR` itself, drops an inherited ACL (`setfacl -b -k`; without `setfacl`
+  it refuses), and refuses a checkout with a group/other-writable path. Found by `setup-e2e`
+  (`vpn-bot-protocol-install` refused the template as 0666).
+- `vpn-bot-cert` no longer fails a deploy on a stopped nginx: a reader whose action is `reload` and
+  whose unit is not running (nginx installed but disabled — an image that ships it so, a host before
+  its first protocol) still gets the pair and its `nginx -t`, and no `systemctl reload` (systemd
+  refuses it; the pair is read when nginx starts). Found by `setup-e2e`: the first setup's certificate
+  step was rolled back on a host with such an nginx.
 - `hy2_auth` (vpnbot-hy2-auth.service) comes up when it cannot read `.env`: on an install.sh host the file is
   root:root 0600 and the endpoint runs as vpn-bot, so python-dotenv's PermissionError killed it at
   start (Hysteria2 installed from the bot was rolled back: no /healthz). The unit's `EnvironmentFile=`,

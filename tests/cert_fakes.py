@@ -161,6 +161,8 @@ case "$verb" in
     grep -h "^Le_NextRenewTime=" "$SD"/../root/root/.acme.sh/*/*.conf >> "$SD/next-during-action" 2>/dev/null
     [[ -f "$SD/fail-$verb-$unit" ]] && { echo "Job for $unit failed"; exit 1; }
     [[ -f "$SD/fail-once-$verb-$unit" ]] && { rm -f "$SD/fail-once-$verb-$unit"; echo "Job for $unit failed"; exit 1; }
+    # As systemd: a stopped unit cannot be reloaded.
+    [[ "$verb" == reload && ! -f "$SD/active/$unit" ]] && { echo "$unit.service is not active, cannot reload."; exit 1; }
     if [[ -f "$SD/dies-$unit" ]]; then rm -f "$SD/active/$unit"; exit 0; fi
     [[ "$verb" == restart ]] && { mkdir -p "$SD/active"; touch "$SD/active/$unit"; }
     exit 0 ;;

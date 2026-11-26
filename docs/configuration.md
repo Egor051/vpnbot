@@ -26,6 +26,7 @@ optional with the shown default.
 | `BOT_LOCK_PATH` | No | `/run/vpn-bot/vpn-bot.lock` | Path to the single-instance PID lock file. | `/run/vpn-bot/vpn-bot.lock` |
 | `BOT_DROP_PENDING_UPDATES` | No | `false` | Drop queued Telegram updates on startup. Useful after downtime. | `false` |
 | `TELEGRAM_API_BASE` | No | empty (`api.telegram.org`) | Bot API server base URL, for a local Bot API server or the installer's CI mock. `https`, or `http` only towards a loopback host (the token travels in every request path); no query, fragment or credentials. | `http://127.0.0.1:8081` |
+| `CLOUDFLARE_API_BASE` | No | empty (`api.cloudflare.com/client/v4`) | Cloudflare API base URL of the bot's DNS (services/dns.py), for the first setup's CI mock ([first-setup.md](first-setup.md)). `https`, or `http` only towards a loopback host (the token travels in every request); no query, fragment or credentials. | `http://127.0.0.1:8082/client/v4` |
 | `BOT_LANGUAGE` | No | `ru` | Bot UI language. Supported: `ru`, `en`. | `ru` |
 | `AUDIT_RETENTION_DAYS` | No | `180` | Days to retain audit log entries (0 = forever, max 3650). | `180` |
 | `CONFIG_BACKUP_KEEP_LAST` | No | `20` | Number of config backups to keep per backend config file (1–500): AmneziaWG and the other backends. Xray has its own `XRAY_CONFIG_BACKUP_KEEP`. | `20` |

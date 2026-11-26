@@ -632,3 +632,20 @@ def test_the_wizard_mode_shows_the_helpers_steps() -> None:
     for steps in PI.PROTO_STEPS.values():
         for step in steps:
             assert f"install_step_{step}" in ru.STRINGS and f"install_step_{step}" in en.STRINGS, step
+
+
+def test_a_release_cache_replaces_the_download_and_the_pin_still_decides(host: InstallHost) -> None:
+    cache = host.file("/var/cache/vpn-bot-protocol-install")
+    cache.mkdir(parents=True)
+    for f in host.releases.iterdir():
+        (cache / f.name).write_bytes(f.read_bytes())
+        f.unlink()
+    rc, res = host.install()
+    assert rc == 0, res
+    assert "from the release cache" in host.file("/var/log/vpn-bot-protocol-install.log").read_text()
+    other = InstallHost(host.tmp / "tampered")
+    cache = other.file("/var/cache/vpn-bot-protocol-install")
+    cache.mkdir(parents=True)
+    (cache / ASSET).write_bytes(b"not the pinned zip")
+    rc, res = other.install()
+    assert rc == EXIT_ROLLED_BACK and "pinned" in res["detail"]
