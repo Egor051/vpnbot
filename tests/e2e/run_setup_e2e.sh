@@ -123,7 +123,7 @@ grep -q "^XRAY_SNI=${DOMAIN}$" "$APP_DIR/.env" || fail "XRAY_SNI is not the doma
 grep -q '^HYSTERIA2_ENABLED=true$' "$APP_DIR/.env" || fail "HYSTERIA2_ENABLED is not true"
 [[ "$(stat -c '%U %a' /usr/local/etc/xray/config.json)" == "nobody 640" ]] || fail "config.json owner/mode"
 openssl s_client -connect 127.0.0.1:8443 -servername "$DOMAIN" -alpn h2 -verify_hostname "$DOMAIN" \
-  -verify_return_error -brief </dev/null 2>&1 | grep -q 'ALPN protocol: h2' || fail "the self-steal does not serve h2"
+  -verify_return_error </dev/null 2>&1 | grep -q '^ALPN protocol: h2' || fail "the self-steal does not serve h2"
 records="$(curl -fsS "${CF}/_control/records")"
 [[ "$records" == "[]" ]] || fail "the token check left records at Cloudflare: ${records}"
 python3 - <<'PY' || fail "the self-check was not green"

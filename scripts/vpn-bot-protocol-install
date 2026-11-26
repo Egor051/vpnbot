@@ -2314,19 +2314,21 @@ def verify_selfsteal(ctx: Ctx, check: Checks, domain: str) -> None:
     ok = listening(listeners(ctx), SELFSTEAL_LISTEN)
     check(f"listen:{SELFSTEAL_LISTEN}", ok, f"nginx self-steal listens on {SELFSTEAL_LISTEN}" if ok
           else f"nothing listens on {SELFSTEAL_LISTEN} (nginx self-steal)")
+    # Not -brief: OpenSSL 3's brief summary leaves the negotiated ALPN out.
     rc, out = run(ctx, ["openssl", "s_client", "-connect", SELFSTEAL_LISTEN, "-servername", domain, "-alpn", "h2",
-                        "-verify_hostname", domain, "-verify_return_error", "-brief"], timeout=30, stdin="")
+                        "-verify_hostname", domain, "-verify_return_error"], timeout=30, stdin="")
     tls13 = "TLSv1.3" in out
-    alpn = bool(re.search(r"ALPN protocol:\s*h2\b", out))
+    alpn = bool(re.search(r"^ALPN protocol:\s*h2\b", out, re.MULTILINE))
     verified = rc == 0 and ("Verification: OK" in out or "Verify return code: 0" in out)
     check("tls", tls13 and alpn and verified,
           f"127.0.0.1:8443 SNI {domain}: " + ", ".join([
               "certificate of the domain" if verified else "certificate NOT verified for the domain",
               "TLSv1.3" if tls13 else "not TLSv1.3", "ALPN h2" if alpn else "no ALPN h2"]))
-    rc, out = run(ctx, ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--http2", "--max-time", "15",
-                        "--resolve", f"{domain}:8443:127.0.0.1", f"https://{domain}:8443/"], timeout=30)
-    code = out.strip().splitlines()[-1] if out.strip() else ""
-    check("http", rc == 0 and code == "200", f"GET https://{domain}:8443/ → {code or 'no answer'}")
+    rc, out = run(ctx, ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code} %{http_version}", "--http2", "--max-time",
+                        "15", "--resolve", f"{domain}:8443:127.0.0.1", f"https://{domain}:8443/"], timeout=30)
+    code, _, version = (out.strip().splitlines()[-1] if out.strip() else "").partition(" ")
+    check("http", rc == 0 and code == "200" and version == "2",
+          f"GET https://{domain}:8443/ → {code or 'no answer'}" + (f" over HTTP/{version}" if version else ""))
 
 
 def verify_xray(ctx: Ctx, check: Checks, domain: str) -> None:

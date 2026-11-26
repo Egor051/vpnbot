@@ -322,8 +322,12 @@ if name == "ss":
     sys.exit(0)
 
 if name == "openssl":
+    # As OpenSSL 3's s_client: -brief prints a summary WITHOUT the negotiated ALPN.
     if nginx_serving() and not failing("openssl"):
-        print("Protocol version: TLSv1.3\nALPN protocol: h2\nVerification: OK"); sys.exit(0)
+        if "-brief" in args:
+            print("CONNECTION ESTABLISHED\nProtocol version: TLSv1.3\nVerification: OK"); sys.exit(0)
+        print("---\nNew, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384\nALPN protocol: h2\nVerify return code: 0 (ok)\n---")
+        sys.exit(0)
     print("connect: Connection refused", file=sys.stderr); sys.exit(1)
 
 if name == "curl" and args and args[-1].endswith("/healthz"):
@@ -331,9 +335,10 @@ if name == "curl" and args and args[-1].endswith("/healthz"):
     print("200" if ok else "000"); sys.exit(0 if ok else 7)
 
 if name == "curl":
+    fmt = args[args.index("-w") + 1] if "-w" in args else "%{http_code}"
     if nginx_serving():
-        print("200"); sys.exit(0)
-    print("000"); sys.exit(7)
+        print(fmt.replace("%{http_code}", "200").replace("%{http_version}", "2")); sys.exit(0)
+    print(fmt.replace("%{http_code}", "000").replace("%{http_version}", "0")); sys.exit(7)
 
 def passwd_lines(db):
     f = h(f"/etc/{db}")
