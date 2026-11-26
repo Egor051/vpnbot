@@ -75,7 +75,17 @@ HOST_IP="$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | he
 [[ -n "$HOST_IP" ]] || fail "no global IPv4 on this VM"
 python3 "${REPO_ROOT}/tests/e2e/setup_e2e_fixtures.py" hosts "$HOST_IP"
 apt-get update -q >/dev/null
+# A fresh VPS has no nginx; the runner image ships one (disabled, its default site on :80).
+# Purged, so the bot installs it as on a VPS: from the .debs downloaded here, network closed,
+# policy-rc.d holding it, its default site off (the helper's real path, not "already there").
+mapfile -t preinstalled < <(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'nginx*' 'libnginx-mod*' 2>/dev/null \
+  | awk '$1 ~ /^[ih]i/ {print $2}')
+if ((${#preinstalled[@]})); then
+  echo "purging the image's ${preinstalled[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y -q "${preinstalled[@]}" >/dev/null
+fi
 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --download-only --no-install-recommends nginx >/dev/null
+ls /var/cache/apt/archives/nginx*.deb >/dev/null || fail "no nginx .deb in the apt cache"
 # The setup's firewall step needs ufw (on the image as on a VPS; installed when missing).
 command -v ufw >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q ufw >/dev/null
 
@@ -90,7 +100,7 @@ code="${link##*start=claim_}"
 umask
 stat -c '%U:%G %a %n' / /opt "$APP_DIR" "$APP_DIR/deploy" "$APP_DIR/deploy/nginx" "$APP_DIR/deploy/nginx/selfsteal.conf" \
   "$APP_DIR/deploy/site/default/index.html" || true
-command -v getfacl >/dev/null && getfacl -p /opt "$APP_DIR" "$APP_DIR/deploy/nginx/selfsteal.conf" 2>/dev/null || true
+if command -v getfacl >/dev/null; then getfacl -p /opt "$APP_DIR" "$APP_DIR/deploy/nginx/selfsteal.conf" 2>/dev/null || true; fi
 for helper in vpn-bot-protocol-install vpn-bot-wizard-protocol vpn-bot-ufw-apply vpn-bot-cert; do
   [[ -x "/usr/local/sbin/${helper}" ]] || fail "install.sh did not install ${helper}"
 done
@@ -98,6 +108,11 @@ done
 printf 'CLOUDFLARE_API_BASE=%s/client/v4\n' "$CF" >>"$APP_DIR/.env"
 systemctl restart vpn-bot.service
 sleep 5
+
+# --------------------------------------------------------------------------- #
+step "the runner image's own failed units (not this host's — reset, so the self-check judges the setup's)"
+systemctl --failed --plain --no-legend --no-pager || true
+systemctl reset-failed || true
 
 # --------------------------------------------------------------------------- #
 step "the network is closed for root from here on"
