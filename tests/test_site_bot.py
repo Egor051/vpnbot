@@ -162,6 +162,16 @@ def test_the_bots_archive_limit_is_the_helpers() -> None:
     assert MAX_ARCHIVE_BYTES == 20 << 20
 
 
+def test_the_sudoers_grant_is_status_only() -> None:
+    """The bot only READS the site; every change is a wizard run (VPN_BOT_WIZARD)."""
+    text = (HELPER.parents[1] / "deploy/sudoers.d/vpn-bot.example").read_text(encoding="utf-8")
+    grants = [ln.strip().rstrip(", \\") for ln in text.splitlines() if "/usr/local/sbin/vpn-bot-site" in ln
+              and not ln.lstrip().startswith("#")]
+    assert grants == ["/usr/local/sbin/vpn-bot-site status --json"]
+    user_line = next(ln for ln in text.splitlines() if ln.startswith("vpn-bot ALL=(root) NOPASSWD:"))
+    assert user_line.rstrip().endswith(", VPN_BOT_SITE")
+
+
 def test_stage_writes_the_archive_privately_and_returns_its_digest(tmp_path: Path) -> None:
     import hashlib
 
