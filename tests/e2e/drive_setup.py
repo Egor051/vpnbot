@@ -78,11 +78,48 @@ def runs() -> list[dict[str, Any]]:
     return rows
 
 
-def wait_for(what: str, check: Any, timeout: float = TIMEOUT) -> Any:
+def bot_said(chat: int, last: int = 8) -> str:
+    """The bot's last messages to *chat* (what the operator would read), for a failure."""
+    try:
+        shown = messages(chat)[-last:]
+    except (OSError, ValueError) as exc:
+        return f"(messages: {type(exc).__name__}: {exc})"
+    return "\n".join(f"  #{mid}: {str(m.get('text', ''))[:600]!r} {[b['data'] for b in m.get('buttons', [])]}"
+                     for mid, m in shown)
+
+
+def fail(why: str, chat: int) -> SystemExit:
+    try:
+        all_runs: Any = runs()
+    except sqlite3.Error as exc:
+        all_runs = f"({type(exc).__name__}: {exc})"
+    return SystemExit(f"E2E FAILURE: {why}\nsetup row: {setup_row()}\nruns: {all_runs}\n"
+                      f"the bot's last messages:\n{bot_said(chat)}")
+
+
+_seen: list[Any] = [None]
+
+
+def progress(chat: int) -> None:
+    """Print the setup's step when it moves; stop at once when a step failed."""
+    row = setup_row()
+    if row is None:
+        return
+    params = json.loads(row["params_json"] or "{}")
+    now = (row["current_step"], params.get("waiting"), params.get("child"), params.get("note"))
+    if now != _seen[0]:
+        _seen[0] = now
+        print(f"  setup: step={now[0]} waiting={now[1]} child={now[2]} note={now[3]!r}", flush=True)
+    if row["state"] == "running" and params.get("waiting") == "retry":
+        raise fail(f"setup step {row['current_step']} failed: {params.get('note')}", chat)
+
+
+def wait_for(what: str, check: Any, chat: int, timeout: float = TIMEOUT) -> Any:
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
         try:
+            progress(chat)
             last = check()
         except (OSError, ValueError, sqlite3.Error) as exc:
             last = None
@@ -90,52 +127,49 @@ def wait_for(what: str, check: Any, timeout: float = TIMEOUT) -> Any:
         if last:
             return last
         time.sleep(2)
-    row = setup_row()
-    raise SystemExit(f"E2E FAILURE: timed out waiting for {what}; setup row: {row}; runs: {runs()}")
+    raise fail(f"timed out waiting for {what}", chat)
 
 
 def main() -> int:
     user, domain, token = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-    start = wait_for("the setup's offer after the claim", lambda: find_button(user, "setup:start"), 60)
+    start = wait_for("the setup's offer after the claim", lambda: find_button(user, "setup:start"), user, 60)
     press(user, *start)
-    ask = wait_for("the domain prompt", lambda: find_button(user, "setup:ask:domain:"), 60)
+    ask = wait_for("the domain prompt", lambda: find_button(user, "setup:ask:domain:"), user, 60)
     press(user, *ask)
-    wait_for("«send the domain»", lambda: any("vpn.example.com" in m.get("text", "") for _, m in messages(user)), 60)
+    wait_for("«send the domain»", lambda: any("vpn.example.com" in m.get("text", "") for _, m in messages(user)),
+             user, 60)
     say(user, domain, "the domain")
-    ask = wait_for("the token prompt", lambda: find_button(user, "setup:ask:token:"), 60)
+    ask = wait_for("the token prompt", lambda: find_button(user, "setup:ask:token:"), user, 60)
     press(user, *ask)
     time.sleep(3)
     say(user, token, "the Cloudflare token")
-    go = wait_for("the protocols' confirmation (after the certificate)", lambda: find_button(user, "setup:go:"))
+    # The token is checked at once: the setup moves past it, or the bot says why not.
+    wait_for("the token accepted (the setup past its token step)",
+             lambda: (row := setup_row()) is not None and row["current_step"] not in ("domain", "token"), user, 60)
+    go = wait_for("the protocols' confirmation (after the certificate)", lambda: find_button(user, "setup:go:"), user)
     press(user, *go)
 
     def totp_or_done() -> Any:
         row = setup_row()
         if row and row["finished_at"]:
             return "done"
-        if row and row["state"] == "running":
-            params = json.loads(row["params_json"] or "{}")
-            if params.get("waiting") == "retry":
-                raise SystemExit(f"E2E FAILURE: setup step {row['current_step']} failed: {params.get('note')}; runs: {runs()}")
         return find_button(user, "setup:totp:skip:")
 
-    got = wait_for("the TOTP step (after the installs and the firewall)", totp_or_done)
+    got = wait_for("the TOTP step (after the installs and the firewall)", totp_or_done, user)
     if got != "done":
         press(user, *got)
 
     def finished() -> Any:
         row = setup_row()
-        if row and row["state"] == "running":
-            params = json.loads(row["params_json"] or "{}")
-            if params.get("waiting") == "retry":
-                raise SystemExit(f"E2E FAILURE: setup step {row['current_step']} failed: {params.get('note')}; runs: {runs()}")
         return row if row and row["finished_at"] else None
 
-    row = wait_for("the end of the setup (the self-check)", finished)
+    row = wait_for("the end of the setup (the self-check)", finished, user)
     print(json.dumps({k: row[k] for k in ("id", "state", "current_step", "summary")}), flush=True)
     for run in runs():
         print(f"run #{run['id']} {run['mode']}: {run['state']} — {str(run['summary'])[:200]}", flush=True)
-    return 0 if row["state"] == "succeeded" else 1
+    if row["state"] != "succeeded":
+        raise fail(f"the setup ended {row['state']}", user)
+    return 0
 
 
 if __name__ == "__main__":

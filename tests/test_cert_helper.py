@@ -320,6 +320,21 @@ def test_a_reader_whose_module_is_not_installed_is_left_alone(host: CertHost) ->
     assert host.actions() == ["systemctl reload -- nginx"]
 
 
+def test_a_stopped_nginx_gets_the_pair_and_no_reload(host: CertHost) -> None:
+    """nginx installed but not running (an image that ships it disabled, a host before its
+    first protocol): systemd refuses to reload it, and there is nothing to reload — it
+    reads the checked pair when it starts. The deploy succeeds and never starts it."""
+    host.acme_domain(conf={"Le_RealKeyPath": "", "Le_RealFullChainPath": "", "Le_ReloadCmd": b64(RELOAD)})
+    (host.sd / "active" / "nginx").unlink()
+    rc, report = host.json("deploy")
+    assert rc == 0, report
+    nginx = next(a for g in report["groups"] for a in g["actions"] if a["consumer"] == "nginx")
+    assert nginx["ok"] and "not running" in nginx["text"]
+    assert host.file(TLS_CHAIN).is_file() and host.calls_of("nginx") == ["nginx -t -q"]
+    assert not any("nginx" in a for a in host.actions())
+    assert not (host.sd / "active" / "nginx").exists()
+
+
 def test_a_stopped_subscription_endpoint_is_never_started(host: CertHost) -> None:
     adopted_host(host)
     (host.sd / "active" / "vpn-bot-subscription").unlink()

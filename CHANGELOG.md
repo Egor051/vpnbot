@@ -120,6 +120,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `vpn-bot-cert` no longer fails a deploy on a stopped nginx: a reader whose action is `reload` and
+  whose unit is not running (nginx installed but disabled — an image that ships it so, a host before
+  its first protocol) still gets the pair and its `nginx -t`, and no `systemctl reload` (systemd
+  refuses it; the pair is read when nginx starts). Found by `setup-e2e`: the first setup's certificate
+  step was rolled back on a host with such an nginx.
 - **The proxies through the hub are reconciled, not only switched** (docs/relay.md#the-proxies-through-the-hub,
   docs/proxy.md). The hub got SOCKS5_PORT/MTPROTO_PORT only at the moment the mode was switched (or the
   module toggled); a mode switched on BEFORE v3.3.0 was installed — prod: on since 2026-11-18, hub he2 —
