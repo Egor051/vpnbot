@@ -103,6 +103,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `hy2_auth` (vpnbot-hy2-auth.service) comes up when it cannot read `.env`: on an install.sh host the file is
+  root:root 0600 and the endpoint runs as vpn-bot, so python-dotenv's PermissionError killed it at
+  start (Hysteria2 installed from the bot was rolled back: no /healthz). The unit's `EnvironmentFile=`,
+  read by systemd as root, already sets what it needs (DB_PATH, HYSTERIA2_AUTH_LISTEN). Found by the first
+  setup's end-to-end job (W2c, `setup-e2e`).
 - **The proxies through the hub are reconciled, not only switched** (docs/relay.md#the-proxies-through-the-hub,
   docs/proxy.md). The hub got SOCKS5_PORT/MTPROTO_PORT only at the moment the mode was switched (or the
   module toggled); a mode switched on BEFORE v3.3.0 was installed — prod: on since 2026-11-18, hub he2 —
