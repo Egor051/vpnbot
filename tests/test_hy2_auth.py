@@ -74,6 +74,20 @@ def test_load_config_defaults_to_loopback() -> None:
     assert cfg.port == 8444
 
 
+def test_load_config_survives_a_dotenv_it_cannot_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On an install.sh host .env is root:root 0600 and this process runs as vpn-bot:
+    python-dotenv raises PermissionError opening it. The unit's EnvironmentFile= has
+    set the environment already — the endpoint must come up on it, not crash."""
+    import hy2_auth.config as config_mod
+
+    def unreadable(*_: object, **__: object) -> bool:
+        raise PermissionError(13, "Permission denied", "/opt/vpn-service/.env")
+
+    monkeypatch.setattr(config_mod, "load_dotenv", unreadable)
+    cfg = load_config({"HYSTERIA2_AUTH_LISTEN": "127.0.0.1:8555", "DB_PATH": "/srv/vpn.db"})
+    assert (cfg.host, cfg.port, str(cfg.db_path)) == ("127.0.0.1", 8555, "/srv/vpn.db")
+
+
 @pytest.mark.parametrize("listen", ["0.0.0.0:8444", "10.0.0.5:8444", "8.8.8.8:80"])
 def test_parse_loopback_listen_rejects_non_loopback(listen: str) -> None:
     with pytest.raises(Hy2AuthConfigError):
