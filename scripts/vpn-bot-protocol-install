@@ -707,7 +707,8 @@ def repo_file(ctx: Ctx, rel: str) -> Path:
     if not SELFTEST and os.geteuid() == 0:
         st = path.stat()
         if st.st_uid != 0 or st.st_mode & 0o022:
-            raise Refused(f"{path} must be root-owned and not group/other-writable")
+            raise Refused(f"{path} must be root-owned and not group/other-writable "
+                          f"(it is uid {st.st_uid} gid {st.st_gid} mode {st.st_mode & 0o7777:04o})")
     return path
 
 

@@ -297,6 +297,7 @@ jobs:
           sudo tail -n 300 /opt/vpn-service/logs/bot.log || true
           for f in /var/log/vpn-bot-wizard/*.log /var/log/vpn-bot-protocol-install.log; do echo "== $f"; sudo tail -n 200 "$f"; done || true
           sudo journalctl -u 'vpn-bot-wizard-*' -n 200 --no-pager || true
+          sudo stat -c '%U:%G %a %n' /opt /opt/vpn-service /opt/vpn-service/deploy /opt/vpn-service/deploy/nginx/selfsteal.conf || true
 
   relay-installer-e2e:
     # scripts/install.sh in RELAY mode end to end on a REAL ubuntu-24.04 VM (systemd,

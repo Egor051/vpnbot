@@ -86,6 +86,11 @@ printf '1\n%s\n' "$TOKEN" | bash "$INSTALL_SH" >"${WORK}/install.out" 2>"${WORK}
 link="$(grep -oE 'https://t\.me/vpnbot_ci_bot\?start=claim_[A-Za-z0-9_-]+' "${WORK}/install.out" | head -n1)"
 code="${link##*start=claim_}"
 [[ -n "$code" ]] || fail "no claim link"
+# What the root helpers will trust: the checkout's owner, modes and ACLs as install.sh left them.
+umask
+stat -c '%U:%G %a %n' / /opt "$APP_DIR" "$APP_DIR/deploy" "$APP_DIR/deploy/nginx" "$APP_DIR/deploy/nginx/selfsteal.conf" \
+  "$APP_DIR/deploy/site/default/index.html" || true
+command -v getfacl >/dev/null && getfacl -p /opt "$APP_DIR" "$APP_DIR/deploy/nginx/selfsteal.conf" 2>/dev/null || true
 for helper in vpn-bot-protocol-install vpn-bot-wizard-protocol vpn-bot-ufw-apply vpn-bot-cert; do
   [[ -x "/usr/local/sbin/${helper}" ]] || fail "install.sh did not install ${helper}"
 done
