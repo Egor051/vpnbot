@@ -136,6 +136,21 @@ MODES: dict[str, WizardMode] = {
         },
         menu=False,
     ),
+    # «📦 Установить протокол» (docs/protocol-install.md): the root helper
+    # vpn-bot-protocol-install of one protocol — a plan with the diff first, TOTP, then
+    # apply → verify (→ rollback). Started from «Модули протоколов», not from the menu.
+    "protocol": WizardMode(
+        key="protocol",
+        helper="vpn-bot-wizard-protocol",
+        read_only=False,
+        dangerous=True,
+        needs_confirmation=True,
+        params={
+            "proto": ParamSpec("enum", "xray", choices=("xray", "hysteria2", "socks5")),
+            "domain": ParamSpec("names", ""),
+        },
+        menu=False,
+    ),
 }
 
 

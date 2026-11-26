@@ -27,6 +27,7 @@
 | `BOT_LOCK_PATH` | Нет | `/run/vpn-bot/vpn-bot.lock` | Путь к PID-локу single-instance. |
 | `BOT_DROP_PENDING_UPDATES` | Нет | `false` | Сбрасывать очередь Telegram-обновлений при запуске. Полезно после простоя. |
 | `TELEGRAM_API_BASE` | Нет | пусто (`api.telegram.org`) | Базовый URL сервера Bot API — для локального Bot API server или mock в CI установщика. `https`, либо `http` только на loopback-хост (токен передаётся в пути каждого запроса); без query, fragment и учётных данных. |
+| `CLOUDFLARE_API_BASE` | Нет | пусто (`api.cloudflare.com/client/v4`) | Базовый URL Cloudflare API для DNS бота (services/dns.py) — для мока CI первичной настройки ([first-setup.ru.md](first-setup.ru.md)). `https` или `http` только к loopback-хосту (токен идёт в каждом запросе); без query, fragment и учётных данных. | `http://127.0.0.1:8082/client/v4` |
 | `BOT_LANGUAGE` | Нет | `ru` | Язык UI бота. Поддерживается: `ru`, `en`. |
 | `AUDIT_RETENTION_DAYS` | Нет | `180` | Сколько дней хранить записи audit log (0 = вечно, макс. 3650). |
 | `CONFIG_BACKUP_KEEP_LAST` | Нет | `20` | Сколько config-бэкапов хранить на конфиг backend'а (1–500): AmneziaWG и остальные. У Xray своя настройка `XRAY_CONFIG_BACKUP_KEEP`. |

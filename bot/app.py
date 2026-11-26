@@ -12,12 +12,13 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
+from bot.handlers.first_setup import SetupNotifier
 from bot.fsm.ttl_storage import TTLMemoryStorage
 
 from adapters.awg_config import AwgConfigAdapter
 from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
-from adapters.cloudflare_dns import CloudflareDns, CloudflareTokenFile, doh_resolve_a
+from adapters.cloudflare_dns import CLOUDFLARE_API, CloudflareDns, CloudflareTokenFile, doh_resolve_a
 from adapters.hysteria_auth_health import Hysteria2AuthHealthProbe
 from adapters.hysteria_stats import HysteriaStatsAdapter
 from adapters.warp_feed_fetcher import WarpFeedFetcher
@@ -31,7 +32,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_bundles, admin_cert, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, relay_hardening, relay_sshd, security, settings as settings_handler, ssh_port, start, ufw
+from bot.handlers import admin, admin_bundles, admin_cert, admin_fallback, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, first_setup, key_bundles, keys, proxy, relay_hardening, relay_sshd, security, settings as settings_handler, ssh_port, start, ufw
 from bot.fallback import proxy_alert_text
 from bot.keyboards.admin_fallback import open_keyboard as fallback_open_keyboard
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
@@ -82,6 +83,8 @@ from services.maintenance import MaintenanceService
 from services.offsite_backup import OffsiteBackupService
 from services.notes import NotesService
 from services.online_clients import OnlineClientsService
+from services.first_setup import FirstSetupService, host_ipv4s
+from services.protocol_install import ProtocolInstallService
 from services.protocol_modules import ProtocolModulesService
 from services.protocol_uninstall import ProtocolUninstallService, UninstallRegistry
 from services.proxy import ProxyService
@@ -99,7 +102,7 @@ from services.cert import CertService
 from services.dns import DnsService
 from services.fallback import FallbackService, ProxyAlert
 from services.fallback_auto import FallbackAutoSwitch
-from services.relays import RelayService, warn_legacy_relay_env
+from services.relays import RelayService, resolve_ipv4, warn_legacy_relay_env
 from services.relay_ssh import RelayAgentClient, RelayKeyStore, jump_key_store
 from services.server_status import ServerStatusService
 from services.socks5 import Socks5Service
@@ -771,6 +774,8 @@ async def _build_app(
     # the admin enters in the panel (adapters/cloudflare_dns.py). The health loop
     # asks it which relays are behind the hub right now (no alert storm).
     fallback_token = CloudflareTokenFile()
+    # CLOUDFLARE_API_BASE: only the CI mock of the first setup's end-to-end job sets it.
+    cf_base = settings.cloudflare_api_base or CLOUDFLARE_API
     # The bot's ONE Cloudflare token (the same file) and the DNS records it owns
     # (services/dns.py, docs/certificate.md): the fallback's origin, the certificate's
     # names. Every A write is proxied=false; a token is checked before it is stored.
@@ -780,7 +785,7 @@ async def _build_app(
         audit=audit_service,
         clock=clock,
         token_file=fallback_token,
-        dns=CloudflareDns(fallback_token.load),
+        dns=CloudflareDns(fallback_token.load, base_url=cf_base),
     )
     fallback_service = FallbackService(
         repo=FailoverRepository(db),
@@ -791,7 +796,7 @@ async def _build_app(
         clock=clock,
         settings=settings,
         token_file=fallback_token,
-        dns=CloudflareDns(fallback_token.load),
+        dns=CloudflareDns(fallback_token.load, base_url=cf_base),
         doh=doh_resolve_a,
         endpoints=proxy_endpoints,
         modules=protocol_modules_service,
@@ -995,6 +1000,33 @@ async def _build_app(
         settings=settings,
     )
 
+    # «📦 Установить» (services/protocol_install.py): reads the host's paths, installs only
+    # through the wizard's «protocol» runs; the firewall follows once a run succeeded.
+    protocol_install_service = ProtocolInstallService(
+        wizard=wizard_service,
+        users=user_service,
+        registry=uninstall_registry,
+        firewall=ufw_applier,
+        root=Path("/"),
+        modules=protocol_modules_service,
+    )
+
+    # «🧭 Первичная настройка» (services/first_setup.py): walks the superadmin from a bare
+    # install to a working protocol through the services above — never a second way.
+    first_setup_service = FirstSetupService(
+        repo=WizardRunRepository(db),
+        clock=clock,
+        users=user_service,
+        wizard=wizard_service,
+        dns=dns_service,
+        cert=cert_service,
+        install=protocol_install_service,
+        firewall=ufw_applier,
+        totp=totp_service,
+        resolve=resolve_ipv4,
+        host_addresses=lambda: host_ipv4s(shell),
+    )
+
     services = Services(
         settings=settings,
         db=db,
@@ -1043,6 +1075,8 @@ async def _build_app(
         fallback=fallback_service,
         dns=dns_service,
         cert=cert_service,
+        protocol_install=protocol_install_service,
+        first_setup=first_setup_service,
     )
 
     await _startup_reconcile_keys(services)
@@ -1074,6 +1108,7 @@ async def _build_app(
     ufw_deadman_monitor.bot = bot
     warp_manager.bot = bot
     wizard_service.notifier = TelegramWizardNotifier(bot=bot, service=wizard_service, admin_ids=settings.admin_ids)
+    first_setup_service.notify = SetupNotifier(bot, first_setup_service)
     # FSM state is in-memory only — bot restart clears in-progress wizards.
     # TTLMemoryStorage expires sessions idle for >30 min via the fsm_cleanup_loop
     # background task started in main.py.
@@ -1134,6 +1169,7 @@ async def _build_app(
     dp.include_router(ufw.router)
     dp.include_router(admin_wizard.router)
     dp.include_router(admin_cert.router)
+    dp.include_router(first_setup.router)
     dp.include_router(admin_bundles.router)
     dp.include_router(keys.router)
     dp.include_router(key_bundles.router)

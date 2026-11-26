@@ -8,6 +8,69 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **«🧭 Первичная настройка»** (docs/first-setup.md): after the claim, a host with no protocol is
+  offered the first setup — domain (it must resolve here) → the bot's Cloudflare token (checked
+  before it is stored, the message deleted at once) → the A record through the bot's DNS when the
+  name does not resolve here → the certificate (a confirmed `cert` run: adopt, else issue) → the
+  protocols (VLESS REALITY + Hysteria2 by default; ONE confirmation, TOTP) → one confirmed `protocol`
+  run each → `vpn-bot-ufw-apply apply` → TOTP (optional) → a self-check without red. Every step checks
+  first and acts only on what is missing; the progress is a `wizard_runs` row (mode `setup`, not
+  holding the lock; no schema change); after a restart it goes on where it stopped (WizardService's
+  new startup hooks and finish listeners); a failed step waits for «🔁 Повторить». Also in «🧙 Мастер
+  настройки». The CI job `setup-e2e` runs install.sh → claim → the first setup on ubuntu-24.04 with a
+  mock Bot API and a mock Cloudflare, the network closed for root, the real nginx / xray / hysteria.
+- `install.sh` installs every `required` main helper (also `vpn-bot-ufw-apply`, `vpn-bot-host-check`,
+  `vpn-bot-ssh-port`): the bot sets the rest up from Telegram.
+- `vpn-bot-protocol-install` uses a release file from `/var/cache/vpn-bot-protocol-install` (root
+  0700) instead of a download when one is there — an offline host; the pin decides either way.
+- `CLOUDFLARE_API_BASE` (https, or http on loopback): the Cloudflare API of the bot's DNS, for the CI mock.
+
+- **Hysteria2 and SOCKS5 are installed from the bot too; a removed protocol is reinstalled**
+  (docs/protocol-install.md). `vpn-bot-protocol-install` gains `hysteria2` and `socks5`, their manifests
+  owned-for-owned with the uninstall's (the symmetry test and install → the real uninstall → install run
+  for all three). Hysteria2: the pinned official release (`app/v2.8.2`, sha256 pinned per architecture
+  AND equal to the release's `hashes.txt`), user `hysteria` with uid 992 (the `HYUID` of
+  `vpnbot-hy2-warp-mark`; another uid only without WARP), user `vpn-bot` when missing (`vpnbot-hy2-auth`
+  runs as it; `vpn-bot-db-perms` hands `vpn.db` to it), the units from `deploy/hysteria/` and
+  `deploy/vpnbot-hy2-auth.service`, `config.yaml` = the tracked file with a new stats secret
+  (`hysteria:hysteria 0600`), the self-steal for its masquerade, the pair laid out by `vpn-bot-cert`
+  (the marker goes before it: the cert helper skips a reader whose module is removed). SOCKS5:
+  `dante-server` held by `policy-rc.d`, `/etc/danted.conf` from `deploy/danted.conf.example` (`danted
+  -V`), the WARP ordering drop-in. WARP is followed, never set up: Xray's `sendThrough` and danted's
+  `external:` take the tunnel address under `WARP_PROXY_EGRESS`, Hysteria2 gets `vpnbot-hy2-warp-mark`
+  enabled. A protocol with an uninstall marker shows **♻️ Переустановить**; «Включить» on it offers the
+  same run, and after it the bot switches the module back on (which converges the firewall).
+
+- **A protocol is installed from the bot** (docs/protocol-install.md). After `install.sh` the bot has no
+  protocol; «⚙️ Модули протоколов» now shows one the bot can install and that is not on the server as
+  «📦 <protocol>» with **📦 Установить**: a run of the new wizard mode `protocol`
+  (`scripts/wizard/vpn-bot-wizard-protocol`) — the root helper's plan with every change first, TOTP, then
+  apply → verify → rollback, the helper's steps shown with the progress icons. This release installs
+  **Xray with the nginx self-steal**. The root helper `scripts/vpn-bot-protocol-install`
+  (`OUT_OF_REPO_HELPERS` required on main, `INSTALL_HELPERS`; never granted to the bot) has
+  `manifest | status | plan | apply --expect-plan | verify | rollback | commit` and a MANIFEST
+  symmetric to `vpn-bot-protocol-uninstall`'s: what it owns is exactly what the uninstall removes (a test
+  compares both helpers' manifests and runs install → the real uninstall → install on one fake host),
+  what it shares (nginx, the decoy site, the certificate's registry, `nobody`) the uninstall never
+  removes; the uninstall marker goes as the LAST step. Xray: the official release of a pinned version
+  (`v25.10.15`; the zip's sha256 pinned per architecture AND equal to the release's `.dgst`), the upstream
+  units with the single-config drop-ins (`deploy/xray/`), `config.json` (`nobody:vpn-bot 0640`, `nogroup`
+  without the bot's group) generated from the skeleton — a fresh x25519 pair (both output formats of
+  `xray x25519`), one shortId, REALITY target 127.0.0.1:8443, `serverNames` = the certificate's domain,
+  the XHTTP fallback on 127.0.0.1:8001, the api inbound — serialized as the bot writes it, `xray run
+  -test` before it is put in place; the bot's reconcile, the deploy's drift check and `validate_xray_ready`
+  leave it byte for byte (tested). nginx: the package held by `policy-rc.d` (no `:80`), its default site
+  off, `deploy/nginx/selfsteal.conf` (127.0.0.1:8443, TLS 1.3, h2) and a neutral decoy site
+  (`deploy/site/default`), the pair laid out by `vpn-bot-cert deploy` (nginx is a reader of the registry).
+  `XRAY_*` of `.env` written atomically by the helper (one line per key, owner and mode kept), `.env` in
+  the backup first. Every step journals before it acts; a failure at any step — or a failed verify —
+  rolls the host back (packages the run installed purged again). Verify: `xray run -test`, the units,
+  the four listeners, `openssl s_client` with SNI = the domain (its certificate, TLS 1.3, ALPN h2), HTTP
+  200 over h2. A green verify commits the install and restarts the bot (it reads `XRAY_*` at start); the
+  report's process converges the firewall (`vpn-bot-ufw-apply apply`) and says so.
+- **The wizard's status file may carry a mode helper's own steps** (`{"event": "steps", ...}`), rendered
+  with `bot/progress.py`; a mode can register an after-success step the bot runs before the report.
+
 - **The TLS certificate is part of the bot** (docs/certificate.md). acme.sh keeps ONE install-cert per
   domain, and a move of the host once left its reloadcmd naming only a part of the readers. The readers
   are now a REGISTRY in code — `scripts/vpn-bot-cert` (root, `OUT_OF_REPO_HELPERS` required on main,
@@ -57,6 +120,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`install.sh` never leaves a checkout others can write.** A default ACL on the parent directory
+  (the GitHub ubuntu-24.04 image ships `/opt` with `default:other::rwx`) overrides the umask: every
+  file git wrote into `/opt/vpn-service` was 0666 — code root runs, open to any local user. The
+  installer now makes `APP_DIR` itself, drops an inherited ACL (`setfacl -b -k`; without `setfacl`
+  it refuses), and refuses a checkout with a group/other-writable path. Found by `setup-e2e`
+  (`vpn-bot-protocol-install` refused the template as 0666).
+- `vpn-bot-cert` no longer fails a deploy on a stopped nginx: a reader whose action is `reload` and
+  whose unit is not running (nginx installed but disabled — an image that ships it so, a host before
+  its first protocol) still gets the pair and its `nginx -t`, and no `systemctl reload` (systemd
+  refuses it; the pair is read when nginx starts). Found by `setup-e2e`: the first setup's certificate
+  step was rolled back on a host with such an nginx.
+- `hy2_auth` (vpnbot-hy2-auth.service) comes up when it cannot read `.env`: on an install.sh host the file is
+  root:root 0600 and the endpoint runs as vpn-bot, so python-dotenv's PermissionError killed it at
+  start (Hysteria2 installed from the bot was rolled back: no /healthz). The unit's `EnvironmentFile=`,
+  read by systemd as root, already sets what it needs (DB_PATH, HYSTERIA2_AUTH_LISTEN). Found by the first
+  setup's end-to-end job (W2c, `setup-e2e`).
 - **The proxies through the hub are reconciled, not only switched** (docs/relay.md#the-proxies-through-the-hub,
   docs/proxy.md). The hub got SOCKS5_PORT/MTPROTO_PORT only at the moment the mode was switched (or the
   module toggled); a mode switched on BEFORE v3.3.0 was installed — prod: on since 2026-11-18, hub he2 —

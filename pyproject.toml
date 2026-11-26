@@ -28,6 +28,10 @@ timeout_method = "signal"
 [tool.coverage.run]
 branch = true
 omit = ["tests/*", "init_db.py", "main.py"]
+# The root helpers (scripts/vpn-bot-*) are tested as the processes they are: each test
+# runs one with sys.executable. Measure those Python subprocesses too, or the code they
+# run counts as untested (coverage >= 7.10; pytest-cov combines the data files).
+patch = ["subprocess"]
 
 [tool.coverage.report]
 show_missing = true

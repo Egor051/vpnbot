@@ -33,7 +33,8 @@ _MAX_PRE = 2500
 
 
 def mode_title(key: str) -> str:
-    return t(f"wizard_mode_{key}") if key in MODES else key
+    # "setup": the first setup's own row in the history (no helper mode of its own).
+    return t(f"wizard_mode_{key}") if key in MODES or key == "setup" else key
 
 
 def state_label(state: str) -> str:
@@ -130,7 +131,24 @@ def deploy_steps_view(snap: StatusSnapshot | None, *, phase1_only: bool = False)
     return steps
 
 
+def helper_steps_view(snap: StatusSnapshot | None, *, closed: str | None = None) -> list[Step]:
+    """A mode helper's own steps (``steps`` events: «📦 Установить протокол»), labelled
+    ``install_step_<key>``. *closed* (the run's final state): a step still ⚪/🔄 of a run
+    that succeeded is ✅ — it had nothing to do — and 🔄 of one that failed goes back to ⚪."""
+    if snap is None or not snap.helper_steps:
+        return []
+    steps = [Step(key=k, title=t(f"install_step_{k}"), state=v) for k, v in snap.helper_steps.items()]
+    if closed is not None:
+        for step in steps:
+            if step.state == "run":
+                step.state = "ok" if closed == "succeeded" else "wait"
+    return steps
+
+
 def progress_text(run: WizardRun, snap: StatusSnapshot) -> str:
+    if snap.helper_steps and run.phase == "execute":
+        # The helper's steps, the activity line moving with every new event.
+        return render_steps(header(run, snap), helper_steps_view(snap), tick=snap.events)
     if run.mode == "update":
         # The deploy's own steps (all of them: the plan's CHECK is the run's first
         # half), the activity line moving with every new event.
@@ -154,6 +172,12 @@ def plan_text(run: WizardRun, snap: StatusSnapshot | None = None) -> str:
     if run.mode == "update":
         # What «Применить» runs: the deploy's steps, all ⚪ (bot/progress.py).
         lines.append(render_steps(t("wizard_update_steps_title"), deploy_steps_view(None)).strip())
+    steps = helper_steps_view(snap)
+    if steps:
+        # What «Применить» runs: the helper's steps, all ⚪.
+        for step in steps:
+            step.state = "wait"
+        lines.append(render_steps(t("wizard_install_steps_title"), steps).strip())
     lines.append(t("wizard_plan_confirm_hint"))
     return "\n".join(lines)
 
@@ -194,6 +218,12 @@ def final_text(run: WizardRun, snap: StatusSnapshot) -> str:
         lines += ["", _items_block(snap.items)]
     elif run.mode == "dump" and run.state == "succeeded":
         lines.append(t("wizard_dump_ready"))
+    elif run.mode == "protocol" and snap.helper_steps:
+        lines += ["", render_steps(t("wizard_install_steps_title"), helper_steps_view(snap, closed=run.state)).strip()]
+        if snap.items:
+            lines += ["", _items_block(snap.items)]
+        if snap.result_text:
+            lines += ["", _pre(snap.result_text)]
     elif snap.result_text:
         lines += ["", _pre(snap.result_text)]
     elif run.summary:
@@ -218,6 +248,8 @@ def final_text(run: WizardRun, snap: StatusSnapshot) -> str:
         lines += ["", deploy_warnings_text(snap.deploy_warnings)]
     if run.mode == "update" and run.state in ("failed", "rolled_back") and snap.deploy_failure is not None:
         lines += ["", deploy_failure_text(snap.deploy_failure)]
+    if snap.notes:
+        lines += [""] + [h(note) for note in snap.notes]
     if run.state in ("failed", "rolled_back"):
         lines += ["", t("wizard_failed_hint")]
     return "\n".join(lines)
@@ -240,6 +272,8 @@ def menu_keyboard(*, active: WizardRun | None, daily: bool) -> InlineKeyboardMar
     rows = [_row(f"{mode_title(key)}", f"wiz:start:{key}") for key, mode in MODES.items() if mode.menu]
     if active is not None:
         rows.insert(0, _row(t("btn_wizard_active", id=active.id, mode=mode_title(active.mode)), f"wiz:run:{active.id}"))
+    # «🧭 Первичная настройка»: start or resume (services/first_setup.py).
+    rows.append(_row(t("btn_wizard_first_setup"), "setup:start"))
     # The certificate's own screen: its runs need the names and the zone it works out.
     rows.append(_row(t("btn_wizard_cert"), "cert:menu"))
     # «🛰 Relay» opens THE relay screen of the admin panel (no list of its own).

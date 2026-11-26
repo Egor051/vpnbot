@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -147,6 +148,12 @@ class StatusSnapshot:
     # The last ``deploy`` event of the phase BEFORE this one (the plan's CHECK, when
     # this is the execute phase): the steps it already got through.
     earlier_deploy_progress: dict[str, Any] | None = None
+    # A mode helper's own steps and their state (``steps`` events: «📦 Установить
+    # протокол»), shown with bot/progress.py's icons; the last event of the run counts.
+    helper_steps: dict[str, str] = field(default_factory=dict)
+    # Lines the bot adds to the final report (an after-success hook: the firewall after
+    # an install). Never read from the status file.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def finished(self) -> bool:
@@ -178,6 +185,8 @@ def parse_status(text: str) -> StatusSnapshot:
     for rec in records[:start]:
         if rec["event"] == "deploy" and isinstance(rec.get("progress"), dict):
             snap.earlier_deploy_progress = rec["progress"]
+        elif rec["event"] == "steps":
+            snap.helper_steps = _helper_steps(rec.get("steps"))
     for rec in records[start:]:
         kind = rec["event"]
         if kind == "launched":
@@ -195,6 +204,8 @@ def parse_status(text: str) -> StatusSnapshot:
             progress = rec.get("progress")
             if isinstance(progress, dict):
                 snap.deploy_progress = progress
+        elif kind == "steps":
+            snap.helper_steps = _helper_steps(rec.get("steps"))
         elif kind == "plan":
             snap.plan_text = str(rec.get("text") or "")
             snap.plan_noop = bool(rec.get("noop"))
@@ -223,6 +234,20 @@ def parse_status(text: str) -> StatusSnapshot:
     return snap
 
 
+_STEP_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_STEP_STATES = frozenset({"wait", "run", "ok", "fail", "skip"})
+
+
+def _helper_steps(value: object) -> dict[str, str]:
+    """A ``steps`` event's {step: state}, in its order; anything else is dropped."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(k): str(v) for k, v in list(value.items())[:32]
+        if isinstance(k, str) and _STEP_KEY_RE.match(k) and v in _STEP_STATES
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Who renders: the bot layer implements this (bot/wizard_notifier.py)
 # --------------------------------------------------------------------------- #
@@ -234,6 +259,9 @@ class WizardNotifier(Protocol):
     async def finished(self, run: WizardRun, snap: StatusSnapshot) -> bool: ...
 
     async def scheduled_alert(self, run: WizardRun, snap: StatusSnapshot) -> bool: ...
+
+
+AfterSuccess = Callable[[WizardRun], Awaitable[str | None]]
 
 
 class MetaStore(Protocol):
@@ -276,6 +304,18 @@ class WizardService:
         self.log_dir = log_dir
         self.notifier = notifier
         self._seen: dict[int, tuple[int, str]] = {}
+        # mode -> what the bot does once a run of it succeeded, before the report (the
+        # firewall after «📦 Установить протокол»); its line goes into the report. Runs in
+        # whichever process reports the run (also after a restart), so it is idempotent.
+        self._after_success: dict[str, AfterSuccess] = {}
+        # Told of every run once it has been reported (any outcome): «🧭 Первичная
+        # настройка» moves on when the run it waits for ends (services/first_setup.py).
+        self._finish_listeners: list[Callable[[WizardRun], Awaitable[None]]] = []
+        self._startup_hooks: list[Callable[[], Awaitable[None]]] = []
+        # Called after every monitor pass (outside its lock): the first setup starts the
+        # run it waits for once the previous run's unit is gone.
+        # A hook that returns True still waits: the monitor keeps its short interval.
+        self._tick_hooks: list[Callable[[], Awaitable[bool]]] = []
         # Plans whose confirmation screen reached the chat in THIS process. Empty after
         # a restart on purpose: the screen is shown again (an edit to the same text is a
         # no-op), so neither a failed delivery nor a restart leaves a stale screen.
@@ -494,6 +534,11 @@ class WizardService:
         pending = await self.repo.unreported()
         if pending:
             logger.info("Setup wizard: %d finished run(s) still owe their report", len(pending))
+        for hook in self._startup_hooks:
+            try:
+                await hook()
+            except Exception as exc:
+                logger.warning("Setup wizard: a startup hook failed (%s: %s)", type(exc).__name__, exc)
 
     async def poll_once(self) -> bool:
         """One pass over the active run and the undelivered reports. True while a run is active."""
@@ -503,7 +548,13 @@ class WizardService:
                 await self._drive(run)
             for done in await self.repo.unreported():
                 await self._report(done)
-            return (await self.repo.active()) is not None
+            busy = (await self.repo.active()) is not None
+        for hook in self._tick_hooks:
+            try:
+                busy = await hook() or busy
+            except Exception as exc:
+                logger.warning("Setup wizard: a tick hook failed (%s: %s)", type(exc).__name__, exc)
+        return busy
 
     async def _drive(self, run: WizardRun) -> None:
         now = datetime.now(timezone.utc)
@@ -590,8 +641,31 @@ class WizardService:
         if shown:
             self._plan_shown.add(run.id)
 
+    def add_finish_listener(self, listener: Callable[[WizardRun], Awaitable[None]]) -> None:
+        self._finish_listeners.append(listener)
+
+    def add_tick_hook(self, hook: Callable[[], Awaitable[bool]]) -> None:
+        self._tick_hooks.append(hook)
+
+    def add_startup_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
+        """Run once by :meth:`resume_on_startup` (the first setup resumes there)."""
+        self._startup_hooks.append(hook)
+
+    def register_after_success(self, mode_key: str, hook: AfterSuccess) -> None:
+        get_mode(mode_key)
+        self._after_success[mode_key] = hook
+
     async def _report(self, run: WizardRun) -> None:
         snap = await self.snapshot(run.id)
+        hook = self._after_success.get(run.mode)
+        if hook is not None and run.state == "succeeded":
+            try:
+                note = await hook(run)
+            except Exception as exc:
+                logger.warning("wizard run %d: after-success step failed (%s: %s)", run.id, type(exc).__name__, exc)
+                note = None
+            if note:
+                snap.notes.append(note)
         delivered = True
         if self.notifier is not None:
             try:
@@ -610,6 +684,11 @@ class WizardService:
                 return  # the next pass tries again
             logger.warning("wizard run %d: report undeliverable for %s — giving up", run.id, REPORT_GIVE_UP)
         await self.repo.mark_reported(run.id, self.clock.now())
+        for listener in self._finish_listeners:
+            try:
+                await listener(run)
+            except Exception as exc:
+                logger.warning("wizard run %d: a finish listener failed (%s: %s)", run.id, type(exc).__name__, exc)
 
     # ---------------------------------------------------------------- reading
     async def get(self, run_id: int) -> WizardRun:

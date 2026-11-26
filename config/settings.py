@@ -768,6 +768,10 @@ class Settings:
     # for a local Bot API server or the installer's CI mock; https, or http on a
     # loopback host, since every request carries the bot token in its path.
     telegram_api_base: str = ""
+    # Cloudflare API base URL (CLOUDFLARE_API_BASE). Empty = api.cloudflare.com. Only for
+    # the first setup's CI mock (tests/e2e/): https, or http on a loopback host, since
+    # every request carries the token in its Authorization header.
+    cloudflare_api_base: str = ""
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -1380,4 +1384,5 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         ssh_port=_int_range("SSH_PORT", 54321, 1, 65535),
         server_flag_emoji=server_flag_emoji,
         telegram_api_base=_telegram_api_base("TELEGRAM_API_BASE", _optional("TELEGRAM_API_BASE")),
+        cloudflare_api_base=_telegram_api_base("CLOUDFLARE_API_BASE", _optional("CLOUDFLARE_API_BASE")),
     )

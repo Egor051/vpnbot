@@ -59,8 +59,17 @@ def parse_loopback_listen(listen: str) -> tuple[str, int]:
 
 
 def load_config(environ: dict[str, str] | None = None) -> Hy2AuthConfig:
-    """Load DB path and loopback listen address from the environment (and .env)."""
-    load_dotenv()
+    """Load DB path and loopback listen address from the environment (and .env).
+
+    The unit's ``EnvironmentFile=`` (read by systemd, as root) already set them. The
+    process itself runs as vpn-bot and may not read .env at all — root:root 0600 on an
+    install.sh host, where the bot runs as root: that is no error, the environment
+    stands; python-dotenv would raise PermissionError and the endpoint never came up.
+    """
+    try:
+        load_dotenv()
+    except OSError:
+        pass
     env = environ if environ is not None else dict(os.environ)
     db_path = (env.get("DB_PATH") or "").strip() or DEFAULT_DB_PATH
     listen = (env.get("HYSTERIA2_AUTH_LISTEN") or "").strip() or DEFAULT_AUTH_LISTEN

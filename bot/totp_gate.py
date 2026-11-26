@@ -83,6 +83,10 @@ DANGEROUS_ACTIONS: dict[str, str] = {
     # «🔐 Сертификат и DNS» (bot/handlers/admin_cert.py): a run of the wizard's «cert»
     # mode (issue / renew / adopt / deploy) and the bot's ONE Cloudflare token.
     "wizard_cert": "dangerous_wizard_cert",
+    # «📦 Установить» (bot/handlers/admin_modules.py): a run of the wizard's «protocol» mode.
+    "wizard_protocol": "dangerous_wizard_protocol",
+    # «🧭 Первичная настройка» (bot/handlers/first_setup.py): its one confirmation (cert, installs, UFW).
+    "first_setup": "dangerous_first_setup",
     "dns_token": "dangerous_dns_token",
 }
 

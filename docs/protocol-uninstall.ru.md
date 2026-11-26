@@ -70,7 +70,7 @@ SOCKS5-пользователей по префиксу+shell — шаг 2 (сн
 
 Полные таблицы — в английской версии [protocol-uninstall.md](protocol-uninstall.md):
 манифесты по протоколам, глобальный deny-list хелпера и список **сознательно не
-удаляемого** с причинами (nobody, nginx и decoy-сайт, сертификаты и acme.sh,
+удаляемого** с причинами (nobody, nginx и decoy-сайт — его ставит [установка протокола](protocol-install.ru.md), но не удаляет —, сертификаты и acme.sh,
 `/etc/logrotate.d/xray`, каталоги `/etc/amnezia`, всё out-warp и warp-*, пакеты
 amneziawg*, файлы пакета dante-server, чужие SOCKS5-пользователи, tracked-файлы
 репозитория, база, sshd, порт 22 и SSH-порт (`SSH_PORT`, по умолчанию 54321), eth0, sysctl).
@@ -105,6 +105,9 @@ rm -f /etc/vpn-bot/uninstalled/<proto> && systemctl restart vpn-bot   # зате
 Переустановка без архива заканчивается так же: протокол ставится своим способом,
 `/etc/vpn-bot/uninstalled/<proto>` удаляется, `<PROTO>_ENABLED=true` возвращается там,
 где флаг есть, бот перезапускается, модуль включается.
+Для Xray, Hysteria2 и SOCKS5 этот способ — **♻️ Переустановить** в боте
+(`vpn-bot-protocol-install`, [protocol-install.ru.md](protocol-install.ru.md)): его манифест
+совпадает с манифестом этого helper'а «своё к своему»; он снимает маркер, а бот снова включает модуль.
 
 ## Привилегии
 

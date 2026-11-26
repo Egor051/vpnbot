@@ -99,7 +99,7 @@ the repository.
 | What | Why |
 |---|---|
 | user `nobody` | owns the Xray config and logs, but is a shared system account |
-| nginx, `/etc/nginx`, `/var/www/anycastedge` | the REALITY self-steal / decoy site, shared with the host |
+| nginx, `/etc/nginx`, `/var/www/anycastedge`, `/var/www/selfsteal` | the REALITY self-steal / decoy site, shared with the host ([protocol-install.md](protocol-install.md) puts it in place, never removes it) |
 | `/etc/vpn-bot/tls`, `/root/.acme.sh`, `/usr/local/sbin/acme-reload.sh` | certificates and acme.sh also serve the subscription endpoint; the hook already skips the Hysteria2 copy without `/etc/hysteria` and the restart without the unit (pinned by `tests/test_deploy_uninstall_markers.py`) |
 | `/etc/logrotate.d/xray` | installed by deploy.sh (`MANAGED_HOST_FILES`); `missingok`, inert without `/var/log/xray` |
 | `/etc/amnezia`, `/etc/amnezia/amneziawg` (the directories) | they hold the WARP egress (`out-warp`) config too |
@@ -118,7 +118,8 @@ startup reconcile, the Xray/AWG/Hysteria2 stats collectors, the Hysteria2 health
 probe, the anomaly detector, the subscription composition and the protocol
 availability skip the protocol; BackendHealth reports it as **UNINSTALLED** (never
 degraded); **Enable** answers "the protocol was removed from the server; it has to
-be reinstalled". `protocol_modules.uninstalled_*` mirrors the marker for the panel;
+be reinstalled" and, for Xray / Hysteria2 / SOCKS5, offers **♻️ Переустановить**
+([protocol-install.md](protocol-install.md#reinstall)). `protocol_modules.uninstalled_*` mirrors the marker for the panel;
 a mismatch at start is logged as a warning and the database follows the marker.
 
 `scripts/deploy.sh` leaves the protocol's units out of `UNIT_SET` and the drift
@@ -158,6 +159,9 @@ systemctl restart vpn-bot
 A **reinstall** without the archive works the same way at the end: install the
 protocol by its own procedure, delete `/etc/vpn-bot/uninstalled/<proto>`, set
 `<PROTO>_ENABLED=true` again where it has one, restart the bot, enable the module.
+For Xray, Hysteria2 and SOCKS5 that procedure is the bot's **♻️ Переустановить**
+(`vpn-bot-protocol-install`, [protocol-install.md](protocol-install.md)): its manifest is this
+helper's, owned for owned; it removes the marker and the bot switches the module back on.
 
 ## Privileges
 

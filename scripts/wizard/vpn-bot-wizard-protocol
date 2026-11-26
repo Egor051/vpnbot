@@ -1,0 +1,302 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-wizard-protocol — the «📦 Установить протокол» mode of the setup wizard
+(docs/protocol-install.md).
+
+A thin wrapper around the root helper /usr/local/sbin/vpn-bot-protocol-install in the
+wizard's contract, so every install of a protocol is a run: a plan with the diff first,
+the superadmin's confirmation (TOTP), then apply → verify, and a rollback that puts the
+host back as the plan found it. Parameters: `proto` (the protocol), `domain` (the name the
+protocol serves — one DNS name the bot's certificate covers; "" = the certificate's own).
+
+  plan      vpn-bot-protocol-install plan: every change (packages, files, units, the
+            XRAY_* of .env, the marker), what is kept and why, what blocks. Recorded in
+            <run>.protocol-plan.json (its sha256) for apply.
+  apply     vpn-bot-protocol-install apply --expect-plan <sha256>: the helper backs up,
+            journals and runs its steps; its step events become this run's progress
+            (bot/progress.py); a failed step is already rolled back by the helper — the
+            run fails, and the runner's rollback below finds nothing more to undo
+  verify    vpn-bot-protocol-install verify: `xray run -test`, the units, the listeners,
+            TLS on 127.0.0.1:8443 with SNI = the domain (the domain's certificate, TLS
+            1.3, ALPN h2) and HTTP 200. Green: the install is committed and the bot is
+            restarted (`systemctl try-restart --no-block vpn-bot`) so it reads the new
+            XRAY_* of .env — the run goes on in its own unit, the new process reports it
+  rollback  vpn-bot-protocol-install rollback: the journal backwards (a verify that
+            failed leaves an applied journal: everything it installed is removed again)
+
+No step changes the host's network configuration (the firewall is vpn-bot-ufw-apply's:
+the bot converges it after the run, docs/host-state.md#the-firewall-ufw), so no dead-man
+is armed; a step that overruns is killed by the runner and rolled back.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import signal
+import subprocess  # noqa: S404 — the fixed argv of vpn-bot-protocol-install, never a shell
+import sys
+import time
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+
+def _load_lib() -> ModuleType:
+    path = Path(__file__).resolve().parent / "vpn-bot-wizard-lib"
+    st = os.stat(path, follow_symlinks=False)
+    if os.geteuid() == 0 and os.environ.get("VPN_BOT_WIZARD_SELFTEST") != "1" and (st.st_uid != 0 or st.st_mode & 0o022):
+        sys.exit(f"{Path(__file__).name}: {path} must be root-owned and not group/other-writable")
+    loader = importlib.machinery.SourceFileLoader("vpn_bot_wizard_lib", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+lib = _load_lib()
+MODE = "protocol"
+INSTALL_HELPER = "/usr/local/sbin/vpn-bot-protocol-install"
+PLAN_ARTIFACT = "protocol-plan.json"
+BOT_UNIT = "vpn-bot.service"
+# The helper's own budget for an apply (apt-get, a download, `xray run -test`, the
+# certificate's deploy) — under the mode's apply timeout (the lib's MODES), so it is this
+# helper that stops vpn-bot-protocol-install, never the launcher.
+APPLY_TIMEOUT = 1500
+ROLLBACK_TIMEOUT = 1000
+# The helper's steps, in its order (docs/protocol-install.md); the bot labels them
+# (i18n install_step_<key>) and shows them with bot/progress.py's icons.
+STEPS = {
+    "xray": ("nginx_pkg", "nginx_start", "cert", "nginx_site", "xray_bin", "xray_units", "xray_logs",
+             "xray_config", "env", "xray_start", "marker"),
+    "hysteria2": ("nginx_pkg", "nginx_start", "cert", "nginx_site", "users", "hy2_bin", "hy2_units", "hy2_config",
+                  "env", "marker", "hy2_start", "hy2_cert", "warp"),
+    "socks5": ("socks_pkg", "socks_config", "socks_dropin", "env", "marker", "socks_start"),
+}
+PROGRESS_STATES = {"run", "ok", "fail", "skip"}
+
+
+def helper_argv(*args: str) -> list[str]:
+    return ["vpn-bot-protocol-install" if lib.SELFTEST else INSTALL_HELPER, *args]
+
+
+def stream(ctx: Any, argv: list[str], timeout: int, on_line: Any = None) -> tuple[int, list[dict[str, Any]], str]:
+    """*argv* in its own process group, read line by line: every JSON object line is
+    collected (and handed to *on_line* as it comes), the rest is the text. On a timeout
+    the WHOLE group is killed and reaped before this returns."""
+    exe = lib.tool_allowed(argv[0])
+    if exe is None:
+        return 127, [], f"{argv[0]}: refused (VPN_BOT_WIZARD_SELFTEST: not a stub)"
+    env = {k: v for k, v in os.environ.items() if k not in ("LANGUAGE", "LC_MESSAGES")}
+    env["LC_ALL"] = "C"
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — argv list, never a shell
+            [exe, *argv[1:]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            text=True, errors="replace", env=env, start_new_session=True,
+        )
+    except FileNotFoundError:
+        return 127, [], f"{argv[0]}: not found"
+    objects: list[dict[str, Any]] = []
+    text: list[str] = []
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip("\n")
+        obj: Any = None
+        if line.startswith("{"):
+            with contextlib.suppress(ValueError):
+                obj = json.loads(line)
+        if isinstance(obj, dict):
+            objects.append(obj)
+            if on_line is not None:
+                on_line(obj)
+        else:
+            text.append(line)
+        if time.monotonic() > deadline:
+            timed_out = True
+            break
+    try:
+        rc = proc.wait(timeout=max(1.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    if timed_out:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        rc = 124
+        text.append(f"{argv[0]}: timed out after {timeout}s (its process group killed)")
+    ctx.log.write(f"$ {' '.join(argv)}  (exit {rc})\n" + "\n".join(text[-60:]))
+    return rc, objects, "\n".join(text).strip()
+
+
+def result_of(objects: list[dict[str, Any]]) -> dict[str, Any]:
+    """The helper's report: its last JSON object that is not a step event."""
+    for obj in reversed(objects):
+        if "event" not in obj:
+            return obj
+    return {}
+
+
+def proto_args(ctx: Any) -> list[str]:
+    args = [ctx.params["proto"]]
+    if ctx.params.get("domain"):
+        args += ["--domain", ctx.params["domain"]]
+    return args
+
+
+# --------------------------------------------------------------------------- #
+# The plan's text
+# --------------------------------------------------------------------------- #
+ACTION_MARKS = {"create": "+", "install": "+", "start": "▶", "deploy": "⇢", "reload": "↻", "replace": "~",
+                "set": "~", "remove": "−", "keep": "=", "skip": "·"}
+
+
+def plan_text(plan: dict[str, Any]) -> str:
+    lines = [f"{plan.get('protocol')} — {plan.get('state')}, domain {plan.get('domain') or '?'}", ""]
+    changes = plan.get("changes") or []
+    acting = [c for c in changes if c.get("action") not in ("keep", "skip")]
+    kept = [c for c in changes if c.get("action") in ("keep", "skip")]
+    if acting:
+        lines.append("Changes:")
+        for c in acting:
+            mark = ACTION_MARKS.get(str(c.get("action")), "•")
+            detail = f" — {c['detail']}" if c.get("detail") else ""
+            lines.append(f"  {mark} {c.get('kind')} {c.get('target')}{detail}")
+    if kept:
+        lines.append("Kept as it is:")
+        for c in kept:
+            detail = f" — {c['detail']}" if c.get("detail") else ""
+            lines.append(f"  = {c.get('kind')} {c.get('target')}{detail}")
+    env = plan.get("env") or []
+    if env:
+        lines.append(".env (backed up first):")
+        for e in env:
+            lines.append(f"  {e.get('key')}: {e.get('old') or '(unset)'} → {e.get('new')}")
+    for w in plan.get("warnings") or []:
+        lines.append(f"⚠ {w}")
+    for b in plan.get("blocking") or []:
+        lines.append(f"⛔ {b}")
+    release = plan.get("release")
+    if isinstance(release, dict):
+        lines.append(f"Release: {release.get('version')} {release.get('asset')}, sha256 {str(release.get('sha256'))[:16]}…")
+    lines.append(f"Backup: {plan.get('backup_dir')}/<proto>-<UTC ts>.tar.gz · plan {str(plan.get('sha256'))[:12]}")
+    return "\n".join(lines)
+
+
+def steps_event(ctx: Any, states: dict[str, str]) -> None:
+    ctx.event("steps", steps=dict(states))
+
+
+def step_plan(ctx: Any) -> int:
+    rc, objects, rest = stream(ctx, helper_argv("plan", *proto_args(ctx), "--json"), timeout=240)
+    plan = result_of(objects)
+    if not plan.get("sha256"):
+        ctx.event("plan", text=f"plan failed (exit {rc}): {plan.get('detail') or rest.splitlines()[-1:] or ''}")
+        return 1
+    lib.write_private(lib.artifact_path(ctx.run_id, PLAN_ARTIFACT), json.dumps({
+        "sha256": plan["sha256"], "proto": ctx.params["proto"], "domain": plan.get("domain") or "",
+        "env": [e.get("key") for e in plan.get("env") or []], "nothing_to_do": bool(plan.get("nothing_to_do")),
+    }).encode())
+    steps_event(ctx, {s: "wait" for s in STEPS.get(ctx.params["proto"], ())})
+    ctx.event("plan", text=plan_text(plan), noop=bool(plan.get("nothing_to_do")) and not plan.get("blocking"))
+    if plan.get("blocking"):
+        return 1
+    return 0
+
+
+def load_plan(ctx: Any) -> dict[str, Any]:
+    try:
+        data = json.loads(lib.artifact_path(ctx.run_id, PLAN_ARTIFACT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise lib.WizardError("no plan of this run: plan it first") from None
+    if data.get("proto") != ctx.params["proto"]:
+        raise lib.WizardError("the plan is of another protocol")
+    return dict(data)
+
+
+def step_apply(ctx: Any) -> int:
+    planned = load_plan(ctx)
+    states = {s: "wait" for s in STEPS.get(ctx.params["proto"], ())}
+    steps_event(ctx, states)
+    last = [0.0]
+
+    def on_line(obj: dict[str, Any]) -> None:
+        if obj.get("event") != "step" or obj.get("step") not in states or obj.get("state") not in PROGRESS_STATES:
+            return
+        states[str(obj["step"])] = str(obj["state"])
+        now = time.monotonic()
+        if obj.get("state") in ("fail", "ok") or now - last[0] >= 1.0:
+            last[0] = now
+            steps_event(ctx, states)
+
+    args = ["apply", ctx.params["proto"], "--expect-plan", planned["sha256"], "--json"]
+    if planned.get("domain"):
+        args += ["--domain", planned["domain"]]
+    rc, objects, rest = stream(ctx, helper_argv(*args), timeout=APPLY_TIMEOUT, on_line=on_line)
+    steps_event(ctx, states)
+    result = result_of(objects)
+    if rc == 0 and result.get("ok"):
+        text = "nothing to do: the protocol is installed" if result.get("nothing_to_do") else \
+            f"installed {ctx.params['proto']} for {result.get('domain')}; backup {result.get('backup')}"
+        ctx.event("result", text=text, verdict="ok")
+        return 0
+    if result.get("error") == "plan_changed":
+        text = "the host changed since the plan: nothing was installed — plan it again"
+    elif result.get("error") == "step_failed":
+        text = f"step {result.get('failed_step')} failed: {result.get('detail')}; rolled back" + (
+            f" INCOMPLETELY: {'; '.join(result.get('rollback_errors') or [])}" if result.get("rollback_errors") else "")
+    else:
+        text = f"refused (exit {rc}): {result.get('detail') or '; '.join(result.get('blocking') or []) or rest[-300:]}"
+    ctx.event("result", text=text, verdict="failed")
+    return 1
+
+
+def step_verify(ctx: Any) -> int:
+    planned = load_plan(ctx)
+    args = ["verify", ctx.params["proto"], "--json"]
+    if planned.get("domain"):
+        args += ["--domain", planned["domain"]]
+    rc, objects, rest = stream(ctx, helper_argv(*args), timeout=240)
+    result = result_of(objects)
+    checks = result.get("checks") or []
+    for c in checks:
+        ctx.event("item", level="green" if c.get("ok") else "red", key=str(c.get("key")), text=str(c.get("text")))
+    if rc != 0 or not result.get("ok"):
+        bad = [str(c.get("text")) for c in checks if not c.get("ok")] or [rest[-300:] or f"exit {rc}"]
+        ctx.event("result", text="verify: " + "; ".join(bad), verdict="failed")
+        return 1
+    if not planned.get("nothing_to_do"):
+        crc, _, crest = stream(ctx, helper_argv("commit", ctx.params["proto"], "--json"), timeout=60)
+        if crc != 0:
+            ctx.event("result", text=f"verify ok, but the install could not be committed: {crest[-200:]}", verdict="failed")
+            return 1
+    restarted = ""
+    if planned.get("env"):
+        # The bot reads .env at start: XRAY_* take effect with a restart. --no-block: this
+        # unit does not wait for the bot it restarts (the new process reports the run).
+        rrc, _ = lib.run_cmd(["systemctl", "try-restart", "--no-block", BOT_UNIT], log=ctx.log)
+        restarted = "; the bot restarts to read the new .env" if rrc == 0 else "; restart the bot to read the new .env"
+    ctx.event("result", text=f"{ctx.params['proto']} works: {len(checks)} check(s) green{restarted}", verdict="ok")
+    return 0
+
+
+def step_rollback(ctx: Any) -> int:
+    rc, objects, rest = stream(ctx, helper_argv("rollback", ctx.params["proto"], "--json"), timeout=ROLLBACK_TIMEOUT)
+    result = result_of(objects)
+    if rc == 0 and result.get("ok"):
+        ctx.event("result", text="rolled back: nothing of this install is left" if not result.get("nothing_to_do")
+                  else "nothing to roll back", verdict="ok")
+        return 0
+    ctx.event("result", text=f"rollback incomplete (exit {rc}): {'; '.join(result.get('rollback_errors') or []) or rest[-300:]}",
+              verdict="failed")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(lib.contract_main(MODE, {"plan": step_plan, "apply": step_apply, "verify": step_verify, "rollback": step_rollback},
+                               sys.argv[1:]))

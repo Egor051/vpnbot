@@ -23,6 +23,8 @@ from services.auto_refresh import LiveRefreshManager
 from services.offsite_backup import OffsiteBackupService
 from services.online_clients import OnlineClientsService
 from services.protocol_modules import ProtocolModulesService
+from services.first_setup import FirstSetupService
+from services.protocol_install import ProtocolInstallService
 from services.protocol_uninstall import ProtocolUninstallService
 from services.proxy import ProxyService
 from services.relay_health import RelayHealthSupervisor
@@ -145,3 +147,9 @@ class Services:
     # «🔐 Сертификат и DNS» (services/cert.py): vpn-bot-cert's status and the wizard's
     # «cert» runs. None in test doubles.
     cert: CertService | None = None
+    # «📦 Установить» (services/protocol_install.py): whether a protocol is on the host,
+    # and the wizard's «protocol» runs that install it. None in test doubles.
+    protocol_install: ProtocolInstallService | None = None
+    # «🧭 Первичная настройка» (services/first_setup.py): offered after the claim while no
+    # protocol is on the host; resumable. None in test doubles.
+    first_setup: FirstSetupService | None = None

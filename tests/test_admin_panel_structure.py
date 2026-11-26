@@ -53,6 +53,7 @@ from bot.handlers import (
     admin_cert,
     callbacks,
     common,
+    first_setup,
     key_bundles,
     keys,
     proxy,
@@ -94,7 +95,7 @@ ROUTERS = [
     start, security, common, settings_handler, admin, admin_dashboard, admin_warp, admin_warp_split, admin_warp_split_ui,
     admin_warp_split_sources, admin_modules, admin_fallback, admin_relays, admin_maintenance, ssh_port, relay_hardening,
     relay_sshd, ufw,
-    admin_wizard, admin_cert, admin_bundles, keys, key_bundles, proxy, callbacks,
+    admin_wizard, admin_cert, first_setup, admin_bundles, keys, key_bundles, proxy, callbacks,
 ]
 
 

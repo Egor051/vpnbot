@@ -15,12 +15,12 @@
 #   deployment-local  unique to this deployment by design, cannot live in the repo
 # tests/test_deploy_host_state.py checks every line (class, reason length, absolute glob).
 
-# --- Xray (XTLS/Xray-install) -------------------------------------------------
+# --- Xray (XTLS/Xray-install, or scripts/vpn-bot-protocol-install with the same layout) ---
 /etc/systemd/system/xray*.service  # installer — Xray-install ставит xray.service и xray@.service и переписывает их при обновлении
 /etc/systemd/system/xray*.service.d/*  # installer — drop-in'ы Xray-install (10-donot_touch_single_conf.conf), обновляются им же
 /usr/local/bin/xray  # installer — бинарник Xray-install, обновляется тем же установщиком (docs/operations.md: переустанавливается)
 
-# --- Hysteria2 (get.hy2.sh) ---------------------------------------------------
+# --- Hysteria2 (get.hy2.sh, or scripts/vpn-bot-protocol-install from deploy/hysteria/) ---
 /etc/systemd/system/hysteria-server*.service  # installer — get.hy2.sh ставит hysteria-server.service и hysteria-server@.service вместе с бинарником
 /etc/systemd/system/hysteria-server*.service.d/*  # installer — drop-in'ы к юнитам get.hy2.sh, живут вместе с установщиком
 /usr/local/bin/hysteria  # installer — бинарник get.hy2.sh, обновляется тем же установщиком
