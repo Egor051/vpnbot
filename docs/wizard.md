@@ -26,6 +26,7 @@ the rest of a failed install):
 | `vpn-bot-wizard-update` | Mode «Обновить бота» |
 | `vpn-bot-wizard-cert` | Mode «Сертификат» (issue / renew / adopt / deploy through `vpn-bot-cert`, [certificate.md](certificate.md)) |
 | `vpn-bot-wizard-protocol` | Mode «📦 Установка протокола» (plan / apply / verify / rollback of `vpn-bot-protocol-install`, [protocol-install.md](protocol-install.md)) |
+| `vpn-bot-wizard-site` | Mode «🌐 Сайт» (plan / apply / verify / rollback of `vpn-bot-site`, the decoy site, [site.md](site.md)) |
 | `vpn-bot-totp-reset` | The emergency TOTP reset (root CLI, never called by the bot) |
 
 In the helper-nonroot model the bot reaches the launcher through one sudoers line
@@ -291,6 +292,21 @@ it: [protocol-install.md](protocol-install.md).
 A status file may carry `{"event": "steps", "steps": {"<step>": "wait|run|ok|fail|skip", ...}}` — a mode
 helper's own steps; the bot renders the last one (`install_step_<step>` labels).
 
+### 🌐 Сайт
+
+The mode `site` (helper `vpn-bot-wizard-site`, parameters `action` = `deploy` | `revert` and
+`digest`, the first 16 hex of the uploaded archive's sha256; new parameter kind `digest` in both
+mode tables). No button of its own in the menu: «🌐 Сайт» opens the decoy site's screen, which
+receives the archive (a document, staged in the bot's RuntimeDirectory) and starts the run from
+there. The plan is the root helper's (`vpn-bot-site plan`): the archive unpacked and checked in
+isolation, the diff of files and pages, the spiderX pool before → after, the kept versions; apply
+puts the new tree next to the docroot and swaps the two directories in one `renameat2` exchange;
+verify GETs every page over HTTP/2 through nginx (ALPN h2, the domain's certificate), then commits
+(the replaced tree kept, the last five). Dangerous: TOTP before the plan and before apply. After
+the run's success the bot re-lays the keys whose stored spiderX left the pool. No step changes the
+host's network (nor nginx's configuration, nor the certificate), so no dead-man. Everything about
+it: [site.md](site.md).
+
 ### 🛰 Relay
 
 Not a mode: the wizard's «🛰 Relay» opens the admin panel's ONE relay screen — see
@@ -405,6 +421,7 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 | Fallback mode: the DNS API token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |
 | Certificate and DNS: a run of the `cert` mode — adopt, issue, renew, lay out ([certificate.md](certificate.md)) | «🔁 Принять текущий сертификат», «▶️ Составить план», «🔄 Проверить продление», «📦 Разложить заново»; «✅ Применить» of the plan |
 | Protocol modules: install a protocol on the server ([protocol-install.md](protocol-install.md)) | «📦 Установить» (the run's plan) and «✅ Применить» of the plan |
+| Site: deploy an archive / revert to the kept version ([site.md](site.md)) | «⬆️ Загрузить архив» (before the document; the document checks the elevation again), «↩️ Откатить на предыдущую», and «✅ Применить» of the plan |
 | Certificate and DNS: the bot's Cloudflare token | «✏️ Задать токен» (the typed token checks the elevation again), «🗑 Удалить токен» |
 | Fallback mode: names, addresses, direct links' host, `fallback-url` | each button; a typed value checks the elevation again |
 | Fallback mode: broadcast of the new proxy address ([relay.md](relay.md#the-proxies-through-the-hub)) | «✅ Разослать» |

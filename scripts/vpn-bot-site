@@ -1,0 +1,1846 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-site — the decoy site behind the REALITY self-steal and the Hysteria2 masquerade
+(docs/site.md).
+
+The site is the static tree nginx serves on 127.0.0.1:8443: Xray's REALITY forwards every
+TLS client that is not its own there (realitySettings.target), and Hysteria2's masquerade
+proxies to the same listener (deploy/hysteria/config.yaml, `type: proxy`). This helper puts
+a new version of that tree in place from an archive the superadmin sent the bot, keeps the
+versions it replaced and puts one back — never anything else: the nginx configuration and
+the certificate are read, never written.
+
+  vpn-bot-site status [--json]                  read-only: the site, its version, its pages,
+                                                the kept versions, the spiderX pool
+  vpn-bot-site plan deploy --run N --digest D [--json]
+                                                takes the bot's upload (UPLOAD_FILE, its
+                                                sha256 starting with D), unpacks it into an
+                                                isolated directory, checks every entry, and
+                                                says what would change (a sha256 of it)
+  vpn-bot-site plan revert --run N [--json]     the newest kept version instead
+  vpn-bot-site apply --run N --expect-plan SHA [--json]
+                                                the plan recomputed (its sha256 must be the
+                                                one confirmed), then: the new tree next to
+                                                the site → ONE atomic exchange of the two
+                                                directories → XRAY_SPIDER_X_POOL of .env;
+                                                each step journaled before it acts, any
+                                                failure undoes every step
+  vpn-bot-site verify --run N [--json]          read-only: GET / and every page 200 over h2
+                                                (SNI = the site's domain), ALPN h2 and the
+                                                domain's certificate, the tree is the plan's
+  vpn-bot-site commit --run N [--json]          verified: the replaced tree is kept (the last
+                                                KEEP_RELEASES), state.json says what is live
+  vpn-bot-site rollback --run N [--json]        the journal backwards: the old tree back in
+                                                place, .env as it was
+  vpn-bot-site recover [--json]                 an apply that never finished (its unit was
+                                                killed) is rolled back — the wizard's plan
+                                                calls it first; one run at a time holds the
+                                                wizard's lock, so a journal left open then is
+                                                no live run's
+
+WHERE THE SITE IS. Not a constant: the docroot is the `root` of the nginx vhost that listens
+on 127.0.0.1:8443 (/etc/nginx/conf.d/*.conf, /etc/nginx/sites-enabled/*) — /var/www/selfsteal
+on a host the bot installed (vpn-bot-protocol-install), /var/www/anycastedge on a host set up
+by hand. It must be one literal path below /var/www (no variable, not a symlink, a parent
+owned by root and writable by nobody else); anything else is refused, the site untouched.
+
+THE ARCHIVE (zip or tar.gz, by its first bytes, not its name), unpacked as root into
+/var/lib/vpn-bot-site/work/<run>/ (root 0700) — nothing of it reaches the site before every
+entry passed: regular files and directories only (a symlink, a hard link, a device, a FIFO,
+a sparse or an encrypted member is refused), a relative path of plain names
+([A-Za-z0-9_][A-Za-z0-9._~-]*: no absolute path, no `..`, no hidden name, no backslash, at
+most MAX_DEPTH levels), static files only (STATIC_EXT), at most MAX_FILES files,
+MAX_FILE_BYTES each, MAX_TOTAL_BYTES unpacked (counted while reading, not trusted from the
+headers), index.html at the top. One folder holding everything (site/index.html, …) is
+unwrapped; __MACOSX/ and .DS_Store / Thumbs.db are skipped. The files are written 0644, the
+directories 0755, root:root — the archive's modes and owners are ignored.
+
+THE SWAP. The new tree is written next to the docroot (/var/www/.<name>.vpn-bot-site-<run>),
+then renameat2(RENAME_EXCHANGE) swaps the two directories in one step: nginx serves the old
+site or the new one, never a half. A filesystem without RENAME_EXCHANGE gets two renames
+(the docroot away, the new tree in) and the result says so. nginx is not reloaded: it reads
+the files per request.
+
+THE SPIDERX POOL. While XRAY_SPIDER_X_POOL is in use (not empty) it follows the site: the
+pages of the new tree (/, /about.html, /blog/ for blog/index.html; at most MAX_POOL), so a
+REALITY client's spider asks for paths that exist; a path the new site no longer has leaves
+the pool. Empty stays empty (spx off is the operator's choice). The keys whose stored spx is
+no longer in the pool are re-laid by the BOT after the run (the database is the bot's — this
+helper only counts them, read-only); the bot and vpn-bot-subscription read the pool at start,
+the wizard's mode restarts them.
+
+STATE: /var/lib/vpn-bot-site/state.json (0644: what is live and what is kept),
+journal.json (0600), releases/<id>/ (0700: the kept trees), work/<run>/ (0700).
+
+EXIT CODES: 0 ok · 2 usage · 3 refused (a blocking finding, a plan that changed, an
+unfinished apply, nothing to revert to) · 4 verify failed · 5 cannot (a tool, a file) · 6 a
+step failed and the rollback succeeded · 7 a step failed and the rollback did not fully
+succeed.
+
+Stdlib only, every command an argv list (never a shell). TEST SEAM (never in production;
+sudo and systemd-run give a clean environment): VPN_BOT_SITE_SELFTEST=1 needs
+VPN_BOT_SITE_ROOT (every host path under it, nothing is written outside it — the test suite
+also runs as root on the production host) and VPN_BOT_SITE_SELFTEST_BIN (the only commands
+that run), skips chown and the root-ownership checks; _SELFTEST_FAIL=<step> fails right after
+that step did its work, _SELFTEST_NO_EXCHANGE=1 takes the two-rename path.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import ctypes
+import errno
+import fcntl
+import gzip
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import sqlite3
+import stat
+import subprocess  # noqa: S404 — fixed argv lists of curl / openssl / systemctl, never a shell
+import sys
+import tarfile
+import tempfile
+import time
+import zipfile
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import IO, Any
+from urllib.parse import quote
+
+SELFTEST = os.environ.get("VPN_BOT_SITE_SELFTEST") == "1"
+HELPER_VERSION = 1
+
+EXIT_OK, EXIT_USAGE, EXIT_REFUSED, EXIT_VERIFY, EXIT_CANNOT, EXIT_ROLLED_BACK, EXIT_ROLLBACK_FAILED = 0, 2, 3, 4, 5, 6, 7
+
+APP_DIR = "/opt/vpn-service"
+ENV_FILE = f"{APP_DIR}/.env"
+DEFAULT_DB = f"{APP_DIR}/data/vpn.db"
+STATE_DIR = "/var/lib/vpn-bot-site"
+STATE_FILE = f"{STATE_DIR}/state.json"
+JOURNAL_FILE = f"{STATE_DIR}/journal.json"
+RELEASES_DIR = f"{STATE_DIR}/releases"
+WORK_DIR = f"{STATE_DIR}/work"
+# Where the bot puts the archive it received (its RuntimeDirectory, deploy/vpn-bot.service;
+# the same fixed staging root as /run/vpn-bot/xray of vpn-bot-xray-apply). Read once, with
+# O_NOFOLLOW, copied into WORK_DIR and removed: nothing after the plan reads the bot's copy.
+UPLOAD_DIR = "/run/vpn-bot/site"
+UPLOAD_FILE = f"{UPLOAD_DIR}/upload.bin"
+LOCK_FILE = "/run/vpn-bot-site.lock"
+LOG_FILE = "/var/log/vpn-bot-site.log"
+NGINX_CONF_DIRS = (("/etc/nginx/conf.d", ".conf"), ("/etc/nginx/sites-enabled", ""))
+HY2_CONFIG = "/etc/hysteria/config.yaml"
+DOCROOT_BASE = "/var/www"
+SELFSTEAL_PORT = 8443
+SELFSTEAL_ADDR = f"127.0.0.1:{SELFSTEAL_PORT}"
+SELFSTEAL_LISTENS = frozenset({SELFSTEAL_ADDR, str(SELFSTEAL_PORT), f"*:{SELFSTEAL_PORT}", f"0.0.0.0:{SELFSTEAL_PORT}"})
+NGINX_UNIT = "nginx.service"
+POOL_KEY = "XRAY_SPIDER_X_POOL"
+COMMAND_TIMEOUT = 60
+
+# The archive. MAX_ARCHIVE_BYTES is the Bot API's download limit (services/site.py refuses
+# a bigger document before it is downloaded; a test keeps the two equal).
+MAX_ARCHIVE_BYTES = 20 << 20
+MAX_TOTAL_BYTES = 64 << 20
+MAX_FILE_BYTES = 16 << 20
+MAX_FILES = 1000
+MAX_DEPTH = 12
+MAX_PATH = 512
+# Static files only: pages, styles, scripts, images, fonts, xml, txt.
+STATIC_EXT = frozenset({
+    ".html", ".htm", ".css", ".js", ".mjs", ".xml", ".txt",
+    ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+})
+PAGE_EXT = (".html", ".htm")
+JUNK_DIRS = frozenset({"__MACOSX"})
+JUNK_FILES = frozenset({".DS_Store", "Thumbs.db"})
+_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._~-]{0,127}$")
+# A pool entry is a path a link carries as spx (quoted) and .env holds comma-separated.
+_POOL_PATH_RE = re.compile(r"^/[A-Za-z0-9._~/-]{0,255}$")
+_DIGEST_RE = re.compile(r"^[0-9a-f]{16}$")
+_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+_DNS_NAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+
+KEEP_RELEASES = 5
+MAX_POOL = 64
+MAX_LISTED = 300
+# A tree this helper did not write (the hand-made site) is hashed up to here.
+SCAN_MAX_FILES = 20000
+SCAN_MAX_BYTES = 1 << 30
+CURL_BATCH = 40
+APPLY_STEPS = ("site_stage", "site_swap", "site_env")
+
+# vpn-bot-wizard-lib's redaction (utils/redact.py): every line of the log goes through it.
+_REDACT = (
+    (re.compile(r"(?i)(secret=)[^&\s]+"), r"\1***"),
+    (re.compile(r"\b(bot_token|token|password|passwd|secret|mtproto_secret|private_key|preshared_key)\s*([:=])\s*[^,\s;]+", re.I), r"\1\2***"),
+    (re.compile(r"\b(?:dd)?[0-9a-fA-F]{32,}\b"), "***"),
+    (re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{35}\b"), "***"),
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_.~+/=-]{16,}\b"), "Bearer ***"),
+    (re.compile(r"(?i)([a-z][a-z0-9+\-.]*://)([^:@/\s]+:[^@/\s]+@)"), r"\1***@"),
+    (re.compile(r"\b[A-Za-z0-9+/]{43}={1,2}(?=[^A-Za-z0-9+/=]|$)"), "***"),
+)
+
+
+def redact(text: str) -> str:
+    for pattern, repl in _REDACT:
+        text = pattern.sub(repl, text)
+    return text
+
+
+class Refused(Exception):
+    """A finding that stops the run before anything changes (exit 3)."""
+
+
+class Cannot(Exception):
+    """A tool, a file or a directory that is not there or not usable (exit 5)."""
+
+
+class StepFailed(Exception):
+    def __init__(self, step: str, message: str) -> None:
+        super().__init__(message)
+        self.step = step
+
+
+# --------------------------------------------------------------------------- #
+# Context: host paths, commands, the log
+# --------------------------------------------------------------------------- #
+@dataclass
+class Ctx:
+    root: str
+    bin_dir: str
+    fail_at: str
+    no_exchange: bool
+    json_out: bool = False
+    log_lines: list[str] = field(default_factory=list)
+
+    def host(self, path: str) -> Path:
+        return Path(self.root.rstrip("/") + path) if self.root else Path(path)
+
+    def unroot(self, path: Path | str) -> str:
+        text = str(path)
+        if self.root and text.startswith(self.root.rstrip("/") + "/"):
+            return text[len(self.root.rstrip("/")):]
+        return text
+
+    def log(self, text: str) -> None:
+        line = redact(text)
+        self.log_lines.append(line)
+        with contextlib.suppress(OSError):
+            lf = self.host(LOG_FILE)
+            lf.parent.mkdir(parents=True, exist_ok=True)
+            with open(lf, "a", encoding="utf-8") as fh:
+                for part in line.splitlines() or [""]:
+                    fh.write(f"{iso_now()} {part}\n")
+
+    def say(self, text: str) -> None:
+        self.log(text)
+        if not self.json_out:
+            print(text)
+
+    def event(self, **fields: Any) -> None:
+        """A JSON line the wizard's mode reads as it comes (``{"event": "step", ...}``)."""
+        if self.json_out:
+            print(json.dumps(fields, sort_keys=True), flush=True)
+
+
+def make_ctx(json_out: bool) -> Ctx:
+    if SELFTEST:
+        root = os.environ.get("VPN_BOT_SITE_ROOT", "")
+        bin_dir = os.environ.get("VPN_BOT_SITE_SELFTEST_BIN", "")
+        if not root or os.path.realpath(root) == "/" or not os.path.isdir(root):
+            raise Refused("selftest: VPN_BOT_SITE_ROOT must be an existing directory other than /")
+        if not bin_dir or not os.path.isdir(bin_dir):
+            raise Refused("selftest: VPN_BOT_SITE_SELFTEST_BIN must be a directory of stubs")
+        return Ctx(root=os.path.realpath(root), bin_dir=os.path.realpath(bin_dir),
+                   fail_at=os.environ.get("VPN_BOT_SITE_SELFTEST_FAIL", ""),
+                   no_exchange=os.environ.get("VPN_BOT_SITE_SELFTEST_NO_EXCHANGE") == "1", json_out=json_out)
+    return Ctx(root="", bin_dir="", fail_at="", no_exchange=False, json_out=json_out)
+
+
+def iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def fence(ctx: Ctx, path: Path) -> None:
+    """Under the seam nothing outside the fake root is ever written or removed."""
+    if ctx.root and not os.path.abspath(path).startswith(ctx.root.rstrip("/") + "/"):
+        raise Cannot(f"selftest: refusing to touch {path} outside the fake root")
+
+
+def tool(ctx: Ctx, name: str) -> str | None:
+    if not SELFTEST:
+        return name
+    path = os.path.join(ctx.bin_dir, os.path.basename(name))
+    return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+
+
+def run(ctx: Ctx, argv: Sequence[str], *, timeout: int = COMMAND_TIMEOUT, stdin: str | None = None) -> tuple[int, str]:
+    """(exit code, stdout+stderr). 127 = not found / refused, 124 = timed out."""
+    exe = tool(ctx, argv[0])
+    if exe is None:
+        ctx.log(f"$ {' '.join(argv)}\n  refused under the selftest: no stub {argv[0]}")
+        return 127, f"{argv[0]}: refused (selftest: not a stub)"
+    env = {k: v for k, v in os.environ.items() if k not in ("LANGUAGE", "LC_MESSAGES")}
+    env["LC_ALL"] = "C"
+    if not SELFTEST:
+        env["PATH"] = "/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+    try:
+        proc = subprocess.run(  # noqa: S603 — argv list, never a shell
+            [exe, *argv[1:]], input=stdin, capture_output=True, text=True, errors="replace",
+            timeout=timeout, check=False, env=env, stdin=None if stdin is not None else subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        ctx.log(f"$ {' '.join(argv)}\n  not found")
+        return 127, f"{argv[0]}: not found"
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout if isinstance(exc.stdout, str) else ""
+        ctx.log(f"$ {' '.join(argv)}\n  timed out after {timeout}s")
+        return 124, f"{out}\n{argv[0]}: timed out after {timeout}s"
+    out = (proc.stdout or "") + (proc.stderr or "")
+    ctx.log(f"$ {' '.join(argv[:12])}{' …' if len(argv) > 12 else ''}  (exit {proc.returncode})\n{out.rstrip()[-2000:]}")
+    return proc.returncode, out
+
+
+@contextlib.contextmanager
+def helper_lock(ctx: Ctx) -> Iterator[None]:
+    path = ctx.host(LOCK_FILE)
+    fence(ctx, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Refused("another vpn-bot-site run holds its lock") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+# --------------------------------------------------------------------------- #
+# Files
+# --------------------------------------------------------------------------- #
+def write_file(ctx: Ctx, path: Path, data: bytes, mode: int, *, uid: int | None = None, gid: int | None = None) -> None:
+    """Atomic: a temporary file next to the target, mode (and owner) set before the rename."""
+    fence(ctx, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.vpn-bot-site-")
+    try:
+        os.fchmod(fd, mode)
+        if not SELFTEST and os.geteuid() == 0 and uid is not None and gid is not None:
+            os.fchown(fd, uid, gid)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def ensure_dir(ctx: Ctx, path: Path, mode: int) -> None:
+    fence(ctx, path)
+    if path.is_symlink():
+        raise Cannot(f"{ctx.unroot(path)} is a symlink")
+    path.mkdir(mode=mode, parents=True, exist_ok=True)
+    os.chmod(path, mode)
+
+
+def remove_tree(ctx: Ctx, path: Path) -> None:
+    fence(ctx, path)
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def copy_tree(ctx: Ctx, src: Path, dst: Path) -> None:
+    """A kept tree back next to the docroot: symlinks as symlinks, modes and (as root)
+    owners as they were — what nginx served before is what it serves again."""
+    fence(ctx, dst)
+    shutil.copytree(src, dst, symlinks=True, copy_function=shutil.copy2)
+    if SELFTEST or os.geteuid() != 0:
+        return
+    for base, dirs, files in os.walk(src):
+        rel = os.path.relpath(base, src)
+        for name in [".", *dirs, *files] if rel == "." else [*dirs, *files]:
+            s = os.path.join(base, name) if name != "." else base
+            d = os.path.join(dst, rel, name) if name != "." else os.path.join(dst, rel)
+            st = os.lstat(s)
+            os.lchown(os.path.normpath(d), st.st_uid, st.st_gid)
+
+
+def move_tree(ctx: Ctx, src: Path, dst: Path) -> None:
+    """rename, or (another filesystem) copy then remove."""
+    fence(ctx, src)
+    fence(ctx, dst)
+    try:
+        os.rename(src, dst)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        copy_tree(ctx, src, dst)
+        shutil.rmtree(src)
+
+
+_RENAME_EXCHANGE = 2
+_AT_FDCWD = -100
+
+
+def exchange(ctx: Ctx, a: Path, b: Path) -> bool:
+    """Swap two directories in one step (renameat2 RENAME_EXCHANGE). False: the kernel or
+    the filesystem cannot (the caller takes two renames)."""
+    fence(ctx, a)
+    fence(ctx, b)
+    if ctx.no_exchange:
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        fn = libc.renameat2
+    except (OSError, AttributeError):
+        return False
+    fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    fn.restype = ctypes.c_int
+    if fn(_AT_FDCWD, os.fsencode(str(a)), _AT_FDCWD, os.fsencode(str(b)), _RENAME_EXCHANGE) == 0:
+        return True
+    err = ctypes.get_errno()
+    if err in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP):
+        return False
+    raise OSError(err, os.strerror(err), str(a))
+
+
+def root_owned_dir(ctx: Ctx, path: Path) -> str | None:
+    """Why *path* cannot hold a directory root swaps in, or None."""
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        return f"{ctx.unroot(path)}: {exc.strerror}"
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return f"{ctx.unroot(path)} is not a directory"
+    if not SELFTEST and (st.st_uid != 0 or st.st_mode & 0o022):
+        return f"{ctx.unroot(path)} must be root-owned and writable by root only (uid {st.st_uid}, mode {st.st_mode & 0o7777:04o})"
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# .env — the tolerant reader of every helper (`export`, spaces around `=`, one pair of
+# quotes, an inline comment; the LAST assignment wins). Never sourced.
+# --------------------------------------------------------------------------- #
+def env_value(raw: str) -> str:
+    value = raw.strip()
+    if value[:1] in ("'", '"'):
+        q = value[0]
+        end = value.find(q, 1)
+        return value[1:end] if end > 0 else value[1:]
+    return re.sub(r"\s+#.*$", "", value).strip()
+
+
+def read_env_text(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        m = _ENV_LINE_RE.match(line)
+        if m:
+            values[m.group(1)] = env_value(m.group(2))
+    return values
+
+
+def read_env(ctx: Ctx) -> dict[str, str]:
+    try:
+        return read_env_text(ctx.host(ENV_FILE).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return {}
+
+
+def edit_env_text(text: str, updates: Mapping[str, str]) -> str:
+    """*text* with each key's LAST assignment replaced (`KEY=value`), or the line appended.
+    Every other line stays byte for byte (vpn-bot-protocol-install's rule)."""
+    lines = text.splitlines(keepends=True)
+    last: dict[str, int] = {}
+    for i, line in enumerate(lines):
+        m = _ENV_LINE_RE.match(line)
+        if m and m.group(1) in updates:
+            last[m.group(1)] = i
+    out = list(lines)
+    appended: list[str] = []
+    for key, value in updates.items():
+        if key in last:
+            i = last[key]
+            out[i] = f"{key}={value}" + ("\n" if lines[i].endswith("\n") else "")
+        else:
+            appended.append(f"{key}={value}\n")
+    if appended:
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        out.extend(appended)
+    return "".join(out)
+
+
+def parse_pool(raw: str | None) -> list[str]:
+    """utils/spider_x.parse_spider_x_pool, and only entries the settings layer accepts."""
+    if not raw:
+        return []
+    return [p.strip() for p in raw.split(",") if p.strip() and p.strip().startswith("/")]
+
+
+# --------------------------------------------------------------------------- #
+# nginx: the vhost on 127.0.0.1:8443 (read, never written)
+# --------------------------------------------------------------------------- #
+_TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[{};]|[^\s{};"\']+')
+
+
+@dataclass
+class Directive:
+    name: str
+    args: list[str]
+    children: list[Directive] | None = None
+
+
+def _unquote(tok: str) -> str:
+    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+        return tok[1:-1]
+    return tok
+
+
+def parse_nginx(text: str) -> list[Directive]:
+    lines = []
+    for line in text.splitlines():
+        out, quote_ch = [], ""
+        for ch in line:
+            if quote_ch:
+                out.append(ch)
+                if ch == quote_ch:
+                    quote_ch = ""
+            elif ch in "\"'":
+                quote_ch = ch
+                out.append(ch)
+            elif ch == "#":
+                break
+            else:
+                out.append(ch)
+        lines.append("".join(out))
+    top: list[Directive] = []
+    stack: list[list[Directive]] = [top]
+    cur: list[str] = []
+    for tok in _TOKEN_RE.findall("\n".join(lines)):
+        if tok == ";":
+            if cur:
+                stack[-1].append(Directive(cur[0], cur[1:]))
+            cur = []
+        elif tok == "{":
+            block = Directive(cur[0] if cur else "", cur[1:], [])
+            stack[-1].append(block)
+            assert block.children is not None
+            stack.append(block.children)
+            cur = []
+        elif tok == "}":
+            if len(stack) > 1:
+                stack.pop()
+            cur = []
+        else:
+            cur.append(_unquote(tok))
+    return top
+
+
+def _servers(directives: list[Directive]) -> Iterator[Directive]:
+    for d in directives:
+        if d.children is None:
+            continue
+        if d.name == "server":
+            yield d
+        else:
+            yield from _servers(d.children)
+
+
+def nginx_conf_files(ctx: Ctx) -> list[Path]:
+    files: list[Path] = []
+    for d, suffix in NGINX_CONF_DIRS:
+        base = ctx.host(d)
+        if base.is_dir():
+            files += sorted(p for p in base.iterdir() if p.is_file() and (not suffix or p.name.endswith(suffix)))
+    return files
+
+
+@dataclass
+class Site:
+    docroot: str          # host path (unrooted)
+    domain: str
+    vhost: str            # the config file (unrooted)
+    exists: bool
+
+
+def discover(ctx: Ctx) -> tuple[Site | None, list[str]]:
+    """The vhost that listens on 127.0.0.1:8443 and its docroot; the reasons it cannot be used."""
+    found: list[tuple[Path, Directive]] = []
+    for f in nginx_conf_files(ctx):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for server in _servers(parse_nginx(text)):
+            assert server.children is not None
+            listens = [d for d in server.children if d.name == "listen" and d.args]
+            if any(d.args[0] in SELFSTEAL_LISTENS for d in listens):
+                found.append((f, server))
+    if not found:
+        return None, [f"no nginx vhost listens on {SELFSTEAL_ADDR} (the REALITY self-steal) — install Xray from the bot first"]
+    if len(found) > 1:
+        return None, [f"{len(found)} nginx vhosts listen on {SELFSTEAL_ADDR}: "
+                      + ", ".join(ctx.unroot(f) for f, _ in found) + " — which one is the site cannot be told"]
+    f, server = found[0]
+    assert server.children is not None
+    roots = [d.args[0] for d in server.children if d.name == "root" and d.args]
+    for loc in server.children:
+        if loc.name == "location" and loc.args == ["/"] and loc.children is not None:
+            roots += [d.args[0] for d in loc.children if d.name == "root" and d.args]
+    vhost = ctx.unroot(f)
+    if not roots:
+        return None, [f"{vhost}: the vhost on {SELFSTEAL_ADDR} has no `root`"]
+    if len(set(roots)) > 1:
+        return None, [f"{vhost}: more than one `root` ({', '.join(sorted(set(roots)))})"]
+    docroot = roots[0]
+    names = [n.lower() for d in server.children if d.name == "server_name" for n in d.args]
+    domain = next((n for n in names if _DNS_NAME_RE.match(n)), "")
+    if not domain:
+        env_sni = read_env(ctx).get("HYSTERIA2_SNI", "").strip().lower()
+        domain = env_sni if _DNS_NAME_RE.match(env_sni) else ""
+    problems = []
+    if "$" in docroot:
+        problems.append(f"{vhost}: root {docroot} is not a literal path")
+    elif not docroot.startswith("/") or os.path.normpath(docroot) != docroot.rstrip("/") or \
+            not docroot.startswith(DOCROOT_BASE + "/") or docroot.rstrip("/") == DOCROOT_BASE:
+        problems.append(f"{vhost}: root {docroot} is not a directory below {DOCROOT_BASE}/ — the helper swaps only there")
+    docroot = docroot.rstrip("/")
+    if not domain:
+        problems.append(f"{vhost}: no server_name and no HYSTERIA2_SNI — the site's domain (its SNI) cannot be told")
+    if any(d.name == "listen" and d.args and d.args[0] in SELFSTEAL_LISTENS and "proxy_protocol" in d.args
+           for d in server.children):
+        # Xray's REALITY with xver sends a PROXY header first: openssl / curl on loopback
+        # cannot speak it, so neither the checks before the change nor verify could tell a
+        # working site from a broken one.
+        problems.append(f"{vhost}: the vhost on {SELFSTEAL_ADDR} expects the PROXY protocol (Xray `xver`) — "
+                        "the helper's checks cannot reach it directly")
+    host_root = ctx.host(docroot)
+    exists = host_root.exists() or host_root.is_symlink()
+    if not problems:
+        if host_root.is_symlink():
+            problems.append(f"{docroot} is a symlink — the helper swaps a directory, not a link")
+        elif exists and not host_root.is_dir():
+            problems.append(f"{docroot} exists and is not a directory")
+        else:
+            why = root_owned_dir(ctx, host_root.parent)
+            if why:
+                problems.append(why)
+    return Site(docroot=docroot, domain=domain, vhost=vhost, exists=exists), problems
+
+
+def hy2_layout(ctx: Ctx) -> dict[str, str]:
+    """How Hysteria2's masquerade reaches a site: the same listener (proxy) or a copy (file)."""
+    try:
+        text = ctx.host(HY2_CONFIG).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"layout": "absent", "detail": ""}
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if re.match(r"^masquerade:\s*(#.*)?$", line)), None)
+    if start is None:
+        return {"layout": "none", "detail": ""}
+    body = []
+    for line in lines[start + 1:]:
+        if line.strip() and not line[:1].isspace() and not line.lstrip().startswith("#"):
+            break
+        body.append(line)
+    block = "\n".join(body)
+    kind = re.search(r"^[ \t]+type:\s*([A-Za-z]+)", block, re.MULTILINE)
+    layout = kind.group(1).lower() if kind else "unknown"
+    if layout == "proxy":
+        url = re.search(r"^[ \t]+url:\s*(\S+)", block, re.MULTILINE)
+        target = url.group(1) if url else ""
+        return {"layout": "proxy" if SELFSTEAL_ADDR in target else "other", "detail": target}
+    if layout == "file":
+        d = re.search(r"^[ \t]+dir:\s*(\S+)", block, re.MULTILINE)
+        return {"layout": "file", "detail": d.group(1) if d else ""}
+    return {"layout": layout, "detail": ""}
+
+
+# --------------------------------------------------------------------------- #
+# Trees: a hash of every regular file, the pages
+# --------------------------------------------------------------------------- #
+@dataclass
+class Tree:
+    files: dict[str, tuple[str, int]] = field(default_factory=dict)   # rel -> (sha256, size)
+    symlinks: list[str] = field(default_factory=list)
+    others: list[str] = field(default_factory=list)
+    complete: bool = True
+    newest: float = 0.0
+
+    @property
+    def digest(self) -> str:
+        if not self.complete:
+            return ""
+        h = hashlib.sha256()
+        for rel in sorted(self.files):
+            h.update(f"{rel}\0{self.files[rel][0]}\n".encode())
+        for rel in sorted(self.symlinks):
+            h.update(f"{rel}\0->\n".encode())
+        return h.hexdigest()
+
+    @property
+    def size(self) -> int:
+        return sum(size for _, size in self.files.values())
+
+    def pages(self) -> list[str]:
+        return pages_of(self.files)
+
+
+def page_url(rel: str) -> str:
+    if rel == "index.html":
+        return "/"
+    if rel.endswith("/index.html"):
+        return "/" + rel[: -len("index.html")]
+    return "/" + rel
+
+
+def pages_of(files: Mapping[str, object] | Sequence[str]) -> list[str]:
+    urls = {page_url(rel) for rel in files if rel.lower().endswith(PAGE_EXT)}
+    return sorted(urls, key=lambda u: (u != "/", u))
+
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def scan_tree(base: Path) -> Tree:
+    tree = Tree()
+    if not base.is_dir() or base.is_symlink():
+        return tree
+    total = 0
+    for cur, dirs, files in os.walk(base, followlinks=False):
+        rel_dir = os.path.relpath(cur, base)
+        for name in sorted(dirs):
+            if os.path.islink(os.path.join(cur, name)):
+                tree.symlinks.append(os.path.normpath(os.path.join(rel_dir, name)))
+        dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(cur, d)))
+        for name in sorted(files):
+            fp = Path(cur) / name
+            rel = os.path.normpath(os.path.join(rel_dir, name))
+            st = os.lstat(fp)
+            if stat.S_ISLNK(st.st_mode):
+                tree.symlinks.append(rel)
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                tree.others.append(rel)
+                continue
+            if len(tree.files) >= SCAN_MAX_FILES or total + st.st_size > SCAN_MAX_BYTES:
+                tree.complete = False
+                return tree
+            total += st.st_size
+            tree.newest = max(tree.newest, st.st_mtime)
+            tree.files[rel] = (file_sha256(fp), st.st_size)
+    return tree
+
+
+# --------------------------------------------------------------------------- #
+# The archive: unpacked as root into an isolated directory, every entry checked first
+# --------------------------------------------------------------------------- #
+@dataclass
+class Unpacked:
+    tree: Path                # the site's top (after an unwrapped folder)
+    unwrapped: str = ""
+    skipped: int = 0
+    files: int = 0
+    size: int = 0
+
+
+def member_path(raw: str, *, is_dir: bool) -> str | None:
+    """The checked relative path of an archive entry; "" for the archive's own top ("./"),
+    None for junk that is skipped (__MACOSX/, .DS_Store, Thumbs.db)."""
+    if "\x00" in raw or "\\" in raw:
+        raise Refused(f"{raw[:120]!r}: a backslash or NUL in the name")
+    if raw.startswith("/"):
+        raise Refused(f"{raw[:120]!r}: an absolute path")
+    parts = raw.split("/")
+    while parts and parts[0] == ".":
+        parts.pop(0)
+    if parts and parts[-1] == "":
+        parts.pop()
+    if not parts:
+        return ""
+    if parts[0] in JUNK_DIRS or (not is_dir and parts[-1] in JUNK_FILES):
+        return None
+    for p in parts:
+        if p in ("", ".", ".."):
+            raise Refused(f"{raw[:120]!r}: `..`, `.` or an empty part in the path")
+        if not _NAME_RE.match(p):
+            raise Refused(f"{raw[:120]!r}: {p[:60]!r} is not a plain name ([A-Za-z0-9_] then [A-Za-z0-9._~-]; no hidden names)")
+    if len(parts) > MAX_DEPTH:
+        raise Refused(f"{raw[:120]!r}: deeper than {MAX_DEPTH} levels")
+    rel = "/".join(parts)
+    if len(rel) > MAX_PATH:
+        raise Refused(f"{raw[:120]!r}: a path longer than {MAX_PATH}")
+    if not is_dir:
+        ext = os.path.splitext(parts[-1])[1].lower()
+        if ext not in STATIC_EXT:
+            raise Refused(f"{rel}: not a static file of the site ({', '.join(sorted(STATIC_EXT))})")
+    return rel
+
+
+class _Budget:
+    def __init__(self) -> None:
+        self.files = 0
+        self.size = 0
+
+    def file(self, rel: str, declared: int) -> None:
+        self.files += 1
+        if self.files > MAX_FILES:
+            raise Refused(f"more than {MAX_FILES} files")
+        if declared > MAX_FILE_BYTES:
+            raise Refused(f"{rel}: {declared} bytes, more than {MAX_FILE_BYTES} per file")
+        if self.size + max(declared, 0) > MAX_TOTAL_BYTES:
+            raise Refused(f"more than {MAX_TOTAL_BYTES} bytes unpacked")
+
+    def add(self, rel: str, n: int, written: int) -> None:
+        self.size += n
+        if written > MAX_FILE_BYTES:
+            raise Refused(f"{rel}: more than {MAX_FILE_BYTES} bytes")
+        if self.size > MAX_TOTAL_BYTES:
+            raise Refused(f"more than {MAX_TOTAL_BYTES} bytes unpacked")
+
+
+def _mkdirs(base: Path, rel: str) -> Path:
+    cur = base
+    for part in rel.split("/"):
+        cur = cur / part
+        try:
+            os.mkdir(cur, 0o755)
+        except FileExistsError:
+            if cur.is_symlink() or not cur.is_dir():
+                raise Refused(f"{rel}: a file and a directory of the same name") from None
+        else:
+            os.chmod(cur, 0o755)  # noqa: S103 — a directory of the site: nginx reads it
+    return cur
+
+
+def _write_member(base: Path, rel: str, src: IO[bytes], budget: _Budget, declared: int) -> None:
+    parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    if parent:
+        _mkdirs(base, parent)
+    target = base / rel
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except FileExistsError:
+        raise Refused(f"{rel}: twice in the archive (or a file and a directory of the same name)") from None
+    written = 0
+    with os.fdopen(fd, "wb") as out:
+        while True:
+            chunk = src.read(1 << 16)
+            if not chunk:
+                break
+            written += len(chunk)
+            if declared >= 0 and written > declared:
+                raise Refused(f"{rel}: more data than its header says")
+            budget.add(rel, len(chunk), written)
+            out.write(chunk)
+    os.chmod(target, 0o644)
+
+
+class _Limited(io.RawIOBase):
+    """The decompressed stream, cut off past *limit* bytes (a gzip bomb never fills a disk)."""
+
+    def __init__(self, inner: IO[bytes], limit: int) -> None:
+        self.inner = inner
+        self.limit = limit
+        self.seen = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int:
+        data = self.inner.read(len(b))
+        self.seen += len(data)
+        if self.seen > self.limit:
+            raise Refused(f"more than {MAX_TOTAL_BYTES} bytes unpacked")
+        b[: len(data)] = data
+        return len(data)
+
+
+def _unpack_zip(archive: Path, dest: Path, budget: _Budget) -> int:
+    skipped = 0
+    try:
+        zf = zipfile.ZipFile(archive)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise Refused(f"not a readable zip: {exc}") from None
+    with zf:
+        infos = zf.infolist()
+        if len(infos) > MAX_FILES * 2:
+            raise Refused(f"more than {MAX_FILES} files")
+        seen: set[str] = set()
+        for info in infos:
+            mode = info.external_attr >> 16
+            is_dir = info.is_dir() or (info.create_system == 3 and stat.S_ISDIR(mode))
+            # A Unix zip carries the file type in the high bits; without one (Windows zips,
+            # Python's writestr: permissions only) the entry is a file or, by its name, a dir.
+            if info.create_system == 3 and stat.S_IFMT(mode):
+                if stat.S_ISLNK(mode):
+                    raise Refused(f"{info.filename[:120]!r}: a symlink")
+                if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                    raise Refused(f"{info.filename[:120]!r}: not a regular file or a directory")
+            if info.flag_bits & 0x1:
+                raise Refused(f"{info.filename[:120]!r}: encrypted")
+            rel = member_path(info.filename, is_dir=is_dir)
+            if not rel:
+                skipped += rel is None
+                continue
+            if rel in seen:
+                raise Refused(f"{rel}: twice in the archive")
+            seen.add(rel)
+            if is_dir:
+                _mkdirs(dest, rel)
+                continue
+            if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                raise Refused(f"{rel}: compression method {info.compress_type} (only stored / deflated)")
+            budget.file(rel, info.file_size)
+            try:
+                with zf.open(info) as src:
+                    _write_member(dest, rel, src, budget, info.file_size)
+            except (zipfile.BadZipFile, zlib_error(), EOFError) as exc:
+                raise Refused(f"{rel}: {exc}") from None
+    return skipped
+
+
+def zlib_error() -> type[Exception]:
+    import zlib
+
+    return zlib.error
+
+
+def _unpack_tar_gz(archive: Path, dest: Path, budget: _Budget) -> int:
+    skipped = 0
+    limit = MAX_TOTAL_BYTES + (MAX_FILES + 64) * 3 * 512 + (1 << 20)
+    try:
+        with open(archive, "rb") as raw, gzip.GzipFile(fileobj=raw) as gz:
+            stream = io.BufferedReader(_Limited(gz, limit))  # type: ignore[arg-type]
+            with tarfile.open(fileobj=stream, mode="r|") as tar:
+                seen: set[str] = set()
+                for member in tar:
+                    if member.issym():
+                        raise Refused(f"{member.name[:120]!r}: a symlink")
+                    if member.islnk():
+                        raise Refused(f"{member.name[:120]!r}: a hard link")
+                    if member.issparse():
+                        raise Refused(f"{member.name[:120]!r}: a sparse file")
+                    if not (member.isreg() or member.isdir()):
+                        raise Refused(f"{member.name[:120]!r}: not a regular file or a directory (a device, a FIFO, …)")
+                    rel = member_path(member.name, is_dir=member.isdir())
+                    if not rel:
+                        skipped += rel is None
+                        continue
+                    if rel in seen and not member.isdir():
+                        raise Refused(f"{rel}: twice in the archive")
+                    seen.add(rel)
+                    if member.isdir():
+                        _mkdirs(dest, rel)
+                        continue
+                    budget.file(rel, member.size)
+                    src = tar.extractfile(member)
+                    if src is None:
+                        raise Refused(f"{rel}: unreadable member")
+                    _write_member(dest, rel, src, budget, member.size)
+    except (tarfile.TarError, OSError, EOFError, zlib_error()) as exc:
+        raise Refused(f"not a readable tar.gz: {exc}") from None
+    return skipped
+
+
+def archive_kind(path: Path) -> str:
+    with open(path, "rb") as fh:
+        head = fh.read(4)
+    if head[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
+        return "zip"
+    if head[:2] == b"\x1f\x8b":
+        return "tar.gz"
+    raise Refused("the file is neither a zip nor a tar.gz (by its first bytes)")
+
+
+def unpack(ctx: Ctx, archive: Path, dest: Path) -> Unpacked:
+    """Every entry checked BEFORE it is written; *dest* is a fresh root-only directory."""
+    fence(ctx, dest)
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(mode=0o700, parents=False)
+    raw = dest / "raw"
+    raw.mkdir(mode=0o755)
+    os.chmod(raw, 0o755)  # noqa: S103 — a directory of the site: nginx reads it
+    budget = _Budget()
+    kind = archive_kind(archive)
+    skipped = _unpack_zip(archive, raw, budget) if kind == "zip" else _unpack_tar_gz(archive, raw, budget)
+    top = raw
+    unwrapped = ""
+    if not (raw / "index.html").is_file():
+        entries = list(raw.iterdir())
+        if len(entries) == 1 and entries[0].is_dir() and (entries[0] / "index.html").is_file():
+            top = entries[0]
+            unwrapped = entries[0].name + "/"
+    if not (top / "index.html").is_file():
+        raise Refused("no index.html at the top of the archive (or in its one folder)")
+    os.chmod(top, 0o755)  # noqa: S103 — a directory of the site: nginx reads it
+    return Unpacked(tree=top, unwrapped=unwrapped, skipped=skipped, files=budget.files, size=budget.size)
+
+
+def take_upload(ctx: Ctx, digest: str, work: Path) -> tuple[Path, str]:
+    """The bot's upload, read once (O_NOFOLLOW, a regular file, the digest it announced),
+    copied into the run's root-only directory and removed."""
+    # The bot owns its RuntimeDirectory and could swap `site` for a symlink: the directory
+    # is opened with O_NOFOLLOW and the file relative to it, so root reads a regular file
+    # of THAT directory or nothing (/run and /run/vpn-bot themselves are not the bot's to
+    # rename).
+    updir = ctx.host(UPLOAD_DIR)
+    name = UPLOAD_FILE.rsplit("/", 1)[1]
+    try:
+        dfd = os.open(updir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise Refused(f"{UPLOAD_DIR}: {exc.strerror} — send the archive to the bot again") from None
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+        except OSError as exc:
+            raise Refused(f"{UPLOAD_FILE}: {exc.strerror} — send the archive to the bot again") from None
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise Refused(f"{UPLOAD_FILE} is not a regular file")
+            if st.st_size <= 0 or st.st_size > MAX_ARCHIVE_BYTES:
+                raise Refused(f"{UPLOAD_FILE}: {st.st_size} bytes (1..{MAX_ARCHIVE_BYTES})")
+            data = fh.read(MAX_ARCHIVE_BYTES + 1)
+        if len(data) > MAX_ARCHIVE_BYTES:
+            raise Refused(f"{UPLOAD_FILE}: more than {MAX_ARCHIVE_BYTES} bytes")
+        sha = hashlib.sha256(data).hexdigest()
+        if not sha.startswith(digest):
+            raise Refused("the upload is not the archive this run was started for (its sha256 differs) — send it again")
+        archive = work / "archive"
+        write_file(ctx, archive, data, 0o600)
+        with contextlib.suppress(OSError):
+            fence(ctx, updir / name)
+            os.unlink(name, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    return archive, sha
+
+
+# --------------------------------------------------------------------------- #
+# State: what is live, what is kept
+# --------------------------------------------------------------------------- #
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_state(ctx: Ctx) -> dict[str, Any]:
+    state = load_json(ctx.host(STATE_FILE))
+    releases = [r for r in state.get("releases") or [] if isinstance(r, dict) and re.fullmatch(r"[0-9TZ]+-[0-9a-f]{12}", str(r.get("id") or ""))]
+    state["releases"] = [r for r in releases if ctx.host(f"{RELEASES_DIR}/{r['id']}").is_dir()]
+    return state
+
+
+def save_state(ctx: Ctx, state: Mapping[str, Any]) -> None:
+    ensure_dir(ctx, ctx.host(STATE_DIR), 0o755)
+    write_file(ctx, ctx.host(STATE_FILE), (json.dumps(state, sort_keys=True, indent=1) + "\n").encode(), 0o644)
+
+
+def load_journal(ctx: Ctx) -> dict[str, Any]:
+    return load_json(ctx.host(JOURNAL_FILE))
+
+
+def save_journal(ctx: Ctx, journal: Mapping[str, Any]) -> None:
+    ensure_dir(ctx, ctx.host(STATE_DIR), 0o755)
+    write_file(ctx, ctx.host(JOURNAL_FILE), (json.dumps(journal, sort_keys=True, indent=1) + "\n").encode(), 0o600)
+
+
+def current_record(state: Mapping[str, Any]) -> dict[str, Any]:
+    value = state.get("current")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def revert_target(state: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The newest kept version that was live before (not one a revert took down)."""
+    for rel in reversed(state.get("releases") or []):
+        if rel.get("kind") == "previous":
+            return dict(rel)
+    return None
+
+
+def work_dir(ctx: Ctx, run_id: int) -> Path:
+    return ctx.host(f"{WORK_DIR}/{run_id}")
+
+
+def stage_paths(site: Site, run_id: int) -> tuple[str, str]:
+    parent, name = site.docroot.rsplit("/", 1)
+    return f"{parent}/.{name}.vpn-bot-site-{run_id}", f"{parent}/.{name}.vpn-bot-site-{run_id}.old"
+
+
+# --------------------------------------------------------------------------- #
+# Checks through nginx: TLS (ALPN h2, the domain's certificate) and the pages
+# --------------------------------------------------------------------------- #
+@dataclass
+class Check:
+    key: str
+    ok: bool
+    text: str
+
+    def as_json(self) -> dict[str, Any]:
+        return {"key": self.key, "ok": self.ok, "text": self.text}
+
+
+def check_nginx(ctx: Ctx) -> Check:
+    rc, out = run(ctx, ["systemctl", "is-active", NGINX_UNIT])
+    active = rc == 0 and out.strip().splitlines()[-1:] == ["active"]
+    return Check(f"unit:{NGINX_UNIT}", active, f"{NGINX_UNIT} {'active' if active else 'NOT active'}")
+
+
+def check_tls(ctx: Ctx, domain: str) -> Check:
+    # Not -brief: OpenSSL 3's brief summary leaves the negotiated ALPN out.
+    rc, out = run(ctx, ["openssl", "s_client", "-connect", SELFSTEAL_ADDR, "-servername", domain, "-alpn", "h2",
+                        "-verify_hostname", domain, "-verify_return_error"], timeout=30, stdin="")
+    alpn = bool(re.search(r"^ALPN protocol:\s*h2\b", out, re.MULTILINE))
+    verified = rc == 0 and ("Verification: OK" in out or "Verify return code: 0" in out)
+    return Check("tls", alpn and verified, f"{SELFSTEAL_ADDR} SNI {domain}: " + ", ".join([
+        "the domain's certificate" if verified else "certificate NOT verified for the domain",
+        "ALPN h2" if alpn else "no ALPN h2"]))
+
+
+def check_pages(ctx: Ctx, domain: str, pages: Sequence[str]) -> list[Check]:
+    """GET of every page over HTTP/2 with SNI = the domain, through nginx on loopback —
+    one curl per batch (one connection), one answer line per URL."""
+    checks: list[Check] = []
+    for i in range(0, len(pages), CURL_BATCH):
+        batch = list(pages[i:i + CURL_BATCH])
+        argv = ["curl", "-sS", "--http2", "--max-time", "20", "--resolve", f"{domain}:{SELFSTEAL_PORT}:127.0.0.1",
+                "-w", "%{http_code} %{http_version}\\n"]
+        for page in batch:
+            argv += ["-o", "/dev/null", f"https://{domain}:{SELFSTEAL_PORT}{quote(page, safe='/~._-')}"]
+        rc, out = run(ctx, argv, timeout=30 + 5 * len(batch))
+        answers = [m.groups() for m in re.finditer(r"^(\d{3}) (\S+)$", out, re.MULTILINE)]
+        for n, page in enumerate(batch):
+            code, version = answers[n] if n < len(answers) else ("000", "")
+            ok = code == "200" and version == "2"
+            checks.append(Check(f"page:{page}", ok, f"GET {page} → {code if code != '000' else 'no answer'}"
+                                + (f" over HTTP/{version}" if version and version != "0" else "")))
+        if rc != 0 and len(answers) < len(batch):
+            ctx.log(f"curl exit {rc}: {out.strip()[-300:]}")
+    return checks
+
+
+# --------------------------------------------------------------------------- #
+# The spiderX pool: the pages of the site (while it is in use)
+# --------------------------------------------------------------------------- #
+def pool_for(pages: Sequence[str]) -> list[str]:
+    return [p for p in pages if _POOL_PATH_RE.match(p)][:MAX_POOL]
+
+
+def spx_keys(ctx: Ctx, pool_after: Sequence[str]) -> tuple[int | None, int | None]:
+    """(keys whose stored spx leaves the pool, keys with a stored spx) — read-only (mode=ro:
+    the bot owns the database and its WAL; the bot re-lays them, never this helper)."""
+    env = read_env(ctx)
+    db = ctx.host(env.get("DB_PATH", "").strip() or DEFAULT_DB)
+    if not db.is_file():
+        return None, None
+    try:
+        conn = sqlite3.connect(f"file:{quote(str(db))}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = conn.execute(
+                "SELECT spider_x FROM vpn_keys WHERE key_type = 'xray' AND spider_x IS NOT NULL").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        ctx.log(f"{ctx.unroot(db)}: {exc}")
+        return None, None
+    keep = set(pool_after)
+    return sum(1 for (value,) in rows if value not in keep), len(rows)
+
+
+# --------------------------------------------------------------------------- #
+# PLAN — every change, decided against the host; the sha256 covers the decisions
+# --------------------------------------------------------------------------- #
+def _diff(old: Tree, new: Tree) -> dict[str, Any]:
+    added = sorted(set(new.files) - set(old.files))
+    removed = sorted(set(old.files) - set(new.files))
+    changed = sorted(r for r in set(new.files) & set(old.files) if new.files[r][0] != old.files[r][0])
+    return {"added": added[:50], "removed": removed[:50], "changed": changed[:50],
+            "n_added": len(added), "n_removed": len(removed), "n_changed": len(changed),
+            "n_same": len(set(new.files) & set(old.files)) - len(changed)}
+
+
+def _tree_json(tree: Tree) -> dict[str, Any]:
+    return {"tree": tree.digest, "files": len(tree.files), "bytes": tree.size, "pages": len(tree.pages()),
+            "symlinks": len(tree.symlinks), "complete": tree.complete}
+
+
+def make_plan(ctx: Ctx, run_id: int, action: str, *, digest: str = "", fresh_upload: bool = False) -> dict[str, Any]:
+    """The plan of a run. *fresh_upload*: take the bot's upload into the run's directory
+    and unpack it (the plan step); otherwise the run's own unpacked tree is used (apply)."""
+    plan: dict[str, Any] = {"version": HELPER_VERSION, "action": action, "run": run_id, "blocking": [], "warnings": [],
+                            "checks": [], "nothing_to_do": False}
+    site, problems = discover(ctx)
+    plan["blocking"] += problems
+    if site is None:
+        return _seal(plan)
+    plan.update(docroot=site.docroot, domain=site.domain, vhost=site.vhost)
+    journal = load_journal(ctx)
+    if journal.get("state") in ("applying", "applied", "committing"):
+        plan["blocking"].append(f"run #{journal.get('run')} left an unfinished change of the site — `vpn-bot-site recover` first")
+    state = load_state(ctx)
+    current = scan_tree(ctx.host(site.docroot)) if site.exists else Tree()
+    if not current.complete:
+        plan["blocking"].append(f"{site.docroot}: more than {SCAN_MAX_FILES} files or {SCAN_MAX_BYTES} bytes — not a decoy site this helper replaces")
+    cur = current_record(state)
+    plan["current"] = {**_tree_json(current), "exists": site.exists, "deployed_at": cur.get("deployed_at"),
+                       "known": bool(cur) and cur.get("tree") == current.digest}
+    work = work_dir(ctx, run_id)
+    new = Tree()
+    if action == "deploy":
+        if not _DIGEST_RE.match(digest):
+            raise Refused("deploy needs --digest: the first 16 hex of the upload's sha256")
+        if fresh_upload:
+            ensure_dir(ctx, ctx.host(STATE_DIR), 0o755)
+            ensure_dir(ctx, ctx.host(WORK_DIR), 0o700)
+            ensure_dir(ctx, work, 0o700)
+            archive, sha = take_upload(ctx, digest, work)
+            unpacked = unpack(ctx, archive, work / "unpacked")
+            meta = {"archive": sha, "unwrapped": unpacked.unwrapped, "skipped": unpacked.skipped,
+                    "tree_rel": os.path.relpath(unpacked.tree, work)}
+            write_file(ctx, work / "upload.json", json.dumps(meta, sort_keys=True).encode(), 0o600)
+        meta = load_json(work / "upload.json")
+        if not meta.get("tree_rel") or not str(meta.get("archive", "")).startswith(digest):
+            raise Refused("this run has no unpacked archive — start it again")
+        new_root = work / str(meta["tree_rel"])
+        if not os.path.realpath(new_root).startswith(os.path.realpath(work) + "/"):
+            raise Refused("the run's unpacked tree is outside its directory")
+        new = scan_tree(new_root)
+        plan["new"] = {**_tree_json(new), "archive": meta["archive"], "unwrapped": meta.get("unwrapped") or "",
+                       "skipped": meta.get("skipped") or 0, "source": "upload"}
+        plan["source_dir"] = ctx.unroot(new_root)
+    elif action == "revert":
+        target = revert_target(state)
+        if target is None:
+            plan["blocking"].append("no kept version to go back to (the first deploy keeps the one it replaces)")
+            return _seal(plan)
+        rel_dir = ctx.host(f"{RELEASES_DIR}/{target['id']}")
+        new = scan_tree(rel_dir)
+        plan["new"] = {**_tree_json(new), "release": target["id"], "deployed_at": target.get("deployed_at"),
+                       "archive": target.get("archive"), "source": "revert"}
+        plan["source_dir"] = ctx.unroot(rel_dir)
+        if new.digest != target.get("tree"):
+            plan["warnings"].append(f"the kept version {target['id']} differs from what was recorded when it was kept")
+        if not (rel_dir / "index.html").is_file():
+            plan["blocking"].append(f"the kept version {target['id']} has no index.html")
+    else:
+        raise Refused(f"unknown action {action!r}")
+    plan["diff"] = _diff(current, new)
+    old_pages, new_pages = current.pages(), new.pages()
+    plan["pages"] = {"before": len(old_pages), "after": len(new_pages),
+                     "added": [p for p in new_pages if p not in set(old_pages)][:50],
+                     "removed": [p for p in old_pages if p not in set(new_pages)][:50],
+                     "list": new_pages[:MAX_LISTED]}
+    pool_before = parse_pool(read_env(ctx).get(POOL_KEY))
+    enabled = bool(pool_before)
+    pool_after = pool_for(new_pages) if enabled else []
+    changed = enabled and set(pool_after) != set(pool_before)
+    moved, with_spx = spx_keys(ctx, pool_after) if changed else (0, None)
+    plan["spx"] = {"enabled": enabled, "before": pool_before, "after": pool_after if changed else pool_before,
+                   "changed": changed, "added": [p for p in pool_after if p not in set(pool_before)] if changed else [],
+                   "removed": [p for p in pool_before if p not in set(pool_after)] if changed else [],
+                   "keys_moved": moved, "keys_with_spx": with_spx}
+    if enabled and not pool_after:
+        plan["blocking"].append("the new site has no page a spiderX path can name, and XRAY_SPIDER_X_POOL is in use")
+    # The store after commit: the replaced tree is added (when there was one), the version
+    # a revert takes is removed from it, the oldest go past KEEP_RELEASES (commit's prune).
+    taken = plan["new"].get("release")
+    after = [r for r in state.get("releases") or [] if r.get("id") != taken]
+    n_after = len(after) + (1 if site.exists else 0)
+    plan["store"] = {"keep": KEEP_RELEASES, "kept": len(state.get("releases") or []),
+                     "save_as": ("previous" if action == "deploy" else "rolled_back") if site.exists else None,
+                     "drop": [str(r["id"]) for r in after[: max(0, n_after - KEEP_RELEASES)]]}
+    plan["hy2"] = hy2_layout(ctx)
+    if plan["hy2"]["layout"] == "file":
+        plan["warnings"].append(f"Hysteria2's masquerade reads its own copy ({plan['hy2']['detail'] or '?'}, type: file): "
+                                "it shows the new site only once deploy/vpn-bot-decoy-freshen.sh mirrored it")
+    elif plan["hy2"]["layout"] == "other":
+        plan["warnings"].append(f"Hysteria2's masquerade proxies to {plan['hy2']['detail']}, not to {SELFSTEAL_ADDR}")
+    if current.symlinks:
+        plan["warnings"].append(f"the live site has {len(current.symlinks)} symlink(s): they are kept with the old version, the new one has none")
+    if new.files and new.digest == current.digest:
+        plan["nothing_to_do"] = True
+    if not plan["blocking"] and not plan["nothing_to_do"]:
+        # The self-steal must answer right BEFORE the change, or a failed verify would
+        # roll back a site that was not the problem.
+        nginx = check_nginx(ctx)
+        tls = check_tls(ctx, site.domain)
+        plan["checks"] = [nginx.as_json(), tls.as_json()]
+        if not nginx.ok:
+            plan["blocking"].append(f"{NGINX_UNIT} is not active — the site has nobody serving it")
+        elif not tls.ok:
+            plan["blocking"].append(f"the self-steal does not answer as it must before the change ({tls.text}) — "
+                                    "fix the certificate first («🔐 Сертификат и DNS»)")
+        elif site.exists:
+            (root_page,) = check_pages(ctx, site.domain, ["/"])
+            plan["checks"].append(root_page.as_json())
+            if not root_page.ok:
+                plan["warnings"].append(f"the live site answers {root_page.text}")
+    plan["release_id"] = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{(current.digest or '0' * 12)[:12]}"
+    return _seal(plan)
+
+
+def _seal(plan: dict[str, Any]) -> dict[str, Any]:
+    decisions = {k: plan.get(k) for k in ("action", "docroot", "domain", "blocking", "nothing_to_do")}
+    decisions["current"] = (plan.get("current") or {}).get("tree")
+    decisions["new"] = (plan.get("new") or {}).get("tree")
+    decisions["release"] = (plan.get("new") or {}).get("release")
+    decisions["pool"] = (plan.get("spx") or {}).get("after")
+    decisions["drop"] = (plan.get("store") or {}).get("drop")
+    plan["sha256"] = hashlib.sha256(json.dumps(decisions, sort_keys=True).encode()).hexdigest()
+    return plan
+
+
+# --------------------------------------------------------------------------- #
+# APPLY: stage → swap → .env, journaled; ROLLBACK backwards
+# --------------------------------------------------------------------------- #
+def fault(ctx: Ctx, step: str) -> None:
+    if SELFTEST and ctx.fail_at == step:
+        raise StepFailed(step, f"selftest: failing after {step}")
+
+
+def step_stage(ctx: Ctx, plan: Mapping[str, Any], journal: dict[str, Any]) -> None:
+    stage = ctx.host(journal["stage"])
+    if stage.exists() or stage.is_symlink():
+        remove_tree(ctx, stage)
+    journal["staged"] = True
+    save_journal(ctx, journal)
+    src = ctx.host(str(plan["source_dir"]))
+    if plan["action"] == "deploy":
+        # 0644 / 0755, root:root (the helper's own files): nothing of the archive's modes.
+        fence(ctx, stage)
+        os.mkdir(stage, 0o700)
+        for cur, dirs, files in os.walk(src, followlinks=False):
+            rel = os.path.relpath(cur, src)
+            target_dir = stage if rel == "." else stage / rel
+            for d in sorted(dirs):
+                if os.path.islink(os.path.join(cur, d)):
+                    raise StepFailed("site_stage", f"{rel}/{d}: a symlink in the unpacked tree")
+                os.mkdir(target_dir / d, 0o755)
+                os.chmod(target_dir / d, 0o755)  # noqa: S103 — a directory of the site: nginx reads it
+            for f in sorted(files):
+                s = Path(cur) / f
+                if not stat.S_ISREG(os.lstat(s).st_mode):
+                    raise StepFailed("site_stage", f"{rel}/{f}: not a regular file in the unpacked tree")
+                shutil.copyfile(s, target_dir / f, follow_symlinks=False)
+                os.chmod(target_dir / f, 0o644)
+        os.chmod(stage, 0o755)  # noqa: S103 — a directory of the site: nginx reads it
+    else:
+        copy_tree(ctx, src, stage)
+    tree = scan_tree(stage)
+    if tree.digest != plan["new"]["tree"]:
+        raise StepFailed("site_stage", "the staged tree is not the planned one")
+    fault(ctx, "site_stage")
+
+
+def step_swap(ctx: Ctx, plan: Mapping[str, Any], journal: dict[str, Any]) -> None:
+    docroot = ctx.host(str(plan["docroot"]))
+    stage = ctx.host(journal["stage"])
+    if not (docroot.exists() or docroot.is_symlink()):
+        journal["swap"] = "created"
+        save_journal(ctx, journal)
+        os.rename(stage, docroot)
+    else:
+        journal["swap"] = "exchanging"
+        save_journal(ctx, journal)
+        if exchange(ctx, stage, docroot):
+            journal["swap"] = "exchanged"
+            journal["old"] = journal["stage"]
+            journal["atomic"] = True
+        else:
+            journal["swap"] = "moving"
+            journal["old"] = journal["old_path"]
+            journal["atomic"] = False
+            save_journal(ctx, journal)
+            os.rename(docroot, ctx.host(journal["old_path"]))
+            journal["swap"] = "moved"
+            save_journal(ctx, journal)
+            os.rename(stage, docroot)
+            journal["swap"] = "renamed"
+    save_journal(ctx, journal)
+    fault(ctx, "site_swap")
+
+
+def step_env(ctx: Ctx, plan: Mapping[str, Any], journal: dict[str, Any]) -> bool:
+    spx = plan.get("spx") or {}
+    if not spx.get("changed"):
+        return False
+    path = ctx.host(ENV_FILE)
+    try:
+        st = os.stat(path)
+        before = path.read_bytes()
+    except OSError as exc:
+        raise StepFailed("site_env", f"{ENV_FILE}: {exc.strerror}") from None
+    backup = work_dir(ctx, int(plan["run"])) / "env.before"
+    write_file(ctx, backup, before, 0o600)
+    journal["env"] = {"backup": ctx.unroot(backup), "mode": stat.S_IMODE(st.st_mode), "uid": st.st_uid, "gid": st.st_gid}
+    save_journal(ctx, journal)
+    text = edit_env_text(before.decode("utf-8", errors="surrogateescape"), {POOL_KEY: ",".join(spx["after"])})
+    write_file(ctx, path, text.encode("utf-8", errors="surrogateescape"), stat.S_IMODE(st.st_mode), uid=st.st_uid, gid=st.st_gid)
+    fault(ctx, "site_env")
+    return True
+
+
+def rollback_journal(ctx: Ctx, journal: dict[str, Any]) -> list[str]:
+    """Undo whatever the journal says was done, newest first. Returns the errors."""
+    errors: list[str] = []
+    env = journal.get("env")
+    if isinstance(env, dict) and env.get("backup"):
+        try:
+            data = ctx.host(str(env["backup"])).read_bytes()
+            write_file(ctx, ctx.host(ENV_FILE), data, int(env.get("mode", 0o600)), uid=env.get("uid"), gid=env.get("gid"))
+            journal["env"] = None
+            save_journal(ctx, journal)
+        except OSError as exc:
+            errors.append(f".env not restored: {exc}")
+    if "state_before" in journal:
+        # commit had begun: state.json back as it was (no file: none again).
+        try:
+            before = journal["state_before"]
+            if before:
+                save_state(ctx, before)
+            else:
+                with contextlib.suppress(FileNotFoundError):
+                    fence(ctx, ctx.host(STATE_FILE))
+                    ctx.host(STATE_FILE).unlink()
+            del journal["state_before"]
+            save_journal(ctx, journal)
+        except OSError as exc:
+            errors.append(f"state.json not restored: {exc}")
+    docroot = ctx.host(str(journal["docroot"]))
+    stage = ctx.host(str(journal["stage"]))
+    old_at = journal.get("old_at")
+    try:
+        if old_at and journal.get("old") and old_at != journal["old"]:
+            # commit had kept the old tree already: bring it back next to the docroot first.
+            move_tree(ctx, ctx.host(old_at), ctx.host(journal["old"]))
+            journal["old_at"] = None
+            save_journal(ctx, journal)
+        swap = journal.get("swap")
+        if swap == "exchanged":
+            if not exchange(ctx, stage, docroot):
+                tmp = ctx.host(str(journal["old_path"]) + ".new")
+                os.rename(docroot, tmp)
+                os.rename(stage, docroot)
+                remove_tree(ctx, tmp)
+            else:
+                remove_tree(ctx, stage)
+        elif swap in ("renamed", "moved", "moving"):
+            old = ctx.host(str(journal["old_path"]))
+            if swap == "renamed":
+                os.rename(docroot, stage)
+            if old.exists():
+                os.rename(old, docroot)
+        elif swap == "created":
+            if docroot.exists():
+                os.rename(docroot, stage)
+        elif swap == "exchanging" and stage.exists():
+            # Killed in the very step: the exchange happened when the stage holds the OLD tree.
+            planned_new = journal.get("new_tree")
+            if planned_new and scan_tree(docroot).digest == planned_new:
+                if not exchange(ctx, stage, docroot):
+                    errors.append("cannot exchange back: no RENAME_EXCHANGE")
+        journal["swap"] = None
+        save_journal(ctx, journal)
+        if stage.exists() or stage.is_symlink():
+            remove_tree(ctx, stage)
+    except OSError as exc:
+        errors.append(f"the site not swapped back: {exc}")
+    return errors
+
+
+def cleanup_work(ctx: Ctx, run_id: int) -> None:
+    with contextlib.suppress(OSError):
+        remove_tree(ctx, work_dir(ctx, run_id))
+
+
+# --------------------------------------------------------------------------- #
+# Verbs
+# --------------------------------------------------------------------------- #
+def out(ctx: Ctx, result: Mapping[str, Any], text: str) -> None:
+    if ctx.json_out:
+        print(json.dumps(result, sort_keys=True), flush=True)
+    else:
+        print(text)
+
+
+def cmd_status(ctx: Ctx) -> int:
+    site, problems = discover(ctx)
+    state = load_state(ctx)
+    journal = load_journal(ctx)
+    result: dict[str, Any] = {"version": HELPER_VERSION, "problems": problems, "hy2": hy2_layout(ctx),
+                              "limits": {"archive": MAX_ARCHIVE_BYTES, "files": MAX_FILES, "bytes": MAX_TOTAL_BYTES,
+                                         "file": MAX_FILE_BYTES, "depth": MAX_DEPTH, "ext": sorted(STATIC_EXT),
+                                         "keep": KEEP_RELEASES},
+                              "journal": {"run": journal.get("run"), "state": journal.get("state")} if journal else None}
+    pool = parse_pool(read_env(ctx).get(POOL_KEY))
+    if site is not None:
+        tree = scan_tree(ctx.host(site.docroot)) if site.exists else Tree()
+        pages = tree.pages()
+        cur = current_record(state)
+        known = bool(cur) and bool(cur.get("tree"))
+        result.update(docroot=site.docroot, domain=site.domain, vhost=site.vhost, exists=site.exists)
+        result["current"] = {
+            **_tree_json(tree),
+            "deployed_at": cur.get("deployed_at") if known else None,
+            "run": cur.get("run") if known else None,
+            "source": cur.get("source") if known else "host",
+            "archive": cur.get("archive") if known else None,
+            "modified": known and cur.get("tree") != tree.digest,
+            "newest_mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(tree.newest)) if tree.newest else None,
+        }
+        result["pages"] = pages[:MAX_LISTED]
+        result["pages_total"] = len(pages)
+        missing = [p for p in pool if p not in set(pages)]
+        result["spx"] = {"enabled": bool(pool), "pool": pool, "missing": missing,
+                         "in_sync": bool(pool) and not missing and set(pool) == set(pool_for(pages))}
+    else:
+        result["spx"] = {"enabled": bool(pool), "pool": pool, "missing": [], "in_sync": False}
+    result["releases"] = [{k: r.get(k) for k in ("id", "tree", "pages", "files", "bytes", "kind", "stored_at",
+                                                    "deployed_at", "source")} for r in state.get("releases") or []]
+    target = revert_target(state)
+    result["revert_to"] = target["id"] if target else None
+    result["ok"] = site is not None and not problems
+    text = [f"site: {result.get('docroot', '?')} ({result.get('domain', '?')})"]
+    if "current" in result:
+        c = result["current"]
+        text.append(f"version: {str(c['tree'])[:12] or '?'} · {c['pages']} page(s), {c['files']} file(s) · "
+                    f"deployed {c['deployed_at'] or 'by hand'}")
+    text += [f"problem: {p}" for p in problems]
+    text.append(f"kept: {', '.join(r['id'] for r in result['releases']) or 'none'}")
+    out(ctx, result, "\n".join(text))
+    return EXIT_OK if result["ok"] else EXIT_REFUSED
+
+
+def plan_text(plan: Mapping[str, Any]) -> str:
+    lines = [f"{plan.get('action')} {plan.get('docroot', '?')} ({plan.get('domain', '?')}) · plan {str(plan.get('sha256'))[:12]}"]
+    for b in plan.get("blocking") or []:
+        lines.append(f"⛔ {b}")
+    return "\n".join(lines)
+
+
+def prune_work(ctx: Ctx, keep_run: int) -> None:
+    """The directories of earlier runs: one run at a time holds the wizard's lock, so a
+    plan that was cancelled or expired left its unpacked archive behind — never the one of
+    an unfinished journal (recover takes it)."""
+    base = ctx.host(WORK_DIR)
+    if not base.is_dir() or base.is_symlink():
+        return
+    journal = load_journal(ctx)
+    open_run = journal.get("run") if journal.get("state") not in ("committed", "rolled_back", "recovered") else None
+    for entry in base.iterdir():
+        if entry.name.isdigit() and int(entry.name) not in (keep_run, open_run):
+            with contextlib.suppress(OSError):
+                remove_tree(ctx, entry)
+
+
+def cmd_plan(ctx: Ctx, run_id: int, action: str, digest: str) -> int:
+    with helper_lock(ctx):
+        prune_work(ctx, run_id)
+        cleanup_work(ctx, run_id)
+        try:
+            plan = make_plan(ctx, run_id, action, digest=digest, fresh_upload=action == "deploy")
+        except Refused:
+            cleanup_work(ctx, run_id)
+            raise
+        if plan["blocking"] or plan["nothing_to_do"]:
+            # Nothing will be applied: the unpacked archive goes now.
+            cleanup_work(ctx, run_id)
+        else:
+            work = work_dir(ctx, run_id)
+            ensure_dir(ctx, ctx.host(STATE_DIR), 0o755)
+            ensure_dir(ctx, ctx.host(WORK_DIR), 0o700)
+            ensure_dir(ctx, work, 0o700)
+            write_file(ctx, work / "plan.json", json.dumps(plan, sort_keys=True).encode(), 0o600)
+    out(ctx, plan, plan_text(plan))
+    return EXIT_REFUSED if plan["blocking"] else EXIT_OK
+
+
+def cmd_apply(ctx: Ctx, run_id: int, expect: str) -> int:
+    if not _SHA_RE.match(expect):
+        raise Refused("--expect-plan must be the plan's sha256")
+    with helper_lock(ctx):
+        saved = load_json(work_dir(ctx, run_id) / "plan.json")
+        if not saved:
+            raise Refused("no plan of this run — plan it first")
+        new = saved.get("new") or {}
+        digest = str(new.get("archive") or "")[:16] if saved.get("action") == "deploy" else ""
+        plan = make_plan(ctx, run_id, str(saved.get("action")), digest=digest)
+        if plan["blocking"]:
+            out(ctx, {"ok": False, "error": "blocked", "blocking": plan["blocking"]}, "\n".join(plan["blocking"]))
+            return EXIT_REFUSED
+        if plan["sha256"] != expect:
+            out(ctx, {"ok": False, "error": "plan_changed", "detail": "the site, the archive or the pool changed since the plan"},
+                "the plan changed: nothing was done — plan it again")
+            return EXIT_REFUSED
+        if plan["nothing_to_do"]:
+            out(ctx, {"ok": True, "nothing_to_do": True}, "nothing to do: the site already is this version")
+            return EXIT_OK
+        site = Site(docroot=plan["docroot"], domain=plan["domain"], vhost=plan["vhost"], exists=plan["current"]["exists"])
+        stage, old_path = stage_paths(site, run_id)
+        journal: dict[str, Any] = {"run": run_id, "action": plan["action"], "state": "applying", "docroot": plan["docroot"],
+                                   "stage": stage, "old_path": old_path, "old": None, "old_at": None, "swap": None,
+                                   "env": None, "new_tree": plan["new"]["tree"], "started": iso_now()}
+        save_journal(ctx, journal)
+        current_step = ""
+        env_changed = False
+        try:
+            for name in APPLY_STEPS:
+                current_step = name
+                ctx.event(event="step", step=name, state="run")
+                if name == "site_stage":
+                    step_stage(ctx, plan, journal)
+                elif name == "site_swap":
+                    step_swap(ctx, plan, journal)
+                else:
+                    env_changed = step_env(ctx, plan, journal)
+                ctx.event(event="step", step=name, state="ok" if name != "site_env" or env_changed else "skip")
+        except (StepFailed, OSError, Refused, Cannot) as exc:
+            ctx.event(event="step", step=current_step, state="fail")
+            detail = str(exc)
+            ctx.log(f"apply: {current_step} failed: {detail}")
+            errors = rollback_journal(ctx, journal)
+            journal["state"] = "rolled_back" if not errors else "rollback_failed"
+            journal["errors"] = errors
+            save_journal(ctx, journal)
+            if not errors:
+                cleanup_work(ctx, run_id)
+            out(ctx, {"ok": False, "error": "step_failed", "failed_step": current_step, "detail": detail,
+                      "rollback_errors": errors}, f"{current_step} failed: {detail}; rolled back"
+                + (f" INCOMPLETELY: {'; '.join(errors)}" if errors else ""))
+            return EXIT_ROLLED_BACK if not errors else EXIT_ROLLBACK_FAILED
+        journal["state"] = "applied"
+        save_journal(ctx, journal)
+    out(ctx, {"ok": True, "atomic": journal.get("atomic", True), "env_changed": env_changed, "docroot": plan["docroot"],
+              "tree": plan["new"]["tree"], "pool": plan["spx"]["after"] if env_changed else None},
+        f"the site is {plan['new']['tree'][:12]} ({'one atomic exchange' if journal.get('atomic', True) else 'two renames'})")
+    return EXIT_OK
+
+
+def cmd_verify(ctx: Ctx, run_id: int) -> int:
+    plan = load_json(work_dir(ctx, run_id) / "plan.json")
+    if not plan:
+        raise Refused("no plan of this run")
+    journal = load_journal(ctx)
+    checks: list[Check] = []
+    docroot = ctx.host(str(plan["docroot"]))
+    tree = scan_tree(docroot)
+    checks.append(Check("tree", tree.digest == plan["new"]["tree"],
+                        f"{plan['docroot']} is {tree.digest[:12] or '?'}" + ("" if tree.digest == plan["new"]["tree"]
+                                                                            else f", the plan's is {plan['new']['tree'][:12]}")))
+    checks.append(check_nginx(ctx))
+    checks.append(check_tls(ctx, str(plan["domain"])))
+    pages = tree.pages()
+    if "/" not in pages:
+        checks.append(Check("page:/", False, "the site has no index.html"))
+    checks += check_pages(ctx, str(plan["domain"]), pages)
+    spx = plan.get("spx") or {}
+    if spx.get("changed"):
+        now = parse_pool(read_env(ctx).get(POOL_KEY))
+        checks.append(Check("spx_pool", now == list(spx["after"]),
+                            f"{POOL_KEY}: {len(now)} path(s) of the new site" if now == list(spx["after"])
+                            else f"{POOL_KEY} is not the planned pool"))
+    ok = all(c.ok for c in checks)
+    out(ctx, {"ok": ok, "checks": [c.as_json() for c in checks], "journal": journal.get("state")},
+        "\n".join(f"{'ok ' if c.ok else 'FAIL'} {c.key}: {c.text}" for c in checks))
+    return EXIT_OK if ok else EXIT_VERIFY
+
+
+def prune(ctx: Ctx, state: dict[str, Any]) -> list[str]:
+    releases = list(state.get("releases") or [])
+    dropped = []
+    while len(releases) > KEEP_RELEASES:
+        rel = releases.pop(0)
+        with contextlib.suppress(OSError):
+            remove_tree(ctx, ctx.host(f"{RELEASES_DIR}/{rel['id']}"))
+        dropped.append(str(rel["id"]))
+    state["releases"] = releases
+    return dropped
+
+
+def cmd_commit(ctx: Ctx, run_id: int) -> int:
+    with helper_lock(ctx):
+        journal = load_journal(ctx)
+        if journal.get("run") != run_id or journal.get("state") not in ("applied", "committing"):
+            raise Refused(f"no applied change of run #{run_id} to commit (journal: {journal.get('state') or 'none'})")
+        plan = load_json(work_dir(ctx, run_id) / "plan.json")
+        if not plan:
+            raise Refused("no plan of this run")
+        state = load_state(ctx)
+        journal["state"] = "committing"
+        journal["state_before"] = load_json(ctx.host(STATE_FILE))
+        save_journal(ctx, journal)
+        warnings: list[str] = []
+        now = iso_now()
+        old = journal.get("old")
+        cur = plan["current"]
+        prior = current_record(state)
+        if old and ctx.host(old).is_dir():
+            ensure_dir(ctx, ctx.host(RELEASES_DIR), 0o700)
+            rid = str(plan.get("release_id") or f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{'0' * 12}")
+            target = ctx.host(f"{RELEASES_DIR}/{rid}")
+            if target.exists():
+                rid = f"{rid[:-12]}{hashlib.sha256((rid + now).encode()).hexdigest()[:12]}"
+                target = ctx.host(f"{RELEASES_DIR}/{rid}")
+            move_tree(ctx, ctx.host(old), target)
+            journal["old_at"] = ctx.unroot(target)
+            save_journal(ctx, journal)
+            entry = {"id": rid, "tree": cur["tree"], "pages": cur["pages"], "files": cur["files"], "bytes": cur["bytes"],
+                     "kind": "previous" if plan["action"] == "deploy" else "rolled_back", "stored_at": now,
+                     "deployed_at": prior.get("deployed_at") if cur.get("known") else None,
+                     "archive": prior.get("archive") if cur.get("known") else None,
+                     "source": (prior.get("source") or "bot") if cur.get("known") else "host"}
+            state["releases"] = [*state.get("releases", []), entry]
+        taken = (plan.get("new") or {}).get("release")
+        if taken:
+            state["releases"] = [r for r in state.get("releases", []) if r.get("id") != taken]
+        new = plan["new"]
+        state["current"] = {"tree": new["tree"], "pages": new["pages"], "files": new["files"], "bytes": new["bytes"],
+                            "deployed_at": now, "run": run_id, "source": new.get("source"),
+                            "archive": new.get("archive"), "release": taken}
+        state["docroot"] = plan["docroot"]
+        state["version"] = HELPER_VERSION
+        fault(ctx, "commit")
+        save_state(ctx, state)
+        journal["state"] = "committed"
+        journal["committed"] = now
+        journal.pop("state_before", None)
+        save_journal(ctx, journal)
+        # Past the point of no return: only tidying (a failure is a warning, the site stands).
+        if taken:
+            try:
+                remove_tree(ctx, ctx.host(f"{RELEASES_DIR}/{taken}"))
+            except OSError as exc:
+                warnings.append(f"the kept copy {taken} could not be removed: {exc}")
+        dropped = prune(ctx, state)
+        if dropped:
+            try:
+                save_state(ctx, state)
+            except OSError as exc:
+                warnings.append(f"state.json after the prune: {exc}")
+        cleanup_work(ctx, run_id)
+    spx = plan.get("spx") or {}
+    out(ctx, {"ok": True, "kept": journal.get("old_at"), "dropped": dropped, "warnings": warnings,
+              "pool_changed": bool(spx.get("changed")), "pool": spx.get("after") if spx.get("changed") else None},
+        f"committed; kept {journal.get('old_at') or 'nothing'}; dropped {', '.join(dropped) or 'nothing'}")
+    return EXIT_OK
+
+
+def cmd_rollback(ctx: Ctx, run_id: int | None) -> int:
+    with helper_lock(ctx):
+        journal = load_journal(ctx)
+        if not journal or (run_id is not None and journal.get("run") != run_id) or \
+                journal.get("state") in ("committed", "rolled_back", "recovered"):
+            if run_id is not None:
+                cleanup_work(ctx, run_id)
+            out(ctx, {"ok": True, "nothing_to_do": True, "journal": journal.get("state")}, "nothing to roll back")
+            return EXIT_OK
+        errors = rollback_journal(ctx, journal)
+        journal["state"] = ("rolled_back" if run_id is not None else "recovered") if not errors else "rollback_failed"
+        journal["errors"] = errors
+        save_journal(ctx, journal)
+        if not errors:
+            cleanup_work(ctx, int(journal.get("run") or 0))
+    out(ctx, {"ok": not errors, "rollback_errors": errors, "run": journal.get("run")},
+        "rolled back" if not errors else "rollback incomplete: " + "; ".join(errors))
+    return EXIT_OK if not errors else EXIT_ROLLBACK_FAILED
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="vpn-bot-site", add_help=True)
+    sub = p.add_subparsers(dest="verb", required=True)
+
+    def run_arg(sp: argparse.ArgumentParser, required: bool = True) -> None:
+        sp.add_argument("--run", type=int, required=required)
+
+    s = sub.add_parser("status")
+    s.add_argument("--json", action="store_true")
+    s = sub.add_parser("plan")
+    s.add_argument("action", choices=("deploy", "revert"))
+    run_arg(s)
+    s.add_argument("--digest", default="")
+    s.add_argument("--json", action="store_true")
+    s = sub.add_parser("apply")
+    run_arg(s)
+    s.add_argument("--expect-plan", required=True)
+    s.add_argument("--json", action="store_true")
+    for verb in ("verify", "commit", "rollback"):
+        s = sub.add_parser(verb)
+        run_arg(s)
+        s.add_argument("--json", action="store_true")
+    s = sub.add_parser("recover")
+    s.add_argument("--json", action="store_true")
+    ns = p.parse_args(list(argv))
+    run_id = getattr(ns, "run", None)
+    if run_id is not None and not 0 < run_id < 10**9:
+        p.error("--run must be a positive integer")
+    return ns
+
+
+def main(argv: Sequence[str]) -> int:
+    try:
+        ns = parse_args(argv)
+    except SystemExit as exc:
+        return EXIT_USAGE if exc.code else EXIT_OK
+    ctx: Ctx | None = None
+    try:
+        if os.geteuid() != 0 and not SELFTEST:
+            raise Refused("run as root")
+        c = ctx = make_ctx(bool(getattr(ns, "json", False)))
+        handlers: dict[str, Callable[[], int]] = {
+            "status": lambda: cmd_status(c),
+            "plan": lambda: cmd_plan(c, ns.run, ns.action, ns.digest),
+            "apply": lambda: cmd_apply(c, ns.run, ns.expect_plan),
+            "verify": lambda: cmd_verify(c, ns.run),
+            "commit": lambda: cmd_commit(c, ns.run),
+            "rollback": lambda: cmd_rollback(c, ns.run),
+            "recover": lambda: cmd_rollback(c, None),
+        }
+        c.log(f"--- vpn-bot-site {' '.join(argv)}")
+        return handlers[ns.verb]()
+    except Refused as exc:
+        return _fail(ctx, EXIT_REFUSED, "refused", str(exc))
+    except Cannot as exc:
+        return _fail(ctx, EXIT_CANNOT, "cannot", str(exc))
+    except OSError as exc:
+        return _fail(ctx, EXIT_CANNOT, "cannot", f"{exc.strerror or exc}: {exc.filename or ''}".rstrip(": "))
+
+
+def _fail(ctx: Ctx | None, code: int, kind: str, detail: str) -> int:
+    if ctx is not None:
+        ctx.log(f"{kind}: {detail}")
+        if ctx.json_out:
+            print(json.dumps({"ok": False, "error": kind, "detail": redact(detail), "blocking": [redact(detail)]}), flush=True)
+            return code
+    print(f"vpn-bot-site: {kind}: {redact(detail)}", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

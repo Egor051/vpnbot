@@ -14,6 +14,7 @@ from repositories._helpers import _clamp_limit, _clamp_offset, enum_value, json_
 from repositories.traffic_scope import CURRENT_KEYS, TrafficScope, traffic_rows_query
 from services.errors import InvalidTransition
 from services.relay import RelayUnavailable
+from utils.spider_x import pick_spider_x
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +371,41 @@ class VpnKeyRepository:
             (key_id,),
         )
         return await cursor.fetchone() is not None
+
+    async def relayout_spider_x(self, pool: tuple[str, ...], now: str) -> int:
+        """Give every xray key whose STORED spiderX is not in *pool* the pick a fresh key
+        would get from it (``utils.spider_x.pick_spider_x``: SHA-256 of the UUID), in one
+        transaction; the number of keys changed.
+
+        The explicit step of «🌐 Сайт» after the pool followed a new site (docs/site.md) —
+        NOT the every-start backfill, which only ever fills a NULL (an assigned value is
+        never overwritten there: tests/test_schema_upgrade_row_fidelity.py). A key whose
+        value is still in the pool keeps it (its link does not change), a NULL stays NULL
+        (the backfill's), an empty pool changes nothing (spx is off).
+        """
+        if not pool:
+            return 0
+        keep = set(pool)
+        changed = 0
+        async with self.db.transaction():
+            cursor = await self.db.conn.execute(
+                "SELECT id, uuid, payload_json, spider_x FROM vpn_keys "
+                "WHERE key_type = ? AND spider_x IS NOT NULL",
+                (VpnKeyType.XRAY.value,),
+            )
+            for row in await cursor.fetchall():
+                if row["spider_x"] in keep:
+                    continue
+                uuid_value = str(row["uuid"] or _json_loads(row["payload_json"]).get("uuid") or "").strip()
+                value = pick_spider_x(uuid_value, pool) if uuid_value else None
+                if value is None or value == row["spider_x"]:
+                    continue
+                await self.db.conn.execute(
+                    "UPDATE vpn_keys SET spider_x = ?, updated_at = ? WHERE id = ?",
+                    (value, now, int(row["id"])),
+                )
+                changed += 1
+        return changed
 
     async def count_by_owner_and_type(self, owner_user_id: int, key_type: VpnKeyType) -> int:
         """Return the number of non-deleted keys owned by a user of the given type."""

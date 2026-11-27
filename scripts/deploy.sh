@@ -506,6 +506,7 @@ OUT_OF_REPO_HELPERS=(
   "scripts/wizard/vpn-bot-wizard-update|/usr/local/sbin/vpn-bot-wizard-update|required"
   "scripts/wizard/vpn-bot-wizard-cert|/usr/local/sbin/vpn-bot-wizard-cert|required"
   "scripts/wizard/vpn-bot-wizard-protocol|/usr/local/sbin/vpn-bot-wizard-protocol|required"
+  "scripts/wizard/vpn-bot-wizard-site|/usr/local/sbin/vpn-bot-wizard-site|required"
   # The bot's TLS certificate (docs/certificate.md): the registry of its readers and THE
   # reloadcmd acme.sh calls after a renewal (`vpn-bot-cert deploy`, once the domain is
   # adopted), the `cert` wizard mode's worker and the bot's status (sudo, exact grant
@@ -518,6 +519,12 @@ OUT_OF_REPO_HELPERS=(
   # granted to the bot — and it must be on every main host the wizard may install on, so
   # `required`. A relay installs no protocol.
   "scripts/vpn-bot-protocol-install|/usr/local/sbin/vpn-bot-protocol-install|required"
+  # The decoy site behind the REALITY self-steal and the Hysteria2 masquerade (docs/site.md):
+  # the worker of the `site` wizard mode (an uploaded archive or a kept version, swapped
+  # atomically; nginx's configuration and the certificate only read) and the bot's view of
+  # the site (sudo, exact grant `status --json`) — `required` on main: «🌐 Сайт» is on
+  # every main host. A relay serves no site.
+  "scripts/vpn-bot-site|/usr/local/sbin/vpn-bot-site|required"
   # The emergency TOTP reset (docs/wizard.md#emergency-reset): a root CLI for the day the
   # phone AND the backup codes are gone — it has to be on the host BEFORE that day.
   "scripts/vpn-bot-totp-reset|/usr/local/sbin/vpn-bot-totp-reset|required"

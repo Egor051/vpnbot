@@ -8,6 +8,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **«🧙 Мастер настройки → 🌐 Сайт»: the decoy site is deployed from the bot** (docs/site.md),
+  instead of a script run by hand. The site is the static tree nginx serves on 127.0.0.1:8443: the
+  REALITY self-steal target, and through Hysteria2's `masquerade.type: proxy` the same site on UDP.
+  The screen shows the docroot and the domain, the live version (its tree's sha256, when and by which
+  run it was deployed, or that it was put there by hand), pages, files, size, the kept versions and
+  whether `XRAY_SPIDER_X_POOL` names pages of the site. It has three buttons: «⬆️ Загрузить архив»
+  (TOTP, then a zip / tar.gz as a document), «↩️ Откатить на предыдущую» and «📄 Список страниц».
+  Each change is a run of the new wizard mode `site` (`scripts/wizard/vpn-bot-wizard-site`): the
+  plan with the diff first, TOTP before the plan and before apply, then apply → verify → rollback.
+  - **The root helper `scripts/vpn-bot-site`** (`OUT_OF_REPO_HELPERS` required on main,
+    `INSTALL_HELPERS`; the sudoers example grants the bot exactly `status --json`) has the verbs
+    `status | plan deploy|revert | apply --expect-plan | verify | commit | rollback | recover`. The
+    docroot is the `root` of the nginx vhost that listens on 127.0.0.1:8443 (`/var/www/selfsteal`
+    from the protocol install, `/var/www/anycastedge` on a host set up by hand). It must be one
+    literal directory below `/var/www/` with a root-owned parent; anything else is refused. The
+    nginx configuration and the certificate are only read; nginx is not reloaded.
+  - **The archive is unpacked as root in isolation** (`/var/lib/vpn-bot-site/work/<run>/`, 0700),
+    and every entry is checked before anything reaches the site. Refused: a symlink, a hard link, a
+    device / FIFO / sparse / encrypted member, an absolute path, `..`, a backslash, a hidden name,
+    a non-static file (allowed are html / css / js / images / fonts / xml / txt), more than 1000
+    files, 16 MiB per file or 64 MiB unpacked (counted while reading, so a decompression bomb is
+    cut off), a name twice, a missing `index.html`. One wrapping folder is unwrapped, and macOS
+    junk is skipped. Files are written 0644 and directories 0755, `root:root`. The bot stages the
+    document in its RuntimeDirectory; the plan takes it with `O_NOFOLLOW` only when its sha256
+    starts with the run's `digest` (new parameter kind in both mode tables: 16 hex, because a
+    whole sha256 is masked by every redaction).
+  - **The swap is atomic.** The new tree is written next to the docroot, then
+    `renameat2(RENAME_EXCHANGE)` swaps the two directories (two renames on a filesystem without
+    it, and the result says so). The replaced tree is kept, the last five (`releases/`). A revert
+    brings the newest kept version back and keeps the reverted one. Verify checks that the tree
+    is the plan's, ALPN h2 and the domain's certificate, and that `GET /` and every page answer
+    200 over HTTP/2 through nginx. Any failed step, a failed verify or a failed commit puts the
+    old tree, `.env` and `state.json` back. The plan checks the self-steal **before** the change,
+    and a broken certificate blocks it. An apply whose unit was killed is rolled back by the next
+    run's plan (`recover`). No step touches the network, so no dead-man is armed.
+  - **The spiderX pool follows the site.** While `XRAY_SPIDER_X_POOL` is in use, a deploy sets it
+    to the new site's pages (`/`, `*.html`, `dir/`; at most 64), so a path the site no longer has
+    leaves the pool. An empty pool stays empty. When it changed, vpn-bot-subscription and the bot
+    restart to read it. After the run the bot re-lays the xray keys whose **stored** spx left the
+    pool, with the pick a fresh key gets (`VpnKeyRepository.relayout_spider_x`; audit
+    `site_spider_x_relayout`). The plan counts them by reading the database read-only. The
+    every-start backfill is unchanged: it fills NULLs only and never overwrites.
+
 - **«🧭 Первичная настройка»** (docs/first-setup.md): after the claim, a host with no protocol is
   offered the first setup — domain (it must resolve here) → the bot's Cloudflare token (checked
   before it is stored, the message deleted at once) → the A record through the bot's DNS when the

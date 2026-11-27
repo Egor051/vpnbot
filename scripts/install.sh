@@ -130,8 +130,10 @@ INSTALL_HELPERS=(
   scripts/wizard/vpn-bot-wizard-update
   scripts/wizard/vpn-bot-wizard-cert
   scripts/wizard/vpn-bot-wizard-protocol
+  scripts/wizard/vpn-bot-wizard-site
   scripts/vpn-bot-cert
   scripts/vpn-bot-protocol-install
+  scripts/vpn-bot-site
   scripts/vpn-bot-totp-reset
   # The first setup from the bot (docs/first-setup.md) converges the firewall and the
   # self-check reads the host checks: every `required` main helper is on a fresh host.
